@@ -1,8 +1,17 @@
 # nxrt
 
-**The shared runtime for Nintendo Switch static recompilations.** A recomp built on nxrt contains only what is
-unique to its game. nxrt provides everything games have in common: running the recompiled code, the Switch system
-around it, the graphics, and the app the player sees (start screen, menu, settings, saves, controls, mods).
+**A runtime library for Nintendo Switch static recompilations.** You bring a game: its recompiled code, its identity,
+and whatever only that game needs. nxrt brings everything every recomp needs — running the recompiled code, the Switch
+system around it (kernel, IPC, the Horizon OS services), the graphics (NVN translated to Metal or Vulkan), and the app
+the player sees: start screen, menu, settings, saves, controls, mods.
+
+It is consumed as source. Vendor `nxrt/` into your project, include `nxrt/nxrt.mk` from your game's Makefile, and
+implement one `nx_game` descriptor ([nxgame.h](nxrt/runtime/nxgame.h)). The contract — build variables, what ships to
+players, when their game code is rebuilt — is [docs/INTEGRATING.md](docs/INTEGRATING.md), and the three-file starting
+point is [`examples/game-template`](examples/game-template). A runtime with its own renderer can take just the five UI
+layers instead (`nx.mk`, as [`examples/ui-host`](examples/ui-host) does).
+
+## Built with nxrt
 
 | Port | From | Status on nxrt |
 |---|---|---|
@@ -157,7 +166,8 @@ nxrt/
   nx.mk / nxrt.mk                        build rules: the layers / nx-runtime + a game
 games/       your ports (las, sky, eow locally: not part of this repository)
 examples/    game-template (the starting point), ui-host (the five layers on their own)
-docs/        ARCHITECTURE.md (shared vs per game, the recompiler, rebuilds, boot), NEW_GAME.md (a game from scratch),
+docs/        INTEGRATING.md (the library contract), ARCHITECTURE.md (layers, the recompiler, rebuilds, boot),
+             NEW_GAME.md (a game from scratch),
              PORTING.md (merge notes, behaviour changes, verification), KICKOFF_PROMPT.md
 ```
 
