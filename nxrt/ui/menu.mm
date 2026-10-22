@@ -344,7 +344,7 @@ static int g_focus_frames;
 // The start screen's Settings opening: the controller's cursor starts on the first tab the first time in a session,
 // later on the tab that's selected
 void menu_tabs_focus(bool first_tab) { g_focus_tab = first_tab ? -1 : -100, g_focus_frames = 0; }
-int g_tab_request_ext = -1;
+int g_tab_request_ext = -2;  // (-2: no request; -1 asks for Prelaunch, which has no id of its own)
 
 static void style_init(void) {
     ImGuiStyle &s = ImGui::GetStyle();
@@ -725,7 +725,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     if (!tabs[cur].on) cur = 0;
     // L/R (or Q/E) switch tabs, skipping greyed-out ones (not while typing: Q / E are letters then, and the on-screen
     // keyboard has the controller)
-    if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
+    if (g_tab_request_ext != -2) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -2; }
     for (int i = 0; i < g_npages; i++)  // (a game page's id: the game's tab, on that page)
         if (g_tab_request == g_pages[i]->id) g_page_request = g_tab_request, g_tab_request = GAME_TAB_ID;
     bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();

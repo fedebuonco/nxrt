@@ -36,6 +36,9 @@ once and put behind the `nxgame.h` interface. A game folder now holds only what 
   yet" and Set up rebuilds it in place (about 5 minutes, from the files already there).
 - LAS's six menu tabs are now pages inside one "Link's Awakening" tab; "360-degree movement", "Remove blur" and "Hide
   Hero Mode icon" moved to its Gameplay page. New system tabs: Saves, Mods.
+- **The start screen has the same items in every game**: PLAY, SETTINGS, SETUP GAME FILES, EXIT. Setting the game files
+  up and managing them is one page — Settings' Prelaunch tab — and SETUP GAME FILES goes straight to it, instead of a
+  separate window.
 - Settings keys are written in section order (runtime, game, input, UI). Keys and values are unchanged, so an upstream
   settings file survives load → save.
 - Environment variables are `NXRT_*` (upstream: `LARECOMP_*`); the generator helper is `nxgen`.

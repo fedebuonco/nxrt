@@ -243,7 +243,7 @@ static void set_job(const std::string &s, bool failed = false, const std::string
     pthread_mutex_unlock(&g_lock);
 }
 
-// Setup failures: a short headline and what to do next (also NXRT_LAUNCHER_SHOT=<f>:fail<1-6>, screenshots)
+// Setup failures: a short headline and what to do next (also NXRT_LAUNCHER_SHOT=<f>:fail<1-8>, screenshots)
 enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD, FAIL_IN_PLACE, FAIL_WRITE };
 static void set_failure(int k) {
     static const char *const head[] = {"", "No game files found in that folder", "Those files can't be used",
@@ -617,6 +617,24 @@ static void reveal_folder(const std::string &dir) {
 }
 
 static bool g_files_deleted;  // set here: the start screen goes back to setting the game files up (files_deleted)
+static std::string g_src_desc, g_setup_desc;  // the Game Files rows' explanations (the game's name and version: nxui_init)
+
+// (defined with the rest of the game-files callbacks, below)
+static bool files_busy(void);
+static float files_progress(void);
+static bool files_copied(void);
+static void files_pick(const char *folder);
+static void files_picked(char *out, size_t cap);
+static void files_job(char *line, size_t n, char *hint, size_t hn, bool *failed);
+static void files_start(void);
+static bool files_remove(void);
+static double files_size_gb(void);
+static void setup_rows(float scale, bool busy);
+
+static void SDLCALL picked_source(void *, const char *const *files, int) {
+    if (files && files[0]) files_pick(files[0]);
+}
+
 static void prelaunch_tab(float sc) {
     const ImVec4 gold(0.93f, 0.76f, 0.33f, 1);
     auto heading = [&](const char *t) {
@@ -626,7 +644,26 @@ static void prelaunch_tab(float sc) {
         ImGui::Separator();
         ImGui::Spacing();
     };
+    char srcb[1100] = "", jobb[400] = "", hintb[400] = "";
+    bool failed = false;
+    files_picked(srcb, sizeof srcb);
+    files_job(jobb, sizeof jobb, hintb, sizeof hintb, &failed);
+    std::string src = srcb, job = jobb, hint = hintb;
+    const bool busy = files_busy();
+    const std::string status = check_game_files(g_root);
     heading("Game files");
+    opt_begin("##gfiles", sc);  // (the rows column, with each row's explanation beside it: the same as the system tabs)
+    if (!status.empty() || busy) {  // not set up yet (or setting up now): the Game Files page's own rows
+        opt_section("Your copy of the game");
+        if (busy) opt_disable_next();
+        if (opt_action("Game files folder", src.empty() ? "Choose..." : "Selected", g_src_desc.c_str(), true))
+            SDL_ShowOpenFolderDialog(picked_source, NULL, ui_window(), NULL, false);
+        setup_rows(sc, busy);
+        opt_section("Set up");
+        if (busy || (src.empty() && !files_copied())) opt_disable_next();
+        if (opt_action("Set up game files", busy ? "Working..." : "", g_setup_desc.c_str(), true) && !busy) files_start();
+        if (busy) ImGui::ProgressBar(files_progress(), ImVec2(-1, 0));
+    } else {
     {   // where they are kept (the Game Files page's "Keep the game")
         std::string where = is_abs(g_root) ? g_root : std::string(rt_data_root()) + "/" + g_root;
         ImGui::PushTextWrapPos(0);
@@ -672,6 +709,15 @@ static void prelaunch_tab(float sc) {
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
+    }  // (set up: what's there and how to free it)
+    if (!job.empty()) {  // the step that ran / its result (the same line the start screen showed)
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextColored(failed ? ImVec4(1, 0.5f, 0.4f, 1) : busy ? ImVec4(0.93f, 0.76f, 0.33f, 1)
+                                  : ImVec4(0.45f, 0.95f, 0.55f, 1), "%s", job.c_str());
+        if (failed && !hint.empty()) ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "%s", hint.c_str());
+        ImGui::PopTextWrapPos();
+    }
     ImGui::Spacing();
     ImGui::Spacing();
     heading("Game font");
@@ -691,6 +737,7 @@ static void prelaunch_tab(float sc) {
         ImGui::SameLine();
         if (ImGui::Button("Use substitute font")) remove_fonts();
     }
+    opt_end();
 }
 
 
@@ -906,11 +953,11 @@ extern "C" void rt_ui_register(void) {
     if (NX_HOOK(menu_opened)) nxui_on_menu_open(NX_HOOK(menu_opened));
     nxui_set_quit_to_start(quit_to_start);
 
-    static std::string src_desc = std::string("The folder with your own game folders (exefs/romfs), or its .nsp / .xci with your prod.keys beside it, of ") + nx_game.info.game_name +
-                                  " for Nintendo Switch, version " + nx_game.info.game_version + ". The game isn't included with " +
-                                  nx_game.info.title + ".";
-    static std::string setup_desc = std::string("Copies the game files ") + nx_game.info.title + " needs and recompiles the game "
-                                    "from them. This only needs to be done once and may take a while. Your own files aren't changed.";
+    g_src_desc = std::string("The folder with your own game folders (exefs/romfs), or its .nsp / .xci with your prod.keys beside it, of ") + nx_game.info.game_name +
+                 " for Nintendo Switch, version " + nx_game.info.game_version + ". The game isn't included with " +
+                 nx_game.info.title + ".";
+    g_setup_desc = std::string("Copies the game files ") + nx_game.info.title + " needs and recompiles the game "
+                   "from them. This only needs to be done once and may take a while. Your own files aren't changed.";
     static std::string ready = std::string("Nintendo Switch  \xc2\xb7  v") + nx_game.info.game_version;
     NxUiGameFiles g = {};
     g.status = files_status, g.copied = files_copied, g.busy = files_busy, g.progress = files_progress;
@@ -918,7 +965,7 @@ extern "C" void rt_ui_register(void) {
     g.picked = files_picked, g.start = files_start, g.size_gb = files_size_gb, g.remove = files_remove;
     g.background = load_background, g.prelaunch = prelaunch_tab, g.files_deleted = files_deleted;
     g.setup_rows = setup_rows;
-    g.source_desc = src_desc.c_str(), g.setup_desc = setup_desc.c_str(), g.ready_note = ready.c_str();
+    g.source_desc = g_src_desc.c_str(), g.setup_desc = g_setup_desc.c_str(), g.ready_note = ready.c_str();
     g.test_fail = set_failure, g.test_extract = files_test_extract;
     nxui_set_game_files(&g);
     NxUiProfiles p = {NX_HOOK(profiles_list), NX_HOOK(profile_get), NX_HOOK(profile_set), NX_HOOK(profile_label)};

@@ -55,7 +55,6 @@ static bool files_busy(void) { return g_files.busy && g_files.busy(); }
 static void set_job(const std::string &s, bool failed = false, const std::string &hint = "") {
     if (g_files.set_job) g_files.set_job(s.c_str(), failed, hint.c_str());
 }
-static bool g_confirm_delete;       // game-files page: "Delete the game files?" shown
 static bool file_exists(const std::string &p) {
     struct stat st;
     return stat(p.c_str(), &st) == 0;
@@ -174,7 +173,7 @@ static void profile_choose(const std::string &p) { if (g_profiles.set) g_profile
 
 // ------------------------------------------------------------------ screen
 static ImFont *g_font_title, *g_font_menu, *g_font_small;
-enum Page { MAIN, SETTINGS, SETUP };  // SETTINGS: the in-game menu's tabs (runtime/ui/menu.mm)
+enum Page { MAIN, SETTINGS };  // SETTINGS: the in-game menu's tabs (runtime/ui/menu.mm), its Prelaunch tab for the game files
 static int g_refocus = MAIN;  // back on the main page: select the item of the page we came from (controllers)
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
@@ -439,17 +438,19 @@ extern "C" void launcher_run(void) {
     int choice = 0;
     for (size_t i = 0; i < seeds.size(); i++)
         if (seeds[i] == profile_now()) choice = (int)i + 1;
-    Page page = status.empty() ? MAIN : SETUP;
+    Page page = MAIN;  // (the game files are Settings' Prelaunch tab; PLAY stays disabled until they're ready)
     bool play = false;
-    // NXRT_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] / askdelete / setup
+    // NXRT_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] /
+    // askdelete / setup / fail<1-8> (all of them: Settings' Prelaunch tab, where the game files live)
     long shot_at = getenv("NXRT_LAUNCHER_SHOT") ? atol(getenv("NXRT_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {
         const char *pg = strchr(getenv("NXRT_LAUNCHER_SHOT"), ':');
         if (pg && (!strncmp(pg + 1, "settings", 8) || !strcmp(pg + 1, "askdelete"))) page = SETTINGS, menu_tabs_focus(true);
-        if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
-        if (pg && !strncmp(pg + 1, "fail", 4) && g_files.test_fail) page = SETUP, g_files.test_fail(atoi(pg + 5));  // (the failure messages)
+        if (pg && !strcmp(pg + 1, "setup")) page = SETTINGS, menu_tabs_focus(true), g_tab_request_ext = -1;
+        if (pg && !strncmp(pg + 1, "fail", 4) && g_files.test_fail)
+            page = SETTINGS, menu_tabs_focus(true), g_tab_request_ext = -1, g_files.test_fail(atoi(pg + 5));  // (failure messages)
         if (pg && !strncmp(pg + 1, "settings", 8) && pg[9] == ':') g_tab_request_ext = atoi(pg + 10);  // settings:<tab>
-        if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
+        if (pg && !strcmp(pg + 1, "delete")) page = SETTINGS, menu_tabs_focus(true), g_tab_request_ext = -1;
         if (pg && !strcmp(pg + 1, "tip")) g_ui_settings.menu_tip_seen = false, g_tip_test = true;
         if (pg && !strcmp(pg + 1, "aspect")) {
             if (g_first.test_reset) g_first.test_reset();
@@ -472,14 +473,14 @@ extern "C" void launcher_run(void) {
     if (const char *t = getenv("NXRT_LAUNCHER_SETUP")) {  // (test) <folder>: Set up started on the start screen
         if (g_files.pick) g_files.pick(t);
         if (g_files.start) g_files.start();
-        page = SETUP;
+        page = SETTINGS, menu_tabs_focus(true), g_tab_request_ext = -1;
     }
     if (getenv("NXRT_LAUNCHER_DELETE") && g_files.remove) {  // (test) what DELETE GAME FILES does, logged; then the start screen
         double gb = g_files.size_gb ? g_files.size_gb() : 0;
         bool ok = g_files.remove();
         status = files_status();
         fprintf(stderr, "[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
-        if (!status.empty()) { g_bg = 0; page = SETUP; }
+        if (!status.empty()) { g_bg = 0; page = SETTINGS, menu_tabs_focus(true), g_tab_request_ext = -1; }
     }
     while (!play) {
         menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
@@ -487,7 +488,7 @@ extern "C" void launcher_run(void) {
         profile_choose(choice ? choices[choice] : "");
         if (g_files.files_deleted && g_files.files_deleted()) {  // (Settings > Prelaunch deleted them)
             status = files_status();
-            if (!status.empty()) { g_bg = 0; bind_capture_cancel(); settings_save(); page = SETUP; }
+            if (!status.empty()) { g_bg = 0; bind_capture_cancel(); settings_save(); page = MAIN; }
         }
         if (g_play_seed_req) {  // the Randomizer tab's Play: that seed, then PLAY as if pressed (first-launch questions)
             g_play_seed_req = false;
@@ -672,13 +673,15 @@ extern "C" void launcher_run(void) {
                     opened = true;
                     page = SETTINGS;
                 }
-                if (!status.empty() || busy) {  // (once set up, the game files are kept up in Settings > Prelaunch)
-                    ImGui::SetCursorPosX(x0);
-                    if (g_refocus == SETUP) ImGui::SetKeyboardFocusHere(), g_refocus = MAIN;
-                    if (menu_item("SET UP GAME FILES", !busy)) page = SETUP;
+                // (the same items in every game: the game files are Settings' Prelaunch tab, so this is a shortcut there)
+                ImGui::SetCursorPosX(x0);
+                if (menu_item("SETUP GAME FILES", g_files.prelaunch != NULL)) {
+                    menu_tabs_focus(true);   // (its first tab, whatever was selected last)
+                    g_tab_request_ext = -1;  // (Prelaunch)
+                    page = SETTINGS;
                 }
                 ImGui::SetCursorPosX(x0);
-                if (menu_item("QUIT", true)) exit(0);
+                if (menu_item("EXIT", true)) exit(0);
                 g_menu_gap = 0.35f;
             } else if (page == SETTINGS) {
                 // the in-game menu's tabs (runtime/ui/menu.mm), in a window like the in-game one; tabs that need a
@@ -734,178 +737,6 @@ extern "C" void launcher_run(void) {
                     choice = 0;
                     for (size_t i = 0; i < choices.size(); i++)
                         if (choices[i] == cur) choice = (int)i;
-                }
-            } else {
-                // SETUP: the game files, in a window like Settings (option rows: runtime/ui/option_rows.h) - choose the
-                // folder with the game files, set up; once set up, delete. Each row's explanation on the right.
-                float sc = ds.y / 1080.0f, w = fminf(ds.x * 0.9f, 1500 * sc), h = ds.y - 2 * 18 * sc;
-                ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetWindowPos(), ImVec2(ImGui::GetWindowPos().x + ds.x,
-                                                          ImGui::GetWindowPos().y + ds.y), IM_COL32(0, 0, 0, 110));
-                ImVec2 wp = ImGui::GetWindowPos();
-                ImGui::SetCursorScreenPos(ImVec2(wp.x + (ds.x - w) * 0.5f, wp.y + (ds.y - h) * 0.5f));
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.09f, 0.08f, 0.96f));
-                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * sc);
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28 * sc, 24 * sc));
-                ImGui::BeginChild("##setup", ImVec2(w, h), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NavFlattened);
-                ImGui::PopStyleVar(2);
-                ImGui::PopStyleColor();
-                ImGui::PushFont(g_font_small);
-                ImGui::PushFont(g_font_menu);
-                ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Game Files");
-                ImGui::PopFont();
-                bool back = false;
-                if (!busy) {  // close: the drawn X in the corner, as Settings (B / Esc too)
-                    float bx = 44 * sc;
-                    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
-                    ImVec2 p = ImGui::GetCursorScreenPos();
-                    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
-                    back = ImGui::InvisibleButton("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
-                    ImGui::PopStyleColor();
-                    bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
-                    ImU32 col = hot ? IM_COL32(236, 194, 84, 255) : IM_COL32(220, 216, 205, 255);
-                    float m = bx * 0.3f, t = (hot ? 3.0f : 2.4f) * sc * 1.5f;
-                    ImDrawList *dl = ImGui::GetWindowDrawList();
-                    if (hot) dl->AddRectFilled(p, ImVec2(p.x + bx, p.y + bx), IM_COL32(255, 255, 255, 20), 8 * sc);
-                    dl->AddLine(ImVec2(p.x + m, p.y + m), ImVec2(p.x + bx - m, p.y + bx - m), col, t);
-                    dl->AddLine(ImVec2(p.x + bx - m, p.y + m), ImVec2(p.x + m, p.y + bx - m), col, t);
-                }
-                ImGui::Spacing();
-
-                char srcb[1100] = "", jobb[400] = "", hintb[400] = "";
-                bool failed = false;
-                if (g_files.picked) g_files.picked(srcb, sizeof srcb);
-                if (g_files.job) g_files.job(jobb, sizeof jobb, hintb, sizeof hintb, &failed);
-                std::string src = srcb, job = jobb, job_hint = hintb;
-                bool ready = status.empty() && !busy;  // (set up: the window offers to delete them)
-                static double files_gb = -1;
-                // chosen: "Selected" with a green check (long paths ran over the label); the path is in the
-                // explanation, and choosing again opens the picker again
-                std::string src_v = src.empty() ? "Choose..." : "Selected";
-                auto check_left_of_value = [&](const std::string &v) {
-                    if (v != "Selected") return;
-                    ImVec2 rb = ImGui::GetItemRectMax(), ra = ImGui::GetItemRectMin();
-                    float fs = ImGui::GetFontSize(), vw = ImGui::CalcTextSize(v.c_str()).x;
-                    float x = rb.x - 16 * sc - vw - fs * 0.95f, cy = (ra.y + rb.y) * 0.5f, u = fs * 0.62f;
-                    ImU32 g = IM_COL32(120, 220, 120, 255);
-                    ImDrawList *dl = ImGui::GetWindowDrawList();
-                    dl->AddLine(ImVec2(x, cy), ImVec2(x + u * 0.35f, cy + u * 0.35f), g, fs * 0.11f);
-                    dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
-                };
-                std::string src_d = g_files.source_desc ? g_files.source_desc : "The folder with your own game files.";
-                if (!src.empty()) src_d += "\n\nChosen: " + src;
-                // the step that's running / its result, under the rows and in the Set up row's explanation
-                const std::string &job_line = job;
-                std::string ex_d = g_files.setup_desc ? g_files.setup_desc : "Sets the game files up.";
-                if (!job.empty()) ex_d += "\n\n" + job + (job_hint.empty() ? "" : ".\n" + job_hint);
-
-                // the controller's cursor starts on the first row (not the X), a few frames while the window lays out
-                static int seen_frame = -10, focus_first;  // (not drawn last frame: the window has just opened)
-                if (seen_frame != ImGui::GetFrameCount() - 1) focus_first = 4;
-                seen_frame = ImGui::GetFrameCount();
-                auto first_row = [&] {
-                    if (focus_first > 0 && focus_first--) ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
-                };
-                opt_begin("##files", sc);
-                if (!ready) {
-                    opt_section("Your copy of the game");
-                    if (busy) opt_disable_next();
-                    if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true))
-                        SDL_ShowOpenFolderDialog(picked, NULL, win, NULL, false);
-                    check_left_of_value(src_v);
-                    first_row();
-                    if (g_files.setup_rows) g_files.setup_rows(sc, busy);  // (the host's: e.g. where the game goes)
-                    opt_section("Set up");
-                    if (busy || (src.empty() && !(g_files.copied && g_files.copied()))) opt_disable_next();
-                    if (opt_action("Set up game files", busy ? "Working..." : "", ex_d.c_str(), true) && g_files.start)
-                        g_files.start();
-                    files_gb = -1;  // (re-measured after a setup)
-                } else {
-                    // DELETE: frees the app's copy (the host removes only what the setup made, only inside the data
-                    // root). Saves, settings and the user's own files stay.
-                    if (files_gb < 0) files_gb = g_files.size_gb ? g_files.size_gb() : 0;
-                    char gb[32];
-                    snprintf(gb, sizeof gb, "%.1f GB", files_gb);
-                    opt_section("Game files");
-                    if (!g_confirm_delete) {
-                        if (opt_action("Delete game files", gb, "Frees the space the app's copy of the game files takes. "
-                                       "Saves and settings are kept, and your own game files aren't touched: you can "
-                                       "set the game files up again from them.", true))
-                            g_confirm_delete = true;
-                        first_row();
-                    } else {
-                        if (opt_action("Yes, delete them", gb, "Deletes the extracted game files now.", true)) {
-                            bool ok = g_files.remove && g_files.remove();
-                            status = files_status();
-                            if (ok) set_job("Game files deleted.");
-                            else set_job("Couldn't delete the game files", true, "They aren't in the app's data folder, "
-                                         "so they were left alone.");
-                            if (!status.empty()) g_bg = 0;
-                            g_confirm_delete = false, files_gb = -1;
-                        }
-                        if (opt_action("Cancel", "", "Keeps the game files.", true)) g_confirm_delete = false;
-                    }
-                }
-                if (!job_line.empty()) {  // the current step / result
-                    ImGui::Dummy(ImVec2(0, 14 * sc));
-                    ImGui::PushTextWrapPos(0);
-                    ImGui::TextColored(failed ? ImVec4(1, 0.5f, 0.4f, 1) : busy ? ImVec4(0.93f, 0.76f, 0.33f, 1)
-                                              : ImVec4(0.45f, 0.95f, 0.55f, 1), "%s", job_line.c_str());
-                    if (failed && !job_hint.empty())  // (what to do next, in the rows' own text colour)
-                        ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "%s", job_hint.c_str());
-                    ImGui::PopTextWrapPos();
-                }
-                opt_end();
-                if (g_confirm_delete && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                         ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
-                    g_confirm_delete = false;  // (B / Esc: back out of the question first)
-                else if (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                              ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
-                    back = true;
-                ImGui::PopFont();
-                ImGui::EndChild();
-                if (back && !busy) {
-                    settings_save();
-                    g_confirm_delete = false;
-                    page = MAIN, g_refocus = SETUP;
-                    status = files_status();  // (the files may have come back meanwhile: a drive connected)
-                    if (status.empty() && !g_bg) load_background();
-                }
-                static bool test_busy = getenv("NXRT_LAUNCHER_SHOT") && strstr(getenv("NXRT_LAUNCHER_SHOT"), ":extracting");
-                if (busy || test_busy) {  // extracting: everything dimmed, a progress bar in front (input waits)
-                    ImDrawList *fg = ImGui::GetForegroundDrawList();
-                    ImVec2 o = ImGui::GetMainViewport()->Pos;
-                    fg->AddRectFilled(o, ImVec2(o.x + ds.x, o.y + ds.y), IM_COL32(0, 0, 0, 170));
-                    float f = test_busy ? 0.42f : g_files.progress ? g_files.progress() : 0;
-                    // (while the game code is built: what's happening, on whose files - runtime/gamebuild.c)
-                    bool recompiling = g_files.recompiling && g_files.recompiling();
-                    const char *title = recompiling ? "Recompiling the game" : "Setting up the game files";
-                    static const char *const notes[] = {"This only needs to be done once and may take a while."};
-                    int nnotes = recompiling ? 1 : 0;
-                    float tfs = g_font_menu->FontSize * 0.75f, sfs = g_font_small->FontSize * 0.85f;
-                    ImVec2 ts = g_font_menu->CalcTextSizeA(tfs, FLT_MAX, 0, title);
-                    float line_h = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, "A").y;
-                    float pw = fminf(ds.x * 0.6f, 900 * sc), bar_y = 36 * sc + ts.y + 30 * sc;
-                    for (int i = 0; i < nnotes; i++)  // (wide enough for its text, within the window)
-                        pw = fmaxf(pw, g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, notes[i]).x + 96 * sc);
-                    pw = fminf(fmaxf(pw, ts.x + 96 * sc), ds.x - 32 * sc);
-                    float ph = bar_y + 24 * sc + 26 * sc + line_h + (nnotes ? 14 * sc + nnotes * line_h : 0) + 40 * sc;
-                    ImVec2 a(o.x + (ds.x - pw) * 0.5f, o.y + (ds.y - ph) * 0.5f), b(a.x + pw, a.y + ph);
-                    fg->AddRectFilled(a, b, IM_COL32(15, 23, 20, 250), 14 * sc);
-                    fg->AddRect(a, b, IM_COL32(236, 194, 84, 140), 14 * sc, 0, 1.5f * sc);
-                    fg->AddText(g_font_menu, tfs, ImVec2((a.x + b.x - ts.x) * 0.5f, a.y + 36 * sc), IM_COL32(236, 194, 84, 255), title);
-                    ImVec2 ba(a.x + 48 * sc, a.y + bar_y), bb(b.x - 48 * sc, a.y + bar_y + 24 * sc);
-                    fg->AddRectFilled(ba, bb, IM_COL32(255, 255, 255, 25), 12 * sc);
-                    if (f > 0) fg->AddRectFilled(ba, ImVec2(ba.x + (bb.x - ba.x) * f, bb.y), IM_COL32(236, 194, 84, 255), 12 * sc);
-                    char line[200];
-                    snprintf(line, sizeof line, "%s   %d%%", test_busy ? "Setting up the game files..." : job.c_str(),
-                             (int)(f * 100));
-                    ImVec2 ls = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, line);
-                    fg->AddText(g_font_small, sfs, ImVec2((a.x + b.x - ls.x) * 0.5f, bb.y + 26 * sc), IM_COL32(220, 216, 205, 255), line);
-                    for (int i = 0; i < nnotes; i++) {
-                        ImVec2 ns = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, notes[i]);
-                        fg->AddText(g_font_small, sfs, ImVec2((a.x + b.x - ns.x) * 0.5f, bb.y + 26 * sc + (i + 1) * line_h + 14 * sc),
-                                    IM_COL32(150, 148, 140, 255), notes[i]);
-                    }
                 }
             }
 
