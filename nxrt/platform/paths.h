@@ -27,7 +27,8 @@ bool rt_dev_mode(void);           // dev / portable mode (rule 2 above): e.g. a 
 // A shipped file: `name` next to the executable or in Contents/Resources, else `dev_rel` in the source tree (the
 // starting directory or the executable's parent; NULL = shipped builds only). Absolute path in out; false = none.
 bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);
-// dev_rel of the runtime's own files: a source checkout builds each game in games/<id>/, next to nxrt/
+// dev_rel of the runtime's own files, in a source checkout: the Makefile passes NXRT as it was spelled (nxrt.mk).
+// ../../nxrt is the monorepo layout; a project with nxrt at its root sets NXRT := nxrt, and so on.
 #ifndef NXRT_DEV
 #define NXRT_DEV "../../nxrt/"
 #endif
