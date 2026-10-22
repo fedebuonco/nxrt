@@ -61,6 +61,19 @@ static int candidates(const char *game_dir, char out[3][1100]) {
 
 static bool in_apk(const char *c) { return !strchr(c, '/'); }  // (Android: a bare name)
 
+static const GameLibTables *open_lib(const char *path);  // (below)
+
+// A library that is really there: its id matches and it loads. The stub `make` leaves next to the executable in a
+// source checkout has a matching id but no functions (its generated symbols are undefined), so the id file alone
+// would call the game ready and then fail to boot it.
+static bool lib_usable(const char *path) {
+    const GameLibTables *t = open_lib(path);
+    if (!t) return false;
+    for (uint32_t k = 0; k < t->nmodules; k++)
+        if (t->modules[k].count && *t->modules[k].count) return true;
+    return false;  // (loads, but holds no recompiled code)
+}
+
 bool gamelib_present(const char *game_dir) {
     if (g_tables) return true;
     char c[3][1100];
@@ -71,7 +84,7 @@ bool gamelib_present(const char *game_dir) {
             if (gamelib_load(NULL, why, sizeof why)) return true;
             continue;
         }
-        if (exists(c[i]) && id_matches(c[i])) return true;
+        if (exists(c[i]) && id_matches(c[i]) && lib_usable(c[i])) return true;
     }
     return false;
 }

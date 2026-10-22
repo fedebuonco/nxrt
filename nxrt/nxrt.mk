@@ -126,7 +126,10 @@ endif
 GAMELIB_SRCS := $(NXRT)/tools/gen.py $(NXRT)/tools/lifter.py $(NXRT)/tools/analyze.py $(NXRT)/tools/nso.py \
                 $(NXRT)/tools/passes.py $(NXRT)/tools/simd_c.py $(NXRT)/tools/gamelib_entry.c $(RT)/hle/hle_symbols.txt \
                 $(RT)/cpu.h $(RT)/simd.h $(RT)/simd_fp.h $(RT)/gamelib.h $(wildcard $(GAME_TOOLS)/patches.py) $(GAMELIB_EXTRA)
-GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS) $(GAME_MODULES)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
+# (-I paths are where nxrt happens to live in this checkout, not what is built: the headers themselves are hashed above.
+# Without this, the same content gives another id when nxrt moves, and every player rebuilds for nothing.)
+GAMELIB_FLAGS := $(filter-out -I%,$(GENFLAGS))
+GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GAMELIB_FLAGS) $(GAME_MODULES)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst $(RT)/%.c,$(B)/rt/%.o,$(RT_SRC))
 RTINC    := -I$(RT) -I$(RT)/nvn $(INC_UI)
@@ -147,10 +150,10 @@ $(B)/obj/%.o: $(GEN)/%.c $(RT)/cpu.h
 	@mkdir -p $(dir $@)
 	@$(CC) $(GENFLAGS) -c $< -o $@
 
-$(B)/obj/gamelib_entry.o: $(NXRT)/tools/gamelib_entry.c $(GAMELIB_SRCS)
+$(B)/obj/gamelib_entry.o: $(NXRT)/tools/gamelib_entry.c $(GAMELIB_SRCS) $(NXRT)/nxrt.mk
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -DNX_MODULES='$(NX_MODULES_X)' -c $< -o $@
-$(B)/rt/gamelib.o: $(GAMELIB_SRCS)
+$(B)/rt/gamelib.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk  # (the id comes from there: a rule change is a new id)
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
 # the start screen's build of it (runtime/gamebuild.c) uses the same flags
 $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk
