@@ -1,6 +1,6 @@
 # A host that is not nx-runtime: its own window and frames, the nx layers for menu, input, settings and saves.
 # Proves the layers stand alone (nothing of nxrt/runtime is compiled or linked) and shows the wiring a runtime needs.
-NXRT := ../../nxrt
+NXRT := ../..
 include $(NXRT)/nx.mk
 
 EXE := $(B)/uihost

@@ -9,8 +9,8 @@ For the layer-by-layer design, read [ARCHITECTURE.md](ARCHITECTURE.md) after thi
 
 | You are building | Include | You get | Example |
 |---|---|---|---|
-| A recomp | `nxrt/nxrt.mk` | The whole runtime: recompiler, loader, kernel, IPC, HLE services, NVN renderers, and the app | [`examples/game-template`](../examples/game-template) |
-| A runtime of your own that wants the app around it | `nxrt/nx.mk` | The five layers only: platform, settings, input, save, ui | [`examples/ui-host`](../examples/ui-host) |
+| A recomp | `nxrt.mk` | The whole runtime: recompiler, loader, kernel, IPC, HLE services, NVN renderers, and the app | [`examples/game-template`](../examples/game-template) |
+| A runtime of your own that wants the app around it | `nx.mk` | The five layers only: platform, settings, input, save, ui | [`examples/ui-host`](../examples/ui-host) |
 
 Both are Makefile includes, consumed as source. There is no binary to link against and no install step: a clone of this
 repository (or a copy of `nxrt/` inside your project) is the dependency.
@@ -21,11 +21,11 @@ repository (or a copy of `nxrt/` inside your project) is the dependency.
 
 ```
 your-project/
-  nxrt/            this repository's nxrt/ folder (git submodule, or a copy)
+  nxrt/            this repository (git submodule, or a copy: nxrt.mk at its root)
   games/<id>/      yours
 ```
 
-`nxrt/` is self-contained apart from SDL3 and FFmpeg (see [Building](#building)). Keep the layout: the build rules
+The library is self-contained apart from SDL3 and FFmpeg (see [Building](#building)). Keep the layout: the build rules
 derive paths from `NXRT`.
 
 ### 2. Your game folder
@@ -43,7 +43,7 @@ Start from [`examples/game-template`](../examples/game-template) — copy it to 
 screen and menu.
 
 ```make
-NXRT     := ../../nxrt
+NXRT     := ../nxrt        # games/<id>/ -> your-project/nxrt (git submodule), or the path you copied it to
 GAME_ID  := <id>              # -> <id>game.dylib / .so / .dll
 GAME_EXE := <id>recomp
 GAME_SRC := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/ui/*.mm)
@@ -56,7 +56,7 @@ Other variables a game may set: `GAME_INC` (extra includes for its sources), `GA
 
 ### 3. The one interface you implement
 
-`nx_game` ([nxgame.h](../nxrt/runtime/nxgame.h)) has two halves:
+`nx_game` ([nxgame.h](../runtime/nxgame.h)) has two halves:
 
 - **`.info`** — identity: names, `title_id`, the 8-byte build id of `exefs/main`, the module list and bases, a
   `romfs_probe` path, the release feed for the update check, optional title movie and profile label. The setup uses
@@ -64,7 +64,7 @@ Other variables a game may set: `GAME_INC` (extra includes for its sources), `GA
 - **`.hooks`** — everything optional, every entry may be NULL: boot order, per-frame ticks, input filters, file and
   save interception, settings keys, draw/ texture hooks, the game's menu pages, and boot profiles.
 
-Anything shared belongs in `nxrt/` behind a hook, never as an `if (this game)` in the runtime.
+Anything shared belongs in the library behind a hook, never as an `if (this game)` in the runtime.
 
 ### 4. Build
 
@@ -98,19 +98,19 @@ is never loaded — the start screen says "Game code not built yet" and Set up r
 
 | You change | Who rebuilds |
 |---|---|
-| `nxrt/tools/*`, `cpu.h`, `simd*.h`, `gamelib.h`, `hle_symbols.txt` | Every player, once |
+| `tools/*`, `cpu.h`, `simd*.h`, `gamelib.h`, `hle_symbols.txt` | Every player, once |
 | your `patches.py` or `GAME_MODULES` | Your players, once |
 | anything else (runtime, layers, your hooks and menu pages) | Nobody: it is the app |
 
-`GAMELIB_ABI` ([gamelib.h](../nxrt/runtime/gamelib.h)) is the format of what the app loads from the generated library;
+`GAMELIB_ABI` ([gamelib.h](../runtime/gamelib.h)) is the format of what the app loads from the generated library;
 it changes only when that format does.
 
 ## What nxrt does not do for you
 
 - **The game's own code.** You need a recompiler run over your modules ([NEW_GAME.md](NEW_GAME.md) walks through it
   from a dump to a booting game) and, usually, some `patches.py` entries where the translator's guess is wrong.
-- **HLE for services nobody implemented yet.** `nxrt/runtime/hle/` and `services/` cover what the ports so far needed.
-  A new game that calls something missing gets a trap or a stub, and the fix is a new `HLE_FUNC` in `nxrt/` — shared
+- **HLE for services nobody implemented yet.** `runtime/hle/` and `services/` cover what the ports so far needed.
+  A new game that calls something missing gets a trap or a stub, and the fix is a new `HLE_FUNC` in the library — shared
   with every game, not a fork.
 - **Game files, keys, fonts or artwork.** Never, by design.
 

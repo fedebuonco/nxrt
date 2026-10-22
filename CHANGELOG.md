@@ -14,7 +14,7 @@ once and put behind the `nxgame.h` interface. A game folder now holds only what 
 - **One runtime for every game.** Recompiled game code is loaded as a native library
   (`<id>game.dylib` / `.so` / `.dll`) and run by a shared loader and dispatcher; the Switch around it is emulated:
   kernel, IPC and the Horizon OS services, plus NVN graphics translated to Metal on macOS and Vulkan elsewhere.
-- **One recompiler for every game** (`nxrt/tools`): the game's modules and its patches
+- **One recompiler for every game** (`tools/`): the game's modules and its patches
   (`games/<id>/tools/patches.py`) drive `gen.py`; no per-game copy of the tool.
 - **Start screen setup from your own copy:** pick a folder with `exefs/` and `romfs/`, or read an `.nsp` / `.xci` in
   place with your `prod.keys` beside it. The game code is recompiled once, on your machine.
@@ -54,7 +54,7 @@ once and put behind the `nxgame.h` interface. A game folder now holds only what 
 - **The setup finds a compiler outside developer mode.** With no bundled `zig`, it falls back to `/usr/bin/clang`,
   `/usr/local/bin/clang` or `/usr/bin/cc` instead of reporting a missing builder; `NXRT_CC` still overrides it. The
   message now says which piece is missing and what to do.
-- **`nxrt/tools/sym.py` reads any game's modules** from its `runtime/*_game.c`, with `--game` and `--exefs`, instead of
+- **`tools/sym.py` reads any game's modules** from its `runtime/*_game.c`, with `--game` and `--exefs`, instead of
   assuming LAS's two-module layout and `../extracted`.
 - **Removed a dead font lookup** (`third_party/fonts/DejaVu`, never shipped); the substitute-font list keeps the
   system paths it actually found.

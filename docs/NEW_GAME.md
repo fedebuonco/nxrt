@@ -47,7 +47,7 @@ You need four facts. All of them come from your own files.
 | **Title id** | `exefs/main.npdm` | The program id in the ACI0 section (or the 16 hex digits of the NSP's name / your dump tool's listing) |
 | **Build id** | `exefs/main`, offset `0x40` | `xxd -s 0x40 -l 8 extracted/exefs/main` gives the 8 bytes for `build_id` |
 | **Code modules** | `exefs/` | Every NSO: `main`, `rtld`, `sdk`, `subsdk0`, `subsdk1`... (`rtld` is not loaded: the runtime does its job) |
-| **Module sizes** | each NSO | `tools/venv/bin/python ../../nxrt/tools/nso.py extracted/exefs/*`: the `image 0x...` line |
+| **Module sizes** | each NSO | `tools/venv/bin/python ../../tools/nso.py extracted/exefs/*`: the `image 0x...` line |
 
 ## 3. Choose where the modules load
 
@@ -100,7 +100,7 @@ SDKROOT=$(xcrun --show-sdk-path) make -j10 CLANG=/usr/bin/clang   # now also bui
 ./build/<id>recomp --play extracted
 ```
 
-`make gen` runs `nxrt/tools/gen.py` on each module with your `tools/patches.py` (empty for now), writing C into
+`make gen` runs `tools/gen.py` on each module with your `tools/patches.py` (empty for now), writing C into
 `generated/<module>/` (keep it out of git too). The second `make` compiles that C into the game code library. A player gets the same thing
 from the start screen's Set up, on their machine.
 
@@ -115,15 +115,15 @@ roughly in the order you meet them:
 | What the log says | What it means | What to do |
 |---|---|---|
 | `overlaps the next one` | A module is bigger than its slot | Move the next module's base up (step 3) |
-| `[hle] UNIMPLEMENTED <symbol> ... -> returning 0` | The game imports an SDK function the runtime replaces but has no body for | Often harmless. If behaviour breaks right after, implement it with `HLE_FUNC("<mangled name>", fn)` in a file under `nxrt/runtime/hle/` |
-| `[ipc] STUB <service> cmd N ... -> ok` / `[am] ... (unhandled, ok)` | The game called a system service command that answers "ok" with nothing | Fine until the game depends on the reply. Then implement the command in `nxrt/runtime/services/` |
+| `[hle] UNIMPLEMENTED <symbol> ... -> returning 0` | The game imports an SDK function the runtime replaces but has no body for | Often harmless. If behaviour breaks right after, implement it with `HLE_FUNC("<mangled name>", fn)` in a file under `runtime/hle/` |
+| `[ipc] STUB <service> cmd N ... -> ok` / `[am] ... (unhandled, ok)` | The game called a system service command that answers "ok" with nothing | Fine until the game depends on the reply. Then implement the command in `runtime/services/` |
 | `[sm] unknown cmd` / a service the game can't open | A whole service is missing | Add it with `SERVICE("name", handler)` (see `ipc.h`) |
-| `unimplemented svc 0x..` | A kernel call the runtime lacks | Implement it in `nxrt/runtime/kernel.c` |
+| `unimplemented svc 0x..` | A kernel call the runtime lacks | Implement it in `runtime/kernel.c` |
 | `no function at <addr> (lr=...)` | The game jumped somewhere the recompiler didn't see as a function start: usually into the middle of a function, or a missed jump-table target | Middle of a function: add the range to `inner_entries`. A missed table: a recompiler fix (`gen.py`), which helps every game |
 | A hang | A thread waits forever | `NXRT_DUMP_THREADS=1` shows what each thread waits on; `NXRT_TRACE_SVC=1` traces kernel calls |
 | A crash in recompiled code | Wrong behaviour of an instruction, or a bad pointer from a stubbed service | Find the function (`f_<address>` in the backtrace) in your disassembler; check the lifter for that instruction |
 
-Rule of thumb: **fixes to the kernel, services, HLE, recompiler or renderer go into `nxrt/`.** They are what the next
+Rule of thumb: **fixes to the kernel, services, HLE, recompiler or renderer go into the library (this repository).** They are what the next
 game needs too, and every game gets them. **Fixes that are true only for your game go into `games/<id>/`** as hooks or
 patches. If your fix in shared code needs an `if (this game)`, it should be a hook instead.
 
@@ -146,7 +146,7 @@ Useful switches:
 
 ## 8. Make it playable
 
-Now it's the game's own work, all in `games/<id>/` through hooks ([nxgame.h](../nxrt/runtime/nxgame.h); grouped in
+Now it's the game's own work, all in `games/<id>/` through hooks ([nxgame.h](../runtime/nxgame.h); grouped in
 the [README](../README.md#put-a-game-on-nxrt)):
 
 - **Timing:** games that assume 30/60 FPS. Patch the timing sites (`tools/patches.py`) and set `max_frame_rate` if
@@ -176,7 +176,7 @@ yet"). See [ARCHITECTURE.md](ARCHITECTURE.md#when-every-game-must-rebuild-its-ga
 
 ## Known rough edges
 
-- `nxrt/tools/sym.py` (symbolizes guest addresses) reads your game's modules and their load addresses from
+- `tools/sym.py` (symbolizes guest addresses) reads your game's modules and their load addresses from
   `runtime/*_game.c`; give it `--game games/<id>` and `--exefs <your extracted exefs folder>` (default
   `../extracted/exefs`). Games with no `.modules` table get the runtime defaults (`main`, `sdk`).
 - The setup builds the game code with the compiler it finds: the bundled zig in a packaged release, else

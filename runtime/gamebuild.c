@@ -103,7 +103,7 @@ static void args_free(Args *a) {
 
 // ------------------------------------------------------------------ the tools
 typedef struct {
-    char gen[1100], gen_script[1100];  // generator: nxgen, or (source checkout) the venv's python + nxrt/tools/gen.py
+    char gen[1100], gen_script[1100];  // generator: nxgen, or (source checkout) the venv's python + tools/gen.py
     char game_tools[1100];             // (source checkout) the game's tools/: its patches.py (gen.py --game)
     char cc[1100];                     // compiler: zig (as `zig cc`), or NXRT_CC / clang
     bool zig;
@@ -134,7 +134,7 @@ static bool find_tools(Tools *t) {
                rt_resource(NULL, "tools", t->game_tools, sizeof t->game_tools))) {
         snprintf(g_tools_why, sizeof g_tools_why,
                  "the game code generator is missing from this copy of %s (it ships as nxgen, or as tools/venv with "
-                 "nxrt/tools/gen.py in a source checkout)", nx_game.info.title);
+                 "tools/gen.py in a source checkout)", nx_game.info.title);
         return false;
     }
     e = getenv("NXRT_CC");

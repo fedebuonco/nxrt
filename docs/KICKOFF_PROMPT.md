@@ -20,7 +20,7 @@ I work on a Nintendo Switch static recompilation and want it to run on nxrt, the
 - The game: <full name>, version <x.y.z>, title id <0x0100...>
 - Where my game files are (for testing; never copy or commit them): <path, or "none">
 
-Read these first: README.md, docs/ARCHITECTURE.md, docs/PORTING.md, nxrt/runtime/nxgame.h (the game interface) and
+Read these first: README.md, docs/ARCHITECTURE.md, docs/PORTING.md, runtime/nxgame.h (the game interface) and
 examples/game-template. If the machine already has one of the ports, read it as the full example: `games/sky` (a
 multi-module game with hooks and a menu page) or `games/eow` (the minimal real game). They are not part of this
 repository.

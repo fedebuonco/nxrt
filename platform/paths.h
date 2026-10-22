@@ -30,7 +30,7 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);
 // dev_rel of the runtime's own files, in a source checkout: the Makefile passes NXRT as it was spelled (nxrt.mk).
 // ../../nxrt is the monorepo layout; a project with nxrt at its root sets NXRT := nxrt, and so on.
 #ifndef NXRT_DEV
-#define NXRT_DEV "../../nxrt/"
+#define NXRT_DEV "../../"
 #endif
 
 // The game folder: where the app keeps the game files it set up and what it builds from them (the data image, the

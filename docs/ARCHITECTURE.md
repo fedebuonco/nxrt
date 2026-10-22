@@ -15,7 +15,7 @@ and the app the player sees.
 **Why it exists.** LASRecomp, SkyRecomp and EoWRecomp each started as a copy of the whole LAS project with the game
 swapped out. So the same runtime existed three times. A fix in one never reached the others, and each copy drifted
 apart. nxrt is that common part pulled out once, with the game-specific parts moved behind a small interface
-([`nxrt/runtime/nxgame.h`](../nxrt/runtime/nxgame.h)).
+([`runtime/nxgame.h`](../runtime/nxgame.h)).
 
 **What "native" means here.** The game's ARM64 code isn't emulated instruction by instruction. It's translated to C
 ahead of time, on the player's machine from their own copy of the game, and compiled into a native library
@@ -27,12 +27,12 @@ ahead of time, on the player's machine from their own copy of the game, and comp
 
 | Layer | Folder | Role | Interface |
 |---|---|---|---|
-| nx-platform | `nxrt/platform` | macOS / Windows / Linux differences, the data folder, the game folder (e.g. on a portable drive), crash handling | `nx_app.h`, `paths.h`, `platform.h` |
-| nx-settings | `nxrt/settings` | One settings file; the runtime, the game, input and UI each register a section | `nx_settings.h` |
-| nx-input | `nxrt/input` | Keyboard / controller / mouse → the Switch pad, rebinding, dead zones, button-prompt style | `nx_input.h` |
-| nx-save | `nxrt/save` | Save folders, per-profile slots, backups, read/write listeners | `nx_save.h` |
-| nx-ui | `nxrt/ui` | Start screen, game-files setup UI, in-game menu (system tabs + the game's tab), on-screen keyboard | `nx_ui.h`, `menu.h` |
-| nx-runtime | `nxrt/runtime`, `nxrt/tools` | Recompiler, loader, dispatcher, kernel, IPC, HLE services, NVN → Metal/Vulkan, game-files setup, the game interface | `nxgame.h` |
+| nx-platform | [`platform/`](../platform) | macOS / Windows / Linux differences, the data folder, the game folder (e.g. on a portable drive), crash handling | `nx_app.h`, `paths.h`, `platform.h` |
+| nx-settings | [`settings/`](../settings) | One settings file; the runtime, the game, input and UI each register a section | `nx_settings.h` |
+| nx-input | [`input/`](../input) | Keyboard / controller / mouse → the Switch pad, rebinding, dead zones, button-prompt style | `nx_input.h` |
+| nx-save | [`save/`](../save) | Save folders, per-profile slots, backups, read/write listeners | `nx_save.h` |
+| nx-ui | [`ui/`](../ui) | Start screen, game-files setup UI, in-game menu (system tabs + the game's tab), on-screen keyboard | `nx_ui.h`, `menu.h` |
+| nx-runtime | [`runtime/`](../runtime), [`tools/`](../tools) | Recompiler, loader, dispatcher, kernel, IPC, HLE services, NVN → Metal/Vulkan, game-files setup, the game interface | `nxgame.h` |
 
 Dependencies only point down: nx-platform ← nx-settings ← nx-input, nx-save ← nx-ui ← nx-runtime ← the game. The build
 enforces it: each layer compiles with only its own headers and the ones below it on the include path.
@@ -42,7 +42,7 @@ the same start screen, menu, controls, settings and saves ([`examples/ui-host`](
 
 ## Shared by every game
 
-All of this lives in `nxrt/` and is the same code for every game:
+All of this lives at the root of this repository and is the same code for every game:
 
 - **The recompiler:** `tools/gen.py`, `lifter.py`, `analyze.py`, `nso.py`, `passes.py`, `simd_c.py`, and the headers the
   generated C compiles against (`runtime/cpu.h`, `simd.h`, `simd_fp.h`, `gamelib.h`).
@@ -72,14 +72,14 @@ All of this lives in `games/<id>/`:
 | Menu pages (`menu_pages`) | The game's own tab in the menu; system tabs can't be extended by games | LAS: Gameplay, Cosmetics, Randomizer, Cheats, Warp, Save Editor |
 | Its own code | HLE overrides (`HLE_FUNC`), texture restyling, overlays, boot profiles | LAS: the randomizer, its seeds as boot profiles, the tracker overlay |
 | `tools/patches.py` | Hand-written replacements for specific instructions | Sky: 2 timing sites; EoW: none yet |
-| `Makefile` | `GAME_ID`, `GAME_EXE`, `GAME_SRC`, `GAME_MODULES` (the same modules as `info.modules`), then `include ../../nxrt/nxrt.mk` | |
+| `Makefile` | `GAME_ID`, `GAME_EXE`, `GAME_SRC`, `GAME_MODULES` (the same modules as `info.modules`), then `include ../../nxrt.mk` | |
 
 A game with no hooks runs as a plain recompilation: no overlay, no extra pages, files served as they are. EoW is
 currently exactly that: a descriptor and a Makefile.
 
 ## The recompiler: one `gen.py` for every game
 
-There is one recompiler for every game, `nxrt/tools/gen.py`. Each game's output is different because each game's
+There is one recompiler for every game, `tools/gen.py`. Each game's output is different because each game's
 binary is different, not because the tool is. The game-specific parts are inputs:
 
 ```
@@ -120,7 +120,7 @@ These apply to every game:
 
 The game code library carries an id: a hash of everything it is built from. That is the recompiler's files, the
 runtime's `hle_symbols.txt`, the headers it is compiled against, the game's `patches.py`, the generator flags and
-`GAME_MODULES` (`GAMELIB_ID` in [`nxrt/nxrt.mk`](../nxrt/nxrt.mk)). The app knows the id it expects. A library with any
+`GAME_MODULES` (`GAMELIB_ID` in [`nxrt.mk`](../nxrt.mk)). The app knows the id it expects. A library with any
 other id is never loaded: the start screen says "Game code not built yet", and Set up rebuilds it. That takes a few
 minutes and reuses the game files already there.
 

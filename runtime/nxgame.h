@@ -1,6 +1,6 @@
 // The game interface: everything the shared runtime needs to know about the one game it is linked with.
 //
-// The runtime (nxrt/runtime) holds no game. A game (games/<id>/) defines exactly one `const NxGame nx_game` (who it is:
+// The runtime (`runtime/`) holds no game. A game (games/<id>/) defines exactly one `const NxGame nx_game` (who it is:
 // names, title id, build id; and optional hooks), and its own HLE functions with HLE_FUNC / RT_ON_RESET (hle.h) as the
 // runtime's do. Every hook may be NULL: the runtime then does what a plain Switch would (no overlay, no extra menu
 // tabs, files served as they are). Hooks run on the thread named next to them.

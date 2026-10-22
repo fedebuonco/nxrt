@@ -3,9 +3,9 @@
 The game's modules and their load addresses are read from its nx_game descriptor (runtime/*_game.c in the game
 folder), so this works for any game on nxrt. The extracted NSOs come from ../extracted/exefs by default.
 
-  python3 nxrt/tools/sym.py 0x7000123456 --game games/sky
-  python3 nxrt/tools/sym.py 0x7000123456 --game games/sky --exefs /path/to/extracted/exefs --dis 8
-  python3 nxrt/tools/sym.py 0x7000123456 --modules main=0x7000000000,sdk=0x7004000000
+  python3 tools/sym.py 0x7000123456 --game games/sky
+  python3 tools/sym.py 0x7000123456 --game games/sky --exefs /path/to/extracted/exefs --dis 8
+  python3 tools/sym.py 0x7000123456 --modules main=0x7000000000,sdk=0x7004000000
 """
 import argparse
 import bisect

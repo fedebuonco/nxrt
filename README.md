@@ -5,8 +5,8 @@ and whatever only that game needs. nxrt brings everything every recomp needs —
 system around it (kernel, IPC, the Horizon OS services), the graphics (NVN translated to Metal or Vulkan), and the app
 the player sees: start screen, menu, settings, saves, controls, mods.
 
-It is consumed as source. Vendor `nxrt/` into your project, include `nxrt/nxrt.mk` from your game's Makefile, and
-implement one `nx_game` descriptor ([nxgame.h](nxrt/runtime/nxgame.h)). The contract — build variables, what ships to
+It is consumed as source. Vendor this repository as `nxrt/` in your project, include `$(NXRT)/nxrt.mk` from your game's Makefile, and
+implement one `nx_game` descriptor ([nxgame.h](runtime/nxgame.h)). The contract — build variables, what ships to
 players, when their game code is rebuilt — is [docs/INTEGRATING.md](docs/INTEGRATING.md), and the three-file starting
 point is [`examples/game-template`](examples/game-template). A runtime with its own renderer can take just the five UI
 layers instead (`nx.mk`, as [`examples/ui-host`](examples/ui-host) does).
@@ -98,7 +98,7 @@ A game is a folder:
 
 ```
 games/<id>/
-  Makefile             GAME_ID, GAME_EXE, GAME_SRC, GAME_MODULES; include ../../nxrt/nxrt.mk
+  Makefile             GAME_ID, GAME_EXE, GAME_SRC, GAME_MODULES; include ../../nxrt.mk
   runtime/<id>_game.c  const NxGame nx_game = { .info = {...}, .hooks = {...} };
   runtime/...          the game's own code: hooks, HLE functions (HLE_FUNC), menu pages (ui/*.mm)
   tools/patches.py     the game's instruction patches for the recompiler (may be empty)
@@ -106,7 +106,7 @@ games/<id>/
 
 1. **Copy [`examples/game-template`](examples/game-template)** to `games/<id>` (that folder is yours: it is not
    part of this repository).
-2. **Fill in `nx_game.info`** ([nxgame.h](nxrt/runtime/nxgame.h)): names, `title_id`, the first 8 bytes of
+2. **Fill in `nx_game.info`** ([nxgame.h](runtime/nxgame.h)): names, `title_id`, the first 8 bytes of
    `exefs/main`'s build id (offset `0x40`), a `romfs_probe` path every complete copy has, and `modules`. The modules are
    the NSOs in `exefs/` with their load addresses, matching `GAME_MODULES` in the Makefile. The loader refuses modules
    that overlap.
@@ -125,7 +125,7 @@ games/<id>/
    | Start screen | `profiles_list` / `profile_get` / `profile_set` (e.g. randomizer seeds) |
 
 5. **Menu pages** are plain draw functions (`bool draw(float scale)`; return true to close the menu). Build them from the
-   rows in [`option_rows.h`](nxrt/ui/option_rows.h), so they look like the system tabs.
+   rows in [`option_rows.h`](ui/option_rows.h), so they look like the system tabs.
 6. **Patches** (`tools/patches.py`): `PATCHES[addr] = fn` replaces one instruction with C. Each patch checks the
    original word first, so a wrong build fails loudly. `VARIANTS` lets the game choose an instruction at run time.
 
@@ -158,7 +158,7 @@ A recomp with its own runtime can keep it and adopt only the five layers below n
 ## Repository
 
 ```
-nxrt/
+.                                      the library: this repository's root
   platform/ settings/ input/ save/ ui/   the five layers (headers: nx_app.h, nx_settings.h, nx_input.h, nx_save.h, nx_ui.h)
   runtime/                               nx-runtime; nxgame.h is the game interface
   tools/                                 the recompiler (gen.py, lifter.py ...)
@@ -186,7 +186,7 @@ Windows and Linux builds and in-game play of Sky and EoW are not yet verified on
 
 ## License
 
-MIT ([`nxrt/LICENSE`](nxrt/LICENSE)): nxrt's own code, including runtime work merged from
+MIT ([`LICENSE`](LICENSE)): nxrt's own code, including runtime work merged from
 [LASRecomp](https://github.com/peiikai/LASRecomp) (© Peiikai), [SkyRecomp](https://github.com/Apolinario-coder/SkyRecomp)
 (© Apolinario-coder) and EoWRecomp (© Peiikai and the EoWRecomp contributors). Each game folder keeps its project's
 license. Third-party code keeps its own; [`THIRD_PARTY.md`](THIRD_PARTY.md) lists every component and its license.
