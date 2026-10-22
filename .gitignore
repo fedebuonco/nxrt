@@ -1,0 +1,37 @@
+# Build output
+build/
+generated*/
+*.dylib
+*.dylib.id
+*.so
+*.so.id
+*.dll
+*.dll.a
+*.dll.id
+*.o
+.gamebuild/
+
+# The player's own game files, keys and what setup builds from them: never committed
+extracted/
+romfs.bin
+romfs.src
+*.nsp
+*.xci
+*.nca
+*.nsz
+*.xcz
+prod.keys
+title.keys
+
+# Per-game Python environment for the recompiler (make venv)
+tools/venv/
+**/tools/venv/
+venv/
+__pycache__/
+
+# Saves, settings and logs from test runs
+*.log
+.DS_Store
+
+# Release-working notes, not part of the repository
+docs/HANDOFF_RELEASE.md
