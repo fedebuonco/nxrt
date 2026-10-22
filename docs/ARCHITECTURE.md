@@ -2,7 +2,8 @@
 
 What nxrt is, what is shared by every game and what each game brings, and how the recompiler handles many games
 without changing. For putting a game on nxrt step by step, see the [README](../README.md#put-a-game-on-nxrt); for how
-the existing games were merged, [PORTING.md](PORTING.md).
+the existing games were merged, [PORTING.md](PORTING.md). The ports themselves (`games/<id>/`) are not part of this
+repository.
 
 ## The role of nxrt
 

@@ -34,12 +34,13 @@ Not because they are secret, but because they are the player's, not ours:
 macOS (Apple Silicon), with Homebrew's SDL3 and FFmpeg:
 
 ```bash
-cd games/las
+cd examples/game-template
 make venv
 SDKROOT=$(xcrun --show-sdk-path) make -j10 CLANG=/usr/bin/clang
 ```
 
-The same works in `games/sky`, `games/eow`, `games/template` and `examples/ui-host`. The game code library
+The same works in your own `games/<id>` folder and in `examples/ui-host`. The `games/` folder is not part of this
+repository (each port stays with its own project). The game code library
 (`<id>game.dylib`) needs your own game files and is built by the start screen, not by `make`; `make` builds the app.
 
 Before sending a change:

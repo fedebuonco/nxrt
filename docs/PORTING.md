@@ -3,6 +3,9 @@
 How each game came onto nxrt, what changed for players, and what has been verified. The short version is in the
 [README](../README.md).
 
+**The three ports are not part of this repository.** Their `games/<id>/` folders (LAS, Sky, EoW) stay with their own
+projects; the notes below record what came into `nxrt/` from each, which is the reusable part.
+
 ## How a fork is merged
 
 LASRecomp, SkyRecomp and EoWRecomp share an ancestor: each fork started from a LAS commit. For every file the fork

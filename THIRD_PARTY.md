@@ -12,7 +12,6 @@ named here. Nothing in this repository includes Nintendo game code, fonts or key
 | xxHash | [`nxrt/third_party/xxhash`](nxrt/third_party/xxhash) | BSD 2-Clause — [`LICENSE`](nxrt/third_party/xxhash/LICENSE), © 2012–2021 Yann Collet |
 | ReShade headers | [`nxrt/third_party/reshade`](nxrt/third_party/reshade) | BSD 3-Clause — [`LICENSE`](nxrt/third_party/reshade/LICENSE), © 2014 Patrick Mours |
 | Baloo 2 font | [`nxrt/third_party/fonts/Baloo2`](nxrt/third_party/fonts/Baloo2) | SIL Open Font License 1.1 — [`OFL.txt`](nxrt/third_party/fonts/Baloo2/OFL.txt), © 2019 The Baloo 2 Project Authors |
-| LAS Randomizer | [`games/las/third_party/LAS-Randomizer`](games/las/third_party/LAS-Randomizer) | MIT — [`LICENSE.txt`](games/las/third_party/LAS-Randomizer/LICENSE.txt), © 2024 Owen_Splat |
 
 ## Build and runtime dependencies
 
@@ -30,13 +29,16 @@ The Python packages the recompiler needs in `tools/venv` (capstone, lz4, unicorn
 committed: capstone is BSD 3-Clause, lz4 is BSD 2-Clause, unicorn is GPL 2.0 (used only as a development tool, not
 linked into any shipped binary).
 
-## Games
+## Games and ports
 
-Each game folder keeps the license of the project it came from:
+The three ports built on nxrt — Link's Awakening (LASRecomp), Skyward Sword HD (SkyRecomp) and Echoes of Wisdom
+(EoWRecomp) — are **not distributed in this repository**. Each lives in its own `games/<id>/` folder with its own
+`LICENSE`, and each is MIT with its upstream notices kept:
 
-| Folder | License | From |
+| Port | License | From |
 |---|---|---|
-| [`games/las`](games/las) | MIT — [`LICENSE`](games/las/LICENSE) | [LASRecomp](https://github.com/peiikai/LASRecomp), © Peiikai |
-| [`games/sky`](games/sky) | MIT — [`LICENSE`](games/sky/LICENSE), derived from LAS — [`LICENSE-LASRecomp`](games/sky/LICENSE-LASRecomp) | [SkyRecomp](https://github.com/Apolinario-coder/SkyRecomp), © Apolinario-coder |
-| [`games/eow`](games/eow) | MIT — [`LICENSE`](games/eow/LICENSE) | [EoWRecomp](https://github.com/Nycolazs/EoWRecomp), © Peiikai and EoWRecomp contributors |
-| [`games/template`](games/template) | MIT, like nxrt — no separate file (it is the copy-me starting point) | — |
+| LAS Recomp | MIT | [LASRecomp](https://github.com/peiikai/LASRecomp), © Peiikai |
+| Sky Recomp | MIT, derived from LAS | [SkyRecomp](https://github.com/Apolinario-coder/SkyRecomp), © Apolinario-coder |
+| EoW Recomp | MIT | [EoWRecomp](https://github.com/Nycolazs/EoWRecomp), © Peiikai and EoWRecomp contributors |
+
+[`examples/game-template`](examples/game-template) is nxrt's own starting point: MIT, like nxrt, with no separate file.

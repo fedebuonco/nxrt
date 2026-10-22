@@ -33,5 +33,9 @@ __pycache__/
 *.log
 .DS_Store
 
+# The game ports (las, sky, eow) stay with their own projects: this repository is the runtime they share.
+# Create your own games/<id>/ from examples/game-template; it is never committed here.
+games/
+
 # Release-working notes, not part of the repository
 docs/HANDOFF_RELEASE.md

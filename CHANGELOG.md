@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to nxrt and the games in this repository. "Upstream" means the project a game came from:
+Notable changes to nxrt. "Upstream" means the project a game came from:
 [LASRecomp](https://github.com/peiikai/LASRecomp), [SkyRecomp](https://github.com/Apolinario-coder/SkyRecomp) or
 [EoWRecomp](https://github.com/Nycolazs/EoWRecomp).
 
@@ -25,7 +25,7 @@ once and put behind the `nxgame.h` interface. A game folder now holds only what 
 - **Input:** keyboard, controllers and mouse, all rebindable, with matching button prompts and an on-screen keyboard.
 - **Video:** unlocked aspect where the game supports it, resolution scale, MetalFX / FSR / NIS upscaling, SMAA, 60 or
   120 FPS where supported, ReShade on Windows.
-- **`games/template`** — the minimal game to copy for a new port — and **`examples/ui-host`**, a host that uses only
+- **`examples/game-template`** — the minimal game to copy for a new port — and **`examples/ui-host`**, a host that uses only
   the five runtime-independent layers (platform, settings, input, save, ui).
 - **`make venv`** in every game folder: creates the recompiler's Python environment (`tools/venv` with capstone, lz4,
   unicorn), which is not committed.
@@ -65,6 +65,7 @@ once and put behind the `nxgame.h` interface. A game folder now holds only what 
 - In-game play has been verified for LAS only (to its title screen and the opening movie). Sky and EoW have had their
   start screens checked.
 - Setup from an `.nsp` / `.xci` is compiled but has not been run.
-- The macOS packaging scripts (`games/las/tools/bundle_macos.sh`, `make_dmg.sh`) have not been re-run since the merges.
+- The macOS packaging scripts (`games/las/tools/bundle_macos.sh`, `make_dmg.sh`, in the LAS port, which is not part of
+  this repository) have not been re-run since the merges.
 
 See [`docs/PORTING.md`](docs/PORTING.md#verified-macos-arm64-2026-10-22) for the full verification record.

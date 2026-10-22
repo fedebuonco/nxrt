@@ -4,12 +4,15 @@
 unique to its game. nxrt provides everything games have in common: running the recompiled code, the Switch system
 around it, the graphics, and the app the player sees (start screen, menu, settings, saves, controls, mods).
 
-| Game | Folder | From | Status on nxrt |
-|---|---|---|---|
-| The Legend of Zelda: Link's Awakening | [`games/las`](games/las) | [LASRecomp](https://github.com/peiikai/LASRecomp) | Playable upstream; boots on nxrt to the title screen |
-| The Legend of Zelda: Skyward Sword HD | [`games/sky`](games/sky) | [SkyRecomp](https://github.com/Apolinario-coder/SkyRecomp) | Builds; menus verified |
-| The Legend of Zelda: Echoes of Wisdom | [`games/eow`](games/eow) | [EoWRecomp](https://github.com/Nycolazs/EoWRecomp) | Builds; start screen verified (upstream itself is early) |
-| *(a starting point)* | [`games/template`](games/template) | — | Identity only |
+| Port | From | Status on nxrt |
+|---|---|---|
+| The Legend of Zelda: Link's Awakening | [LASRecomp](https://github.com/peiikai/LASRecomp) | Playable upstream; boots on nxrt to the title screen |
+| The Legend of Zelda: Skyward Sword HD | [SkyRecomp](https://github.com/Apolinario-coder/SkyRecomp) | Builds; menus verified |
+| The Legend of Zelda: Echoes of Wisdom | [EoWRecomp](https://github.com/Nycolazs/EoWRecomp) | Builds; start screen verified (upstream itself is early) |
+
+Those three ports are built on nxrt in private `games/<id>/` folders and are **not part of this repository**: each stays
+with its own project and its own license. What ships here is the runtime they share, plus
+[`examples/game-template`](examples/game-template), the minimal game to copy for a new port.
 
 ## How it works
 
@@ -69,15 +72,16 @@ it on the include path, so an upward `#include` doesn't compile.
 macOS (Apple Silicon) with Homebrew's SDL3 and FFmpeg:
 
 ```bash
-cd games/las && make venv && SDKROOT=$(xcrun --show-sdk-path) make -j10 CLANG=/usr/bin/clang
+cd examples/game-template && make venv && SDKROOT=$(xcrun --show-sdk-path) make -j10 CLANG=/usr/bin/clang
 ```
 
 `make venv` creates the game's `tools/venv` with the recompiler's Python packages (capstone, lz4, unicorn). It isn't
 committed, and it's needed both by `make gen` and by the start screen's own build of the game code in a source checkout.
 
-Run `build/<exe>` and follow the start screen. Windows and Linux build with clang and the Vulkan renderer (not
-re-verified since the merges). Environment variables are `NXRT_*`. For example, `NXRT_CC=/usr/bin/clang` picks the
-compiler the setup uses (otherwise it finds zig from a packaged release, or the system clang).
+Run `build/<exe>` and follow the start screen. `examples/ui-host` builds the same way and needs no game at all. Windows
+and Linux build with clang and the Vulkan renderer (not re-verified since the merges). Environment variables are
+`NXRT_*`. For example, `NXRT_CC=/usr/bin/clang` picks the compiler the setup uses (otherwise it finds zig from a
+packaged release, or the system clang).
 
 ## Put a game on nxrt
 
@@ -91,7 +95,8 @@ games/<id>/
   tools/patches.py     the game's instruction patches for the recompiler (may be empty)
 ```
 
-1. **Copy [`games/template`](games/template)** to `games/<id>`.
+1. **Copy [`examples/game-template`](examples/game-template)** to `games/<id>` (that folder is yours: it is not
+   part of this repository).
 2. **Fill in `nx_game.info`** ([nxgame.h](nxrt/runtime/nxgame.h)): names, `title_id`, the first 8 bytes of
    `exefs/main`'s build id (offset `0x40`), a `romfs_probe` path every complete copy has, and `modules`. The modules are
    the NSOs in `exefs/` with their load addresses, matching `GAME_MODULES` in the Makefile. The loader refuses modules
@@ -150,8 +155,8 @@ nxrt/
   tools/                                 the recompiler (gen.py, lifter.py ...)
   third_party/                           imgui, SMAA, fonts, xxhash, ReShade
   nx.mk / nxrt.mk                        build rules: the layers / nx-runtime + a game
-games/       las, sky, eow, template
-examples/    ui-host
+games/       your ports (las, sky, eow locally: not part of this repository)
+examples/    game-template (the starting point), ui-host (the five layers on their own)
 docs/        ARCHITECTURE.md (shared vs per game, the recompiler, rebuilds, boot), NEW_GAME.md (a game from scratch),
              PORTING.md (merge notes, behaviour changes, verification), KICKOFF_PROMPT.md
 ```
