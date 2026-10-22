@@ -107,8 +107,8 @@ it changes only when that format does.
 
 ## What nxrt does not do for you
 
-- **The game's own code.** You need a recompiler run over your modules ([NEW_GAME.md](NEW_GAME.md) walks through it
-  from a dump to a booting game) and, usually, some `patches.py` entries where the translator's guess is wrong.
+- **The game's own code.** You run `tools/gen.py` over your modules and, usually, add `patches.py` entries where the
+  translator's guess is wrong. That is the port's own work.
 - **HLE for services nobody implemented yet.** `runtime/hle/` and `services/` cover what the ports so far needed.
   A new game that calls something missing gets a trap or a stub, and the fix is a new `HLE_FUNC` in the library — shared
   with every game, not a fork.
@@ -118,7 +118,7 @@ it changes only when that format does.
 
 macOS on Apple Silicon is the verified target (Metal, MetalFX). Windows (Vulkan, `zig cc`) and Linux (Vulkan) build and
 are in the tree, but haven't been re-verified since the ports were merged; treat them as works in progress. See
-[Status](../README.md#status) and [PORTING.md](PORTING.md#verified-macos-arm64-2026-10-22).
+[Status](../README.md#status).
 
 ## Building
 
