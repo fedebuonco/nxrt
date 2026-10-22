@@ -20,12 +20,13 @@ If the game already has a recomp that forked LAS Recomp, don't start from scratc
 - **Python 3** with `capstone`, `lz4` and `unicorn`. The recompiler needs them.
 - A disassembler you like (Ghidra, IDA, Binary Ninja) helps from step 6 on. You won't need it before.
 
-Never commit game files, dumps, keys or generated code. Only your descriptor, hooks and patches go in the repository.
+Never commit game files, dumps, keys or generated code. Your `games/<id>/` folder is yours, not part of this
+repository: keep it with your port (or your own fork of nxrt).
 
 ## 1. Lay out the folder
 
 ```bash
-cp -R games/template games/<id>
+cp -R examples/game-template games/<id>
 cd games/<id>
 python3 -m venv tools/venv && tools/venv/bin/pip install capstone lz4 unicorn
 ```
