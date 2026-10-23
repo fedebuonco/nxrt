@@ -2,6 +2,7 @@
 #include "paths.h"
 #include "settings.h"
 #include "menu.h"
+#include "run_timer.h"
 #include "nx_ui_metal.h"
 // Metal renderer for the NVN layer: window, textures, command execution, presentation.
 #include <sys/stat.h>
@@ -1545,6 +1546,7 @@ int ui_run(void) {
                               reason:@"Game emulation"];
     ui_window_init();
     atomic_store(&ui_ready, true);
+    uint64_t ui_frame = 0;
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
@@ -1558,6 +1560,7 @@ int ui_run(void) {
         input_rumble_permit(!menu_is_open());  // (an open menu is not playing: no rumble)
         input_rumble_poll();                   // (a port's HID vibration -> the pad; UI thread, as SDL wants)
         input_led_poll();
+        nx_timer_frame(ui_frame++);            // (the run clock's LiveSplit sync; NXRT_TIMER_TEST self-test)
         int w, h;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);

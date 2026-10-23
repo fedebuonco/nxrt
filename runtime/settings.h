@@ -38,6 +38,9 @@ typedef struct {
     char game_dir[1024];  // the game folder (nx-platform rt_game_dir): "" = extracted/ in the data root
     bool game_in_place;   // it is the player's own extract (exefs/, romfs/ theirs): only what the app builds goes there
     bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
+    bool livesplit;      // send the run clock to LiveSplit Server (runtime/livesplit.c)
+    char livesplit_host[128];  // its host:port ("localhost", "127.0.0.1:16834")
+    int livesplit_port;        // when the host has no ":port"
 } Settings;
 
 enum { N_ENEMY_COLOUR_MODES = 3, N_SCREEN_FILTERS = 4 };
