@@ -535,16 +535,20 @@ bool romfs_file_by_path(const char *rel, uint64_t *out_off, uint64_t *out_size) 
 }
 ssize_t romfs_image_pread(void *dst, size_t n, uint64_t off) { return romfs_read(dst, n, off); }
 
-// Path of the RomFS file containing image offset `off` (NULL if none).
-const char *romfs_file_at(uint64_t off) {
+// The RomFS file containing image offset `off` (NULL if none).
+static const RomFile *rom_entry_at(uint64_t off) {
     int lo = 0, hi = rom_nfiles - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
         if (off < rom_files[mid].off) hi = mid - 1;
         else if (off >= rom_files[mid].off + rom_files[mid].size) lo = mid + 1;
-        else return rom_files[mid].path;
+        else return &rom_files[mid];
     }
     return NULL;
+}
+const char *romfs_file_at(uint64_t off) {
+    const RomFile *e = rom_entry_at(off);
+    return e ? e->path : NULL;
 }
 
 
@@ -561,8 +565,15 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         if (size > b->size) size = b->size;
         ssize_t n = romfs_read((uint8_t *)(uintptr_t)b->addr, size, off);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        const RomFile *rf = rom_entry_at(off);
+        if (n > 0 && rf && NX_HOOK(romfs_read_filter)) {  // (the game about to see these bytes: a content patch?)
+            uint64_t within = off - rf->off;
+            uint64_t avail = rf->size > within ? rf->size - within : 0;
+            if (avail > (uint64_t)n) avail = (uint64_t)n;  // (the part of the read that is this file)
+            if (avail) NX_HOOK(romfs_read_filter)(rf->path, within, (void *)(uintptr_t)b->addr, (size_t)avail);
+        }
         {
-            const char *path = romfs_file_at(off);
+            const char *path = rf ? rf->path : NULL;
             static const char *last;
             if (path && path != last) {
                 last = path;

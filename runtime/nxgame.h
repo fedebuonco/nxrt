@@ -81,6 +81,13 @@ typedef struct NxMenuTab {
     bool (*draw)(float scale);   // render thread, inside the page: true closes the menu
 } NxMenuTab;
 
+// One HUD overlay a game draws while the menu is closed (a timer, a pickup card, a tracker). Drawn in array order,
+// under the menu, above the game image (runtime/ui/menu.mm, MAX_OVERLAYS = 8).
+typedef struct NxOverlay {
+    bool (*wanted)(void);
+    void (*draw)(float w, float h, void *font);  // ImFont *
+} NxOverlay;
+
 // ------------------------------------------------------------------ hooks
 typedef struct NxGameHooks {
     // boot (main thread)
@@ -111,6 +118,10 @@ typedef struct NxGameHooks {
     // files (runtime/services/fs.c)
     const char *(*content_dir)(void);  // the active overlay folder (it may hold romfs/ additions, save/), NULL = none
     bool (*romfs_override)(const char *path, char *host, size_t cap);  // a host file served instead of this RomFS file
+    // The game is about to see `n` bytes of a RomFS file, read at `off` in that file: the hook may rewrite `buf`
+    // (guest memory) in place and returns true when it did (a seed's room files, content patches). Called on every
+    // read of RomFS bytes, so keep it a cheap check first.
+    bool (*romfs_read_filter)(const char *path, uint64_t off, void *buf, size_t n);
     void (*romfs_file_opened)(const char *path);
     void (*save_read)(const char *path, uint64_t addr, int64_t off, int64_t size);     // after a save file read
     void (*save_written)(const char *path, uint64_t addr, int64_t off, int64_t size);  // before a save file write
@@ -154,7 +165,11 @@ typedef struct NxGameHooks {
     const NxMenuTab *menu_pages;
     int menu_npages;
     void (*menu_opened)(void);
-    bool (*overlay_wanted)(void);         // a game overlay is up while the menu is closed
+    // HUD overlays, in this order, while the menu is closed. A port with a single overlay can keep using the pair
+    // below (it is drawn after these).
+    const NxOverlay *overlays;
+    int noverlays;
+    bool (*overlay_wanted)(void);
     void (*overlay_draw)(float w, float h, void *font);  // ImFont *
 
     // start screen (runtime/ui/launcher.mm): the game's boot profiles (e.g. randomizer seeds) next to "Vanilla"

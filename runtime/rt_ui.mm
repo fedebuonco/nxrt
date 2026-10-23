@@ -948,6 +948,9 @@ extern "C" void rt_ui_register(void) {
         nxui_add_game_page(&g_game_tabs[i]);
     }
     nxui_add_rows(NXUI_ROWS_CONTROLS, language_rows);
+    for (int i = 0; i < NX_HOOK(noverlays); i++)
+        if (NX_HOOK(overlays)[i].wanted && NX_HOOK(overlays)[i].draw)
+            nxui_add_overlay(NX_HOOK(overlays)[i].wanted, NX_HOOK(overlays)[i].draw);
     if (NX_HOOK(overlay_wanted) && NX_HOOK(overlay_draw)) nxui_add_overlay(NX_HOOK(overlay_wanted), NX_HOOK(overlay_draw));
     if (NX_HOOK(menu_opened)) nxui_on_menu_open(NX_HOOK(menu_opened));
     nxui_set_quit_to_start(quit_to_start);
