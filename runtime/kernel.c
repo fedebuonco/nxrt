@@ -138,6 +138,8 @@ static int nregions;
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
 uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
+static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm);
+static void region_remove(uint64_t addr);
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     int n = 0;
@@ -165,6 +167,14 @@ static void region_remove(uint64_t addr) {
             return;
         }
     }
+}
+
+// What rtld's svcSetHeapSize does before nn::init::Start: the process heap the SDK hands to malloc.
+void kernel_set_heap(uint64_t size) {
+    if (size > HEAP_MAX) size = HEAP_MAX;
+    heap_size = size;
+    region_remove(HEAP_BASE);
+    if (size) region_add(HEAP_BASE, size, 5, 3);
 }
 
 static void query_memory(uint64_t addr, uint64_t out) {
@@ -331,7 +341,8 @@ static void mutex_release(uint64_t addr) {
 
 KThread *g_waitlist;
 // (diagnostics) the last NXRT_KTRACE_N kernel condition-variable / mutex calls, lock-free, for the "[hang]" dump: what
-// each thread did with which key / mutex word, and the words before and after. NXRT_KTRACE=0 turns it off.
+// each thread did with which key / mutex word, and the words before and after. Off unless NXRT_KTRACE=1: the extra
+// reads and timing change how tight the game's threading races run, and games have hung with it on (EoW, Sky, 2026-10-23).
 enum { KT_WAIT, KT_WAIT_END, KT_SIGNAL, KT_LOCK, KT_LOCK_END, KT_UNLOCK };
 #define KTRACE_N 256
 typedef struct { uint64_t ns, tid, addr, addr2; uint32_t w0, w1, w2, arg, kind; } KTrace;
@@ -340,7 +351,7 @@ static uint64_t ktrace_n;  // (__atomic builtins)
 static int ktrace_on = -1;
 static uint32_t rdw(uint64_t a) { return a ? __atomic_load_n((uint32_t *)(uintptr_t)a, __ATOMIC_SEQ_CST) : 0; }
 static void kt(uint32_t kind, uint64_t addr, uint64_t addr2, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t arg) {
-    if (ktrace_on < 0) ktrace_on = !getenv("NXRT_KTRACE") || atoi(getenv("NXRT_KTRACE")) != 0;
+    if (ktrace_on < 0) ktrace_on = getenv("NXRT_KTRACE") && atoi(getenv("NXRT_KTRACE")) != 0;
     if (!ktrace_on) return;
     KTrace *e = &ktrace[__atomic_fetch_add(&ktrace_n, 1, __ATOMIC_RELAXED) % KTRACE_N];
     *e = (KTrace){plat_now_ns(), t_cur ? t_cur->id : 0, addr, addr2, w0, w1, w2, arg, kind};

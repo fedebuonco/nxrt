@@ -49,7 +49,33 @@ static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
 // nnosQuickExit: SDK constructors run early, the other modules' once nninitStartup has set up the game's heap.
 // rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
 // __nnmusl_init_dso and then runs its init_array; fall back to the array if there is no DT_INIT.
+// The SDK allocates each thread's TLS block through these two function pointers (nn::os::
+// SetMemoryAllocatorForThreadLocal). rtld normally sets them before any module's constructors; nxrt does not run
+// rtld, so a game whose SDK constructors allocate (Unity: iostreams) needs them set first. Guest-visible memory.
+static void hle_tls_alloc(Cpu *c) {
+    uint64_t size = c->x[0], align = c->x[1] ? c->x[1] : 16;
+    if (align < 16) align = 16;
+    uint64_t p = (uint64_t)hle_alloc(size + align);
+    c->x[0] = (p + align - 1) & ~(align - 1);
+}
+static void hle_tls_free(Cpu *c) { (void)c; c->x[0] = 0; }  // (TLS blocks live as long as the process)
+
+static bool skip_init(const char *name) {
+    const char *list = getenv("NXRT_SKIP_INIT");  // test: a comma list of module names whose init/fini arrays to skip
+    if (!list) return false;
+    size_t n = strlen(name);
+    for (const char *p = list; *p;) {
+        const char *e = strchr(p, ',');
+        size_t l = e ? (size_t)(e - p) : strlen(p);
+        if (l == n && !strncmp(p, name, n)) return true;
+        if (!e) break;
+        p = e + 1;
+    }
+    return false;
+}
+
 static void module_init(Cpu *c, Module *m) {
+    if (skip_init(m->name)) { LOG("init %s skipped (NXRT_SKIP_INIT)\n", m->name); return; }
     LOG("init %s (DT_INIT %llx, %llu init_array entries)\n", m->name, m->init, m->init_array_sz / 8);
     if (m->init) guest_call(c, m->init);
     else run_array(c, m->init_array, m->init_array_sz);
@@ -59,6 +85,7 @@ static void module_init(Cpu *c, Module *m) {
 // but main runs early; games whose other modules need the SDK's heap (nx_game hooks late_module_init) run them late,
 // main last (it uses the others).
 static void rtld_init_sdk(Cpu *c) {
+    if (getenv("NXRT_SDK_INIT_LATE")) return;  // test: the sdk's constructors run in x3, after _init_libc1
     if (NX_HOOK(late_module_init)) {
         Module *sdk = loader_module("sdk");
         if (sdk) module_init(c, sdk);
@@ -68,8 +95,9 @@ static void rtld_init_sdk(Cpu *c) {
 }
 static void rtld_init_main(Cpu *c) {
     if (!NX_HOOK(late_module_init)) { module_init(c, &g_modules[0]); return; }
+    bool late_sdk = getenv("NXRT_SDK_INIT_LATE") != NULL;
     for (int i = g_nmodules - 1; i >= 0; i--)
-        if (strcmp(g_modules[i].name, "sdk")) module_init(c, &g_modules[i]);
+        if (late_sdk || strcmp(g_modules[i].name, "sdk")) module_init(c, &g_modules[i]);
 }
 // After nnMain returns (x4, the newer SDKs' third callback): the game is quitting (nnosQuickExit follows); destructors
 // aren't worth running.
@@ -254,7 +282,28 @@ static void boot(const char *root) {
     uint64_t fini_fn = hle_register("<rtld_fini>", rtld_fini);
     diagnostics_start();
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    kernel_run_main(t, t->handle, 0, init_fn, main_fn, fini_fn);  // nn::init::Start(thread, args, init_sdk, init, fini)
+    if (getenv("NXRT_TLS_ALLOC")) {
+        uint64_t setter = loader_find_symbol("_ZN2nn2os32SetMemoryAllocatorForThreadLocalEPFPvmmEPFvS1_mE");
+        if (setter) {
+            t->cpu.x[0] = hle_register("<tls_alloc>", hle_tls_alloc);
+            t->cpu.x[1] = hle_register("<tls_free>", hle_tls_free);
+            guest_call(&t->cpu, setter);
+            LOG("tls allocator set (alloc %#llx free %#llx)\n", (unsigned long long)t->cpu.x[0], (unsigned long long)t->cpu.x[1]);
+        } else LOG("tls allocator: SetMemoryAllocatorForThreadLocal not found\n");
+    }
+    // rtld normally passes the process heap (svcSetHeapSize) as Start's two u64 arguments; NXRT_START_HEAP=<bytes>
+    // does the same (the SDK's heap, which its own constructors allocate from; LAS's never do this early).
+    const char *heap_env = getenv("NXRT_START_HEAP");
+    const char *arg1_env = getenv("NXRT_START_ARG1");
+    if ((heap_env && *heap_env) || (arg1_env && *arg1_env)) {
+        uint64_t size = heap_env && *heap_env ? strtoull(heap_env, NULL, 0) : 0x40000000;
+        kernel_set_heap(size);
+        uint64_t arg1 = arg1_env && *arg1_env ? strtoull(arg1_env, NULL, 0) : size;
+        LOG("main heap: %#llx bytes at %#llx (Start arg1 %#llx)\n", (unsigned long long)kernel_heap_size(),
+            (unsigned long long)HEAP_BASE, (unsigned long long)arg1);
+        kernel_run_main(t, t->handle, arg1, init_fn, main_fn, fini_fn);
+    } else
+        kernel_run_main(t, t->handle, 0, init_fn, main_fn, fini_fn);  // nn::init::Start(thread, args, init_sdk, init, fini)
 }
 
 // The layers under the runtime (nx-platform, -settings, -input, -save, -ui): who the app is, the runtime as their host.
