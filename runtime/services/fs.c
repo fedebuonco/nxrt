@@ -1085,3 +1085,20 @@ SERVICE("fsp-srv", fsp_srv) {
     default: LOG("[fs] fsp-srv cmd %u (ok)\n", req->cmd);
     }
 }
+
+// ---- a game's own read of a RomFS file (e.g. a texture pack at startup): the file itself, offset 0.
+// The folder is served directly since the RomFS redesign, so there is no image fd to hand out.
+bool romfs_find_file(const char *rel, int *out_fd, uint64_t *out_off, uint64_t *out_size) {
+    char path[1200];
+    struct stat sb;
+    snprintf(path, sizeof path, "%s/%s", g_romfs_dir ? g_romfs_dir : "", rel);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) { close(fd); return false; }
+    *out_fd = fd;
+    *out_off = 0;
+    *out_size = (uint64_t)sb.st_size;
+    return true;
+}
+
+ssize_t romfs_pread(int fd, void *dst, size_t n, off_t off) { return pread(fd, dst, n, off); }

@@ -47,9 +47,8 @@ Report: what step failed, the tail of the terminal log, and whether `romfs.bin` 
 
 - `games/las` — builds.
 - `games/eow` — builds.
-- `games/sky` — **does not link**: its `texpatch` calls `romfs_find_file()`, which the RomFS redesign removed (beta_5
-  serves files from the folder and has no image fd to hand out). Either the port reads the host file directly, or the
-  library grows a compatibility helper.
+- `games/sky` — builds: the library keeps `romfs_find_file()` / `romfs_pread()` as a game-side helper (the file
+  itself, offset 0) since the RomFS redesign removed the image fd.
 
 ## Known gaps that will show up in a play test
 
