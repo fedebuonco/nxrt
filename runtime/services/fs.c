@@ -1,5 +1,7 @@
 #include "nx_save.h"
 #include "nxgame.h"
+#include "nxpkg.h"
+#include "romfs_build.h"
 // fsp-srv: RomFS as a raw storage image, save data and SD card backed by host directories.
 #include <dirent.h>
 #include <errno.h>
@@ -32,6 +34,7 @@
 // laid out in memory (runtime/romfs_build.c), each file's bytes read from its own file, the gaps between files zeros -
 // no image file on disk, so the game data isn't kept twice. A romfs.bin from an older version is used only when the
 // folder isn't there.
+static NxRomfs *g_pkg;  // the game package's RomFS, read in place (romfs.src)
 static RomfsLayout g_base;
 static bool g_base_open;
 static int g_base_fd = -1;  // (an older version's romfs.bin)
@@ -63,6 +66,7 @@ static uint64_t base_size(void) {
 
 // n bytes of the base image at off (past its end: zeros)
 static ssize_t base_pread(void *dst_, uint64_t n, uint64_t off) {
+    if (g_pkg) return nx_romfs_pread(g_pkg, dst_, n, off);  // the package's RomFS, in place
     if (g_base_fd >= 0) return pread(g_base_fd, dst_, n, (off_t)off);
     uint8_t *dst = dst_;
     memset(dst, 0, n);
@@ -100,6 +104,7 @@ static void base_close(void) {
     for (int k = 0; k < BASE_FDS; k++) if (g_base_fds[k].fd > 0) close(g_base_fds[k].fd);
     memset(g_base_fds, 0, sizeof g_base_fds);
     romfs_layout_free(&g_base);
+    nx_romfs_close(g_pkg), g_pkg = NULL;
     if (g_base_fd >= 0) close(g_base_fd);
     g_base_fd = -1;
     g_base_open = false;
@@ -113,7 +118,28 @@ static void base_open(void) {
     // NXRT_ROMFS_BIN=1: an older version's image, for comparing the two read paths
     if (!getenv("NXRT_ROMFS_BIN") && stat(path, &sb) == 0 && romfs_layout(g_romfs_dir, &g_base, why, sizeof why)) {
         LOG("[fs] romfs: %d files served from %s\n", g_base.nfiles, g_romfs_dir);
-    } else {
+    } else if ((g_pkg = nx_romfs_open((snprintf(path, sizeof path, "%s.src", g_romfs_dir), path), why, sizeof why))) {
+        // a RomFS read straight from the game package: the image's own header says where its tables are
+        uint8_t hdr[0x50];
+        uint64_t v[10];
+        if (nx_romfs_pread(g_pkg, hdr, sizeof hdr, 0) != (ssize_t)sizeof hdr) {
+            nx_romfs_close(g_pkg), g_pkg = NULL;
+        } else {
+            memcpy(v, hdr, sizeof v);
+            memcpy(g_base.header, hdr, sizeof hdr);
+            g_base.tables_off = v[1];
+            g_base.tables_size = v[7] + v[8] - v[1];
+            g_base.size = v[7] + v[8];
+            g_base.tables = malloc(g_base.tables_size ? g_base.tables_size : 1);
+            if (!g_base.tables || nx_romfs_pread(g_pkg, g_base.tables, g_base.tables_size, g_base.tables_off) !=
+                                      (ssize_t)g_base.tables_size) {
+                nx_romfs_close(g_pkg), g_pkg = NULL;
+            } else {
+                LOG("[fs] romfs: served from the package %s\n", path);
+            }
+        }
+    }
+    if (!g_pkg) {
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // (an older version's image)
         g_base_fd = open(path, O_RDONLY);
         if (g_base_fd < 0) FATAL("cannot read the game data in %s %s(set up the game files on the start screen)\n",
