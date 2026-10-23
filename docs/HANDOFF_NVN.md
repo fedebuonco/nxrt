@@ -1,5 +1,8 @@
 # Handoff: bringing LAS beta_5's runtime into nxrt
 
+> **Project-level handoff: [HANDOFF.md](HANDOFF.md)** — architecture, the three ports, how to build/run, and the
+> current goal (EoW's graphical glitches). This page is the NVN-specific history behind it.
+
 **Frozen 2026-10-23 and merged to `master` (tag `v0.2.0`): LAS, EoW and Sky all boot and play.** The shared runtime
 now covers beta_5's shared part (96.5% by lines, every shared file), with beta_5's start-screen shader preparation,
 overlay caching, the mechanisms' Controls rows, the OneDrive warning and the kernel trace/dump ported on top.
