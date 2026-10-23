@@ -1,6 +1,9 @@
 # nxrt — project handoff
 
-**v0.3.0, 2026-10-23.** Release: <https://github.com/fedebuonco/nxrt/releases/tag/v0.3.0> (`master` = the release tag).
+**v0.4.0, 2026-10-23.** Release: <https://github.com/fedebuonco/nxrt/releases/tag/v0.4.0> (`master` = the release tag).
+v0.4.0 is the hardening/testing/tooling release: the host test suite, the safe shared LZ4 decoder, bounds checks in the
+NSO/package/RomFS parsers, the LayeredFS wiring fix, and the clang-format/clang-tidy setup. Game-facing behavior is
+otherwise unchanged from v0.3.0.
 The NVN-specific history is in [HANDOFF_NVN.md](HANDOFF_NVN.md); the gap against LASRecomp `beta_5` is in
 [BETA5_GAP.md](BETA5_GAP.md); the port roadmap is [PLAN_BETA5_PARITY.md](PLAN_BETA5_PARITY.md).
 
@@ -179,4 +182,4 @@ Useful run variables: `NXRT_WINDOW=1280x720`, `NXRT_WINDOW_SHOT=<frame>` + `NXRT
   opt-in now. For a freeze, `NXRT_HANG_DUMP=15` (prints threads + the kernel trace if enabled) is the tool.
 - The external SSD occasionally unmounts; `exefs/main is missing or unreadable` means retry.
 - Ports live in `games/` (gitignored). `build-wip/` is a throwaway build dir; a clean build is `B=build-master`.
-- The release tag is `v0.3.0`; earlier freeze tags: `nvn-three-games-2026-10-23`, `v0.1.0`.
+- The release tag is `v0.4.0`; earlier freeze tags: `v0.3.0`, `nvn-three-games-2026-10-23`, `v0.1.0`.
