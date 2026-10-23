@@ -63,8 +63,8 @@ not in nxrt.
 
 ### In nxrt (shared), deliberately not taken
 
-- **Translator recolour** (`emit_recolour_window`, `ltint[4]`): ~70 lines. Unreachable with today's `draw_tint`
-  (8 floats); would need the 16-float hook and the recolour callers.
+- **Translator recolour** (`emit_recolour_window`, `ltint[4]`): **now in** (M1 — the 16-float tint hook and the
+  translator's recolour branch); the LAS recolour module that drives it is P1 port work.
 - **Vulkan chunked heap** (`maxwell_gmem_chunk_shift`/`lazy`, windows/buffer references): ~300 lines, Vulkan-only.
   The Vulkan backend still reads the controls; the current translator binds one heap buffer.
 - **Kernel diagnostics**: beta_5's `KTRACE` and richer thread trace (~464 lines of delta). The scheduling half of

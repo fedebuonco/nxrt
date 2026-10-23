@@ -13,6 +13,20 @@ LAS port brings the content. Nothing LAS-specific goes into `runtime/`.
 - Every mechanism lands with a game-neutral gate (boot LAS/EoW/Sky) and a feature gate (the LAS feature that needed
   it). If a mechanism only makes sense for LAS, it is not a mechanism.
 
+## Status (2026-10-23)
+
+- **M1 done** (Metal + translator): `draw_tint` is `ltint[16]`, the translator emits beta_5's recolour (Metal and
+  GLSL), `NXRT_NO_RECOLOUR=1` is the A/B switch. Vulkan's tint path stays beta_5's LAS-coupled code for the Vulkan
+  port task (it has never been compiled here — it does not even define `RECOLOUR_TINT_FLOATS`).
+- **M2 done**: `overlays`/`noverlays`, the old pair still drawn after them.
+- **M3 done**: `runtime/run_timer.c` + beta_5's LiveSplit client, verified against a loopback server (starttimer,
+  splits, setgametime every ~260 ms, pausegametime); `NXRT_TIMER_TEST=1` self-test.
+- **M4 done**: `nfp:user` (amiibo, no tag present) ported verbatim.
+- **M5 done**: HID vibration 201/202/206 → SDL rumble; `input_led_set/poll/stop` for ports.
+- **M6 done**: `romfs_read_filter(path, off, buf, n)` on the IStorage(romfs) read path.
+
+LAS, EoW and Sky build and boot after every mechanism. Next: P1 (LAS recolour/cosmetics on M1).
+
 ## Inventory (beta_5 files not in `games/las`, 27 files / ~6.8k lines)
 
 | beta_5 files | lines | mechanism it needs | owner |
