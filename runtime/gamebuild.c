@@ -317,6 +317,13 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     char id[GAMELIB_FULL_ID_SIZE + 32];
     snprintf(id, sizeof id, "-DGAMELIB_ID=\"%s\"", g_full_id);
     add(&a, id);
+    if (!strcmp(u->stem, "gamelib_entry")) {  // the library's module table (tools/gamelib_entry.c)
+        char mods[512];
+        size_t at = (size_t)snprintf(mods, sizeof mods, "-DNX_MODULES=");
+        for (int i = 0; i < nx_module_count() && i < NX_MAX_MODULES; i++)
+            at += (size_t)snprintf(mods + at, sizeof mods - at, "X(%s) ", nx_module_name(i));
+        add(&a, mods);
+    }
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
@@ -353,8 +360,14 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     // Compiler/header/flag changes invalidate every object; entry always rebuilds because it embeds the library id.
     const char *inputs[] = {input_paths[2], input_paths[3], input_paths[4], input_paths[5], t.cc};
     // The compiler's contents identify it, so relocating the app does not discard reusable objects.
-    snprintf(spec, sizeof spec, "LASBUILD3\n%s\n%s\n%s\nzig=%d pointer=%d%s%s\n", GAMELIB_BASE_ID,
-             GAMELIB_CFLAGS, GAMELIB_SHARED, t.zig, (int)sizeof(void *),  // (+ the Linux zig target: objects from
+    char layout[512] = "", genspec[640];  // the game's modules and where each is mapped (below, the generators too)
+    for (int i = 0; i < nx_module_count() && i < NX_MAX_MODULES; i++) {
+        size_t at = strlen(layout);
+        snprintf(layout + at, sizeof layout - at, "%s%s@0x%llx", i ? "," : "", nx_module_name(i),
+                 (unsigned long long)nx_module_base_at(i));
+    }
+    snprintf(spec, sizeof spec, "LASBUILD3\n%s\n%s\n%s\nzig=%d pointer=%d layout=%s%s%s\n", GAMELIB_BASE_ID,
+             GAMELIB_CFLAGS, GAMELIB_SHARED, t.zig, (int)sizeof(void *), layout,  // (+ the Linux zig target: objects from
              t.zig && ZIG_TARGET[0] ? " target=" : "", t.zig ? ZIG_TARGET : "");  // before it are rebuilt once)
     if (o->progress) o->progress(0, "Checking completed build files...");
     bool resuming = build_cache_resumable(game_dir);  // (a cancelled or interrupted build; read before open marks this one)
@@ -371,7 +384,11 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     const char *gen_inputs[5] = {input_paths[0], input_paths[1], t.gen, t.hle};
     int ngen = 4;
     if (t.gen_script[0]) gen_inputs[ngen++] = t.gen_script;
-    if (!build_cache_prepare_generation(cache, GAMELIB_ID, gen_inputs, ngen, why, why_size)) {
+    // the modules and where each is mapped: a game with another layout (a different sdk base, sub-SDKs) must generate
+    // its code again, not reuse the previous layout's (nx_game.info.modules, runtime/loader.c)
+    const int nmods = nx_module_count();
+    snprintf(genspec, sizeof genspec, "%s layout=%s", GAMELIB_ID, layout);
+    if (!build_cache_prepare_generation(cache, genspec, gen_inputs, ngen, why, why_size)) {
         build_cache_failed(cache);
         build_cache_close(cache);
         return false;
@@ -390,12 +407,14 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
         t.cc, t.zig ? " cc" : "", o->jobs);
 
-    // 1. the generator, both modules at once; their finished files are compiled while it goes on
-    Gen gens[2] = {{.name = "main"}, {.name = "sdk"}};
-    static const char *const base[2] = {"0x7000000000", "0x7004000000"};
+    // 1. the generator, every module at once; their finished files are compiled while it goes on
+    Gen gens[NX_MAX_MODULES] = {0};
+    char base[NX_MAX_MODULES][24] = {{0}};
     bool ok = true;
-    for (int i = 0; i < 2 && ok; i++) {
+    for (int i = 0; i < nmods && i < NX_MAX_MODULES && ok; i++) {
         Gen *g = &gens[i];
+        g->name = nx_module_name(i);
+        snprintf(base[i], sizeof base[i], "0x%llx", (unsigned long long)nx_module_base_at(i));
         g->exit = -1;
         snprintf(g->log, sizeof g->log, "%s" SEP "gen_%s.log", work, g->name);
         snprintf(g->out, sizeof g->out, "%s" SEP "%s", work, g->name);
@@ -413,15 +432,15 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         add(&a, nso);
         add(&a, base[i]);
         add(&a, g->out);
-        if (i == 1) { add(&a, "--hle"); add(&a, t.hle); }
+        if (!strcmp(g->name, "sdk")) { add(&a, "--hle"); add(&a, t.hle); }
         g->p = spawn(a.v, g->log);
         args_free(&a);
         if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }
     }
 
     Units units = {0};
-    int queued[2] = {0, 0};  // chunk files of each module put in units so far
-    bool tables[2] = {false, false};
+    int queued[NX_MAX_MODULES] = {0};  // chunk files of each module put in units so far
+    bool tables[NX_MAX_MODULES] = {false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
     struct { PlatProc p; int unit; } run[64];
     int nrun = 0;
@@ -439,7 +458,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         bool gens_done = true;
         double gen_frac = 0;
         unsigned long long written = 0;
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < nmods && i < NX_MAX_MODULES; i++) {
             Gen *g = &gens[i];
             if (g->exit < 0) {
                 read_gen_log(g);
@@ -472,7 +491,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 add_unit(&units, src, work, stem);
                 tables[i] = true;
             }
-            gen_frac += g->exit == 0 ? 0.5 : g->n ? 0.5 * (double)g->ci / (double)g->n : 0;
+            gen_frac += (g->exit == 0 ? 1.0 : g->n ? (double)g->ci / (double)g->n : 0) / nmods;
         }
         if (!ok) break;
         for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
