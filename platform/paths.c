@@ -129,7 +129,7 @@ static void default_home(char *root, size_t n) {
 #ifdef _WIN32
     exe_dir(root, n);
 #elif defined(__linux__)
-    // (the AppImage is read-only): $XDG_DATA_HOME/lasrecomp, ~/.local/share/lasrecomp by default
+    // (the AppImage is read-only): $XDG_DATA_HOME/<app>, ~/.local/share/<app> by default
     const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
     if (xdg && *xdg == '/') snprintf(root, n, "%s/%s", xdg, nx_app.data_dir);
     else snprintf(root, n, "%s/.local/share/%s", home && *home ? home : "/tmp", nx_app.data_dir);
@@ -344,7 +344,7 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) {
     }
     if (dev_rel) {
         snprintf(c[2], sizeof c[2], "%s" SEP "%s", g_start, dev_rel);
-        snprintf(c[3], sizeof c[3], "%s" SEP ".." SEP "%s", g_exe_dir, dev_rel);  // build/lasrecomp -> repo root
+        snprintf(c[3], sizeof c[3], "%s" SEP ".." SEP "%s", g_exe_dir, dev_rel);  // build/<exe> -> repo root
     }
     for (int i = 0; i < 4; i++)
         if (c[i][0] && exists(c[i])) return (size_t)snprintf(out, n, "%s", c[i]) < n;  // (as is: a venv python must stay a link)

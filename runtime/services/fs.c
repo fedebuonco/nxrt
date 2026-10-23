@@ -682,7 +682,7 @@ static int scratch_copy(const char *from) {
 #else
     char name[1100];
     const char *dir = getenv("TMPDIR");
-    snprintf(name, sizeof name, "%s/lasrecomp-save-XXXXXX", dir && *dir ? dir : "/tmp");
+    snprintf(name, sizeof name, "%s/nxrt-save-XXXXXX", dir && *dir ? dir : "/tmp");
     int fd = mkstemp(name);
     if (fd >= 0) unlink(name);
 #endif

@@ -1,5 +1,5 @@
-// macOS / Linux session log (included by macos.c and linux.c): lasrecomp.log in the data folder is always the latest
-// run; a new start moves the previous one aside as lasrecomp-backup-<YYYYMMDD-HHMMSS>-<pid>.log (its last write, the
+// macOS / Linux session log (included by macos.c and linux.c): <the app's name>.log in the data folder is always
+// the latest run; a new start moves the previous one aside as <app>-backup-<YYYYMMDD-HHMMSS>-<pid>.log (its last write, the
 // pid from its first line, 0 if unknown) and keeps the five newest of those, as on Windows. Moving instead of
 // truncating also means a copy still running or quitting keeps writing to its own (moved) file. Processes started by
 // this one (the start screen re-executing itself for the game) get LASRECOMP_LOG_APPEND and append to the same log.
