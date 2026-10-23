@@ -308,7 +308,9 @@ static void boot(const char *root) {
         uint64_t arg1 = arg1_env && *arg1_env ? strtoull(arg1_env, NULL, 0) : size;
         LOG("main heap: %#llx bytes at %#llx (Start arg1 %#llx)\n", (unsigned long long)kernel_heap_size(),
             (unsigned long long)HEAP_BASE, (unsigned long long)arg1);
-        kernel_run_main(t, t->handle, arg1, init_fn, main_fn, fini_fn);
+        const char *arg0_env = getenv("NXRT_START_ARG0");
+        uint64_t arg0 = arg0_env && *arg0_env ? strtoull(arg0_env, NULL, 0) : t->handle;
+        kernel_run_main(t, arg0, arg1, init_fn, main_fn, fini_fn);
     } else
         kernel_run_main(t, t->handle, 0, init_fn, main_fn, fini_fn);  // nn::init::Start(thread, args, init_sdk, init, fini)
 }
