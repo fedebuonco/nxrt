@@ -127,6 +127,7 @@ typedef struct NxGameHooks {
     uint32_t (*tex_generation)(void);          // changes when restyled textures must be uploaded again
     // restyle mip level lv of texture id in place: its linear data in its own format (rows of blocks, row bytes apart)
     void (*tex_apply)(int id, uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row);
+    NvnTexture *(*tex_replace)(int id);  // a texture to sample in place of this one (a game icon over a map), or NULL
     bool (*scene_fresh_targets)(const char *scene);  // a scene that never draws its surroundings: targets start black
     // graphics: per draw (render thread), in this order. false from draw_shader / draw_textures leaves the draw out.
     bool (*draw_shader)(NxDraw *d);       // the program is known (fs_hash, ubo): before textures are bound

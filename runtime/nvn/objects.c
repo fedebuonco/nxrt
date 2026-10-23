@@ -1,9 +1,11 @@
 // NVN objects, builders, and state objects (everything except command recording).
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../kernel.h"
 #include "nvn.h"
+#include "rqueue.h"
 
 void renderer_sync(void);
 
@@ -36,21 +38,19 @@ NVN(nvnDeviceBuilderSetFlags) { G(uint32_t, A(0), 0) = (uint32_t)A(1); }
 NVN(nvnDeviceBuilderGetFlags) { RET(G(uint32_t, A(0), 0)); }
 NVN(nvnDeviceInitialize) {
     static bool once;
-    if (!once) { once = true; backend_init(); }
+    if (!once) {
+        once = true;
+        rq_hang_watch_start();  // (before anything of the renderer can hang: rqueue.c)
+        backend_init();
+        extern void shader_prep_boot(const char *romfs);
+        shader_prep_boot(g_romfs_dir);  // (NXRT_SHADER_PREP=1, tests: what the start screen's setup does)
+    }
     LOG("[nvn] device initialized\n");
     RET(1);
 }
 NVN(nvnDeviceFinalize) { (void)c; }
 NVN(nvnDeviceSetDebugLabel) { (void)c; }
-NVN(nvnDeviceGetInteger) {
-    uint32_t which = (uint32_t)A(1), v = device_integer(which);
-    static uint64_t seen[4];  // (each item logged once: which items a game asks for, and what it got)
-    if (which < 256 && !(seen[which / 64] >> (which % 64) & 1)) {
-        seen[which / 64] |= 1ull << (which % 64);
-        LOG("[nvn] DeviceGetInteger %u -> %u (lr %llx)\n", which, v, (unsigned long long)c->x[30]);
-    }
-    *(int32_t *)AP(2) = (int32_t)v;
-}
+NVN(nvnDeviceGetInteger) { *(int32_t *)AP(2) = (int32_t)device_integer((uint32_t)A(1)); }
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds) {
     RET(plat_now_ns());
 }
@@ -121,14 +121,27 @@ NVN(nvnQueueGetTotalControlMemoryUsed) { RET(0); }
 NVN(nvnQueueGetTotalComputeMemoryUsed) { RET(0); }
 NVN(nvnQueueResetMemoryUsageCounts) { (void)c; }
 NVN(nvnQueueSubmitCommands) {
-    static _Thread_local bool placed;  // (phones: the submitting thread is the render thread: platform.h)
-    if (!placed) placed = true, plat_thread_core(PLAT_CORE_RENDER);
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
-    for (int i = 0; i < n; i++) backend_execute(handles[i]);
+    bool rq = rq_on();
+    uint64_t t0 = plat_now_ns();
+    for (int i = 0; i < n; i++) {
+        if (rq) rq_submit(handles[i]);  // the render thread translates it (rqueue.c)
+        else backend_execute(handles[i]);
+    }
+    g_submit_ns += plat_now_ns() - t0;
 }
+__thread uint64_t g_submit_ns, g_gpu_wait_ns;
 NVN(nvnQueueFlush) { (void)c; }
-NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
+NVN(nvnQueueFinish) {
+    (void)c;
+    if (rq_on()) rq_drain();
+    uint64_t t0 = plat_now_ns();
+    rq_watch("QueueFinish: the GPU", 0);
+    renderer_sync();
+    rq_watch(NULL, 0);
+    g_gpu_wait_ns += plat_now_ns() - t0;
+}
 
 static NvnSync *sync_of(uint64_t guest) {
     NvnSync *s = HOST(NvnSync, guest);
@@ -137,8 +150,16 @@ static NvnSync *sync_of(uint64_t guest) {
 }
 uint64_t renderer_fence_seq(void);
 void renderer_wait_seq(uint64_t seq);
-NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = renderer_fence_seq(); }
-void nvn_sync_set_seq(uint64_t guest, uint64_t seq) { NvnSync *s = sync_of(guest); s->signaled = 1; s->seq = seq; }
+// A fence's seq: the render thread's item number when it's on (rqueue.c), else the backend's submission number.
+NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = rq_on() ? rq_fence_seq() : renderer_fence_seq(); }
+void nvn_sync_set_seq(uint64_t guest, uint64_t seq) {
+    // (the render thread: the list's number was set when it was queued; the game may have placed this sync again in
+    // a later list since, and that number must stay)
+    if (rq_current_item()) return;
+    NvnSync *s = sync_of(guest);
+    s->signaled = 1;
+    s->seq = seq;
+}
 NVN(nvnQueueWaitSync) { RET(1); }
 
 // ================================================================== sync / event
@@ -153,9 +174,55 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (getenv("NXRT_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // NXRT_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("NXRT_SYNC_ALL") ? 1 : 0;
-    if (flush) renderer_flush();
-    else if (whole) renderer_sync();
-    else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
+    uint64_t t0 = 0;
+    if (flush) { if (rq_on()) rq_flush(); else { t0 = plat_now_ns(); renderer_flush(); } }
+    else if (whole) { if (rq_on()) rq_drain(); t0 = plat_now_ns(); rq_watch("SyncWait (all): the GPU", 0); renderer_sync(); }
+    else {  // only the submission that holds this fence
+        uint64_t seq = sync_of(A(0))->seq, q = seq;
+        static int stats = -1;  // (NXRT_LOG_PACE: which fences the game waits on, and how long)
+        if (stats < 0) stats = getenv("NXRT_LOG_PACE") != NULL;
+        uint64_t behind = 0, w0 = 0;
+        bool cur = false, untranslated = false;
+        if (seq && rq_on()) {
+            if (stats) { cur = rq_fence_info(seq, &behind, &untranslated); w0 = plat_now_ns(); }
+            seq = rq_wait_item(seq);  // translated and submitted; then its GPU work
+        }
+        t0 = plat_now_ns();
+        rq_watch("SyncWait: the GPU, submission", seq);
+        renderer_wait_seq(seq);
+        static long tr_at = -1;  // (debug, rqueue.c NXRT_RQ_TRACE) the game thread's fence waits in those frames
+        if (tr_at < 0) tr_at = getenv("NXRT_RQ_TRACE") ? atol(getenv("NXRT_RQ_TRACE")) : 0;
+        extern uint64_t renderer_present_count(void);
+        if (tr_at && renderer_present_count() >= (uint64_t)tr_at && renderer_present_count() < (uint64_t)tr_at + 4)
+        {
+            extern uint64_t rq_trace_t0;
+            LOG("[rq-trace] game frame %llu: fence wait item %llu (gpu %llu) from %.3f, translation %.3f ms, GPU %.3f ms\n",
+                (unsigned long long)renderer_present_count(), (unsigned long long)q, (unsigned long long)seq,
+                ((w0 ? w0 : t0) - rq_trace_t0) / 1e6, w0 ? (t0 - w0) / 1e6 : 0.0, (plat_now_ns() - t0) / 1e6);
+        }
+        if (stats && q && rq_on()) {
+            static struct { uint64_t n, untranslated, behind, rq_ns, gpu_ns, tr_ns, head_ns; } st[2];
+            static uint64_t total;
+            uint64_t t1 = plat_now_ns(), tr, head;
+            extern void rq_fence_times(uint64_t wait_start, uint64_t *translate_ns, uint64_t *head_ns);
+            rq_fence_times(w0, &tr, &head);
+            st[cur].n++, st[cur].untranslated += untranslated, st[cur].behind += behind;
+            st[cur].rq_ns += t0 - w0, st[cur].gpu_ns += t1 - t0, st[cur].tr_ns += tr, st[cur].head_ns += head;
+            if (++total % 600 == 0) {
+                for (int k = 1; k >= 0; k--)
+                    if (st[k].n)
+                        LOG("[rq] fence waits (%s frame): %llu, not translated yet %llu, avg %.1f items queued after it, "
+                            "avg wait for translation %.3f ms, for the GPU %.3f ms; its list: queued to translated %.3f ms, "
+                            "translated %.3f ms before the wait\n", k ? "this" : "an earlier",
+                            (unsigned long long)st[k].n, (unsigned long long)st[k].untranslated, (double)st[k].behind / st[k].n,
+                            st[k].rq_ns / 1e6 / st[k].n, st[k].gpu_ns / 1e6 / st[k].n, st[k].tr_ns / 1e6 / st[k].n,
+                            st[k].head_ns / 1e6 / st[k].n);
+                memset(st, 0, sizeof st);
+            }
+        }
+    }
+    rq_watch(NULL, 0);
+    if (t0) g_gpu_wait_ns += plat_now_ns() - t0;
     RET(0);
 }
 NVN(nvnSyncCreateGLSync) { RET(0); }
@@ -202,13 +269,13 @@ NVN(nvnMemoryPoolInitialize) {
 }
 NVN(nvnMemoryPoolFinalize) { free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
-NVN(nvnMemoryPoolMap) { NvnPool *p = A(0) ? HOST(NvnPool, A(0)) : NULL; RET(p ? p->storage : 0); }
-NVN(nvnMemoryPoolGetBufferAddress) { NvnPool *p = A(0) ? HOST(NvnPool, A(0)) : NULL; RET(p ? p->storage : 0); }  // GPU address == CPU address
-NVN(nvnMemoryPoolGetSize) { NvnPool *p = A(0) ? HOST(NvnPool, A(0)) : NULL; RET(p ? p->size : 0); }
-NVN(nvnMemoryPoolGetFlags) { NvnPool *p = A(0) ? HOST(NvnPool, A(0)) : NULL; RET(p ? p->flags : 0); }
+NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
+NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
+NVN(nvnMemoryPoolGetSize) { RET(HOST(NvnPool, A(0))->size); }
+NVN(nvnMemoryPoolGetFlags) { RET(HOST(NvnPool, A(0))->flags); }
 NVN(nvnMemoryPoolFlushMappedRange) {
-    NvnPool *p = A(0) ? HOST(NvnPool, A(0)) : NULL;
-    if (p) backend_pool_written(p->storage + A(1), A(2));
+    NvnPool *p = HOST(NvnPool, A(0));
+    backend_pool_written(p->storage + A(1), A(2));
 }
 NVN(nvnMemoryPoolInvalidateMappedRange) { (void)c; }
 NVN(nvnMemoryPoolMapVirtual) { RET(1); }
@@ -300,15 +367,7 @@ NVN(nvnTextureBuilderGetPackagedTextureData) { RET(TB(uint64_t, 0x48)); }
 NVN(nvnTextureBuilderGetPackagedTextureLayout) { RET(0); }
 NVN(nvnTextureBuilderGetGLTextureName) { RET(TB(uint32_t, 0x58)); }
 NVN(nvnTextureBuilderGetSparseTileLayout) { RET(0); }
-// Z-cull storage: games allocate it (Echoes of Wisdom: its depth buffer's, in a 256-byte-granule allocator that
-// breaks on 0) and pass it to Save/RestoreZCullData, which are no-ops here - the host GPU culls by itself. Its size
-// only has to be a sane non-zero amount for the dimensions: 8 bytes per 16x16 pixel tile, 4 KB aligned.
-static uint64_t zcull_size(uint64_t w, uint64_t h) {
-    if (!w) w = 1;
-    if (!h) h = 1;
-    return (((w + 15) / 16) * ((h + 15) / 16) * 8 + 0xFFF) & ~0xFFFull;
-}
-NVN(nvnTextureBuilderGetZCullStorageSize) { RET(zcull_size(TB(uint32_t, 0x10), TB(uint32_t, 0x14))); }
+NVN(nvnTextureBuilderGetZCullStorageSize) { RET(0); }
 NVN(nvnTextureBuilderGetStorageClass) { RET(0); }
 NVN(nvnTextureBuilderGetRawStorageClass) { RET(0); }
 
@@ -382,9 +441,23 @@ NVN(nvnTextureInitialize) {
     SET_HOST(A(0), t);
     RET(1);
 }
+static void pool_entries_forget(NvnTexture *t);
+// The end of a finalized texture: its texture pool slots emptied (pool_entries_forget), the backend's copy, the host
+// object. With the render thread, it runs there in queue order (rq_destroy_texture): lists queued before the
+// finalize still sample it through its slots, as they did when they were translated at submit; lists queued after
+// it see the slots empty, as without the render thread. (The NvnTexture stays allocated until then, so no other
+// texture can take its address while a slot still names it.)
+void nvn_texture_destroy(NvnTexture *t) {
+    pool_entries_forget(t);
+    backend_texture_destroyed(t);
+    free(t);
+}
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
-    if (t) { backend_texture_destroyed(t); free(t); }
+    if (t) {
+        if (rq_on()) rq_destroy_texture(t);  // after the queued lists that refer to it
+        else nvn_texture_destroy(t);
+    }
     SET_HOST(A(0), 0);
 }
 NVN(nvnTextureSetDebugLabel) {
@@ -412,7 +485,7 @@ NVN(nvnTextureGetViewOffset) { RET(0); }
 NVN(nvnTextureGetStorageClass) { RET(0); }
 NVN(nvnTextureGetRawStorageClass) { RET(0); }
 NVN(nvnTextureGetSparseTileLayout) { RET(0); }
-NVN(nvnTextureGetZCullStorageSize) { RET(zcull_size(TEX->width, TEX->height)); }
+NVN(nvnTextureGetZCullStorageSize) { RET(0); }
 NVN(nvnTextureCompare) { RET(A(0) == A(1)); }
 NVN(nvnTextureFlushTexels) { (void)c; }
 NVN(nvnTextureInvalidateTexels) { (void)c; }
@@ -442,32 +515,13 @@ NVN(nvnTextureWriteTexels) {
     // (texture, view, region, data) -- linear data into block-linear storage
     NvnTexture *t = HOST(NvnTexture, A(0));
     const int32_t *r = AP(2);  // xoffset, yoffset, zoffset, width, height, depth
-    int level = 0;
-    NvnTextureView *v = AP(1);
-    if (v && (v->setmask & 2)) {
-        level = v->base_level;
-    } else if (r && r[0] == 0 && r[1] == 0) {
-        for (int i = 0; i < (int)t->layout.levels; i++) {
-            uint32_t mw = t->width >> i ? t->width >> i : 1;
-            uint32_t mh = t->height >> i ? t->height >> i : 1;
-            if (mw == (uint32_t)r[3] && mh == (uint32_t)r[4]) {
-                level = i;
-                break;
-            }
-        }
-    }
-    LevelLayout l = tegra_level(&t->layout, level);
-    if (r && r[0] == 0 && r[1] == 0) {
+    LevelLayout l = tegra_level(&t->layout, 0);
+    if (r && r[0] == 0 && r[1] == 0 && (uint32_t)r[3] == t->width && (uint32_t)r[4] == t->height) {
         tegra_swizzle(AP(3), (uint8_t *)(uintptr_t)t->addr + l.offset, l.wb, l.hb, r[5] > 0 ? (uint32_t)r[5] : 1,
                       t->layout.fmt->bpb, l.block_height_log2, l.block_depth_log2);
         backend_pool_written(t->addr, tegra_total_size(&t->layout));
     } else {
-        static int w_warn;
-        if (w_warn++ < 10) {
-            if (r) LOG("[nvn] partial WriteTexels not implemented: r=[%d, %d, %d, %d, %d, %d] tex=[%u, %u]\n",
-                       r[0], r[1], r[2], r[3], r[4], r[5], t->width, t->height);
-            else LOG("[nvn] partial WriteTexels: r is NULL\n");
-        }
+        LOG("[nvn] partial WriteTexels not implemented\n");
     }
 }
 NVN(nvnTextureWriteTexelsStrided) { LOG("[nvn] WriteTexelsStrided not implemented\n"); (void)c; }
@@ -475,63 +529,44 @@ NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; 
 NVN(nvnTextureReadTexelsStrided) { (void)c; }
 
 // ================================================================== samplers
-// SamplerBuilder (guest memory): only 0x40 bytes are guaranteed - Echoes of Wisdom keeps them on its stack, right
-// under the saved frame pointer and return address (an NvnSamplerDesc stored here overwrote them). So the builder
-// holds a packed copy (48 bytes), turned into an NvnSamplerDesc by sampler_desc().
-typedef struct {
-    uint64_t device;
-    uint8_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;
-    float lod_min, lod_max, lod_bias, max_aniso;
-    float border[4];
-} SamplerBuilder;
-_Static_assert(sizeof(SamplerBuilder) <= 0x40, "NVNsamplerBuilder: 0x40 bytes in guest memory");
-#define SB ((SamplerBuilder *)AP(0))
-static NvnSamplerDesc sampler_desc(const SamplerBuilder *b) {
-    NvnSamplerDesc d = {0};
-    d.min_filter = b->min_filter, d.mag_filter = b->mag_filter;
-    for (int i = 0; i < 3; i++) d.wrap[i] = b->wrap[i];
-    d.compare_mode = b->compare_mode, d.compare_func = b->compare_func, d.reduction = b->reduction;
-    d.lod_min = b->lod_min, d.lod_max = b->lod_max, d.lod_bias = b->lod_bias, d.max_aniso = b->max_aniso;
-    memcpy(d.border, b->border, sizeof d.border);
-    return d;
-}
-NVN(nvnSamplerBuilderSetDevice) { SB->device = A(1); }
+// SamplerBuilder: device@0 then an NvnSamplerDesc at 8
+#define SD ((NvnSamplerDesc *)(AP(0) + 8))
+NVN(nvnSamplerBuilderSetDevice) { G(uint64_t, A(0), 0) = A(1); }
 NVN(nvnSamplerBuilderSetDefaults) {
-    SamplerBuilder *b = SB;
-    uint64_t dev = b->device;
-    memset(b, 0, sizeof *b);
-    b->device = dev;
-    b->wrap[0] = b->wrap[1] = b->wrap[2] = 1;  // REPEAT
-    b->lod_max = 1000.0f, b->max_aniso = 1.0f;
-    b->compare_func = 4;
+    NvnSamplerDesc *d = SD;
+    memset(d, 0, sizeof *d);
+    d->min_filter = 0; d->mag_filter = 0;
+    d->wrap[0] = d->wrap[1] = d->wrap[2] = 1;  // REPEAT
+    d->lod_min = 0; d->lod_max = 1000.0f; d->max_aniso = 1.0f;
+    d->compare_func = 4;
 }
-NVN(nvnSamplerBuilderSetMinMagFilter) { SB->min_filter = (uint8_t)A(1); SB->mag_filter = (uint8_t)A(2); }
-NVN(nvnSamplerBuilderSetWrapMode) { SB->wrap[0] = (uint8_t)A(1); SB->wrap[1] = (uint8_t)A(2); SB->wrap[2] = (uint8_t)A(3); }
-NVN(nvnSamplerBuilderSetLodClamp) { SB->lod_min = AF(0); SB->lod_max = AF(1); }
-NVN(nvnSamplerBuilderSetLodBias) { SB->lod_bias = AF(0); }
-NVN(nvnSamplerBuilderSetCompare) { SB->compare_mode = (uint8_t)A(1); SB->compare_func = (uint8_t)A(2); }
-NVN(nvnSamplerBuilderSetBorderColor) { memcpy(SB->border, AP(1), 16); }
-NVN(nvnSamplerBuilderSetBorderColori) { memcpy(SB->border, AP(1), 16); }
-NVN(nvnSamplerBuilderSetBorderColorui) { memcpy(SB->border, AP(1), 16); }
-NVN(nvnSamplerBuilderSetMaxAnisotropy) { SB->max_aniso = AF(0); }
-NVN(nvnSamplerBuilderSetReductionFilter) { SB->reduction = (uint8_t)A(1); }
+NVN(nvnSamplerBuilderSetMinMagFilter) { SD->min_filter = (uint32_t)A(1); SD->mag_filter = (uint32_t)A(2); }
+NVN(nvnSamplerBuilderSetWrapMode) { SD->wrap[0] = (uint32_t)A(1); SD->wrap[1] = (uint32_t)A(2); SD->wrap[2] = (uint32_t)A(3); }
+NVN(nvnSamplerBuilderSetLodClamp) { SD->lod_min = AF(0); SD->lod_max = AF(1); }
+NVN(nvnSamplerBuilderSetLodBias) { SD->lod_bias = AF(0); }
+NVN(nvnSamplerBuilderSetCompare) { SD->compare_mode = (uint32_t)A(1); SD->compare_func = (uint32_t)A(2); }
+NVN(nvnSamplerBuilderSetBorderColor) { memcpy(SD->border, AP(1), 16); }
+NVN(nvnSamplerBuilderSetBorderColori) { memcpy(SD->border, AP(1), 16); }
+NVN(nvnSamplerBuilderSetBorderColorui) { memcpy(SD->border, AP(1), 16); }
+NVN(nvnSamplerBuilderSetMaxAnisotropy) { SD->max_aniso = AF(0); }
+NVN(nvnSamplerBuilderSetReductionFilter) { SD->reduction = (uint32_t)A(1); }
 NVN(nvnSamplerBuilderSetLodSnap) { (void)c; }
-NVN(nvnSamplerBuilderGetDevice) { RET(SB->device); }
-NVN(nvnSamplerBuilderGetMinMagFilter) { *(uint32_t *)AP(1) = SB->min_filter; *(uint32_t *)AP(2) = SB->mag_filter; }
-NVN(nvnSamplerBuilderGetWrapMode) { for (int i = 0; i < 3; i++) *(uint32_t *)AP(1 + i) = SB->wrap[i]; }
-NVN(nvnSamplerBuilderGetLodClamp) { *(float *)AP(1) = SB->lod_min; *(float *)AP(2) = SB->lod_max; }
-NVN(nvnSamplerBuilderGetLodBias) { RETF(SB->lod_bias); }
-NVN(nvnSamplerBuilderGetCompare) { *(uint32_t *)AP(1) = SB->compare_mode; *(uint32_t *)AP(2) = SB->compare_func; }
-NVN(nvnSamplerBuilderGetBorderColor) { memcpy(AP(1), SB->border, 16); }
-NVN(nvnSamplerBuilderGetBorderColori) { memcpy(AP(1), SB->border, 16); }
-NVN(nvnSamplerBuilderGetBorderColorui) { memcpy(AP(1), SB->border, 16); }
-NVN(nvnSamplerBuilderGetMaxAnisotropy) { RETF(SB->max_aniso); }
-NVN(nvnSamplerBuilderGetReductionFilter) { RET(SB->reduction); }
+NVN(nvnSamplerBuilderGetDevice) { RET(G(uint64_t, A(0), 0)); }
+NVN(nvnSamplerBuilderGetMinMagFilter) { *(uint32_t *)AP(1) = SD->min_filter; *(uint32_t *)AP(2) = SD->mag_filter; }
+NVN(nvnSamplerBuilderGetWrapMode) { for (int i = 0; i < 3; i++) *(uint32_t *)AP(1 + i) = SD->wrap[i]; }
+NVN(nvnSamplerBuilderGetLodClamp) { *(float *)AP(1) = SD->lod_min; *(float *)AP(2) = SD->lod_max; }
+NVN(nvnSamplerBuilderGetLodBias) { RETF(SD->lod_bias); }
+NVN(nvnSamplerBuilderGetCompare) { *(uint32_t *)AP(1) = SD->compare_mode; *(uint32_t *)AP(2) = SD->compare_func; }
+NVN(nvnSamplerBuilderGetBorderColor) { memcpy(AP(1), SD->border, 16); }
+NVN(nvnSamplerBuilderGetBorderColori) { memcpy(AP(1), SD->border, 16); }
+NVN(nvnSamplerBuilderGetBorderColorui) { memcpy(AP(1), SD->border, 16); }
+NVN(nvnSamplerBuilderGetMaxAnisotropy) { RETF(SD->max_aniso); }
+NVN(nvnSamplerBuilderGetReductionFilter) { RET(SD->reduction); }
 NVN(nvnSamplerBuilderGetLodSnap) { RETF(0); }
 
 NVN(nvnSamplerInitialize) {
     NvnSamplerDesc *d = malloc(sizeof *d);
-    *d = sampler_desc((const SamplerBuilder *)AP(1));
+    *d = *(NvnSamplerDesc *)(AP(1) + 8);
     SET_HOST(A(0), d);
     RET(1);
 }
@@ -553,6 +588,11 @@ NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 
 // ================================================================== descriptor pools
 NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
+// Texture pool registrations (the game's threads) and the emptying of a finalized texture's slots (the render thread
+// when it's on: nvn_texture_destroy) both change entries and pool_refs: this lock keeps them from crossing. (Reads by
+// the translation take no lock: the game doesn't change a slot that queued work still uses before its fence, as on
+// the Switch, and the emptying runs on the translating thread itself.)
+static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 RT_ON_RESET(desc_pools_reset) { memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools); }
 
 static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, int count, size_t entry, NvnDescPool **reg) {
@@ -564,7 +604,9 @@ static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, 
     G(uint64_t, guest, 8) = pool;
     G(uint64_t, guest, 16) = off;
     G(uint32_t, guest, 24) = (uint32_t)count;
+    pthread_mutex_lock(&g_pool_lock);  // (pool_entries_forget walks the registry)
     for (int i = 0; i < 64; i++) if (!reg[i]) { reg[i] = d; break; }
+    pthread_mutex_unlock(&g_pool_lock);
     return d;
 }
 
@@ -582,9 +624,52 @@ static void register_texture(Cpu *c) {
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
+    pthread_mutex_lock(&g_pool_lock);
+    if (e->tex && e->tex->pool_refs) e->tex->pool_refs--;
     e->tex = HOST(NvnTexture, A(2));
+    if (e->tex) e->tex->pool_refs++;
+    e->dead_format = 0;
     e->has_view = A(3) != 0;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
+    if (e->has_view) nvn_texture_note_view(e->tex, &e->view);
+    pthread_mutex_unlock(&g_pool_lock);
+}
+
+// A finalized texture can stay registered: the game frees a room's textures on a level / room change and leaves
+// their pool slots as they are until it registers something else there, and a draw can still name such a slot.
+// Entries held its NvnTexture pointer, so the next texture allocated at the same address (another format) got the
+// old entry's view: a BC4 / BC5 / BC1 texture viewed as RGBA8 or the reverse, a Metal assertion that stopped the
+// game (about 1 in 6 long dungeon runs). Those entries are emptied (sampled as nothing, like an unregistered slot).
+static void pool_entries_forget(NvnTexture *t) {
+    pthread_mutex_lock(&g_pool_lock);
+    if (!t->pool_refs) { pthread_mutex_unlock(&g_pool_lock); return; }
+    int n = 0;
+    for (int p = 0; p < 64 && t->pool_refs; p++) {
+        NvnDescPool *d = g_texture_pools[p];
+        if (!d) continue;
+        NvnTexEntry *ents = (NvnTexEntry *)d->entries;
+        for (int i = 0; i < d->count && t->pool_refs; i++)
+            if (ents[i].tex == t) {
+                ents[i].tex = NULL;
+                ents[i].has_view = false;
+                ents[i].dead_format = t->format + 1;
+                t->pool_refs--;
+                n++;
+            }
+    }
+    pthread_mutex_unlock(&g_pool_lock);
+    static int nlog;
+    if (n && nlog++ < 8)
+        LOG("[nvn] texture %ux%u fmt %#x finalized while in %d texture pool slot(s): emptied%s\n", t->width, t->height,
+            t->format, n, nlog == 8 ? " (further ones not logged)" : "");
+}
+void nvn_dead_slot_sampled(const NvnTexEntry *e, uint32_t slot) {
+    static int nlog;
+    if (nlog < 8) {
+        nlog++;
+        LOG("[nvn] draw samples texture pool slot %u, whose texture (fmt %#x) was finalized: nothing bound%s\n", slot,
+            e->dead_format - 1, nlog == 8 ? " (further ones not logged)" : "");
+    }
 }
 NVN(nvnTexturePoolRegisterTexture) { register_texture(c); }
 NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
@@ -606,7 +691,7 @@ NVN(nvnSamplerPoolRegisterSampler) {
 NVN(nvnSamplerPoolRegisterSamplerBuilder) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
-    if (id >= 0 && id < d->count) ((NvnSamplerDesc *)d->entries)[id] = sampler_desc((const SamplerBuilder *)AP(2));
+    if (id >= 0 && id < d->count) ((NvnSamplerDesc *)d->entries)[id] = *(NvnSamplerDesc *)(AP(2) + 8);
 }
 
 NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
@@ -644,8 +729,8 @@ static void set_shaders(Cpu *c, int stride) {
         p->stages[stage].stage = stage;
         p->stages[stage].code_addr = code;
         p->stages[stage].control = control;
-        p->stages[stage].const_offset = control ? *(const uint32_t *)(control + 0x700) : 0;
-        p->stages[stage].const_size = control ? *(const uint32_t *)(control + 0x6FC) : 0;
+        p->stages[stage].const_offset = *(const uint32_t *)(control + 0x700);
+        p->stages[stage].const_size = *(const uint32_t *)(control + 0x6FC);
         p->stage_mask |= 1u << stage;
     }
     RET(1);
@@ -691,7 +776,12 @@ NVN(nvnWindowGetNumTextures) { RET(WIN->num); }
 NVN(nvnWindowGetNumActiveTextures) { RET(WIN->active); }
 NVN(nvnWindowSetNumActiveTextures) { WIN->active = (int)A(1); }
 NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
-NVN(nvnWindowSetPresentInterval) { WIN->interval = (int)A(1); }
+NVN(nvnWindowSetPresentInterval) {  // (the game's 60 / 30 fps mode: 1 / 2; NXRT_LOG_INTERVAL=1 logs each change)
+    static int log = -1;
+    if (log < 0) log = getenv("NXRT_LOG_INTERVAL") != NULL;
+    if (log && WIN->interval != (int)A(1)) LOG("[nvn] present interval %d -> %d\n", WIN->interval, (int)A(1));
+    WIN->interval = (int)A(1);
+}
 NVN(nvnWindowSetCrop) { int *cr = WIN->crop; cr[0] = (int)A(1); cr[1] = (int)A(2); cr[2] = (int)A(3); cr[3] = (int)A(4); }
 NVN(nvnWindowGetCrop) { memcpy(AP(1), WIN->crop, 16); }
 NVN(nvnWindowAcquireTexture) {
@@ -710,8 +800,6 @@ NVN(nvnQueueAcquireTexture) {
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
-    static int first = 1;  // (milestone marker: the game got as far as showing a frame)
-    if (first) { first = 0; LOG("[nvn] first nvnQueuePresentTexture (window %llx, texture %d of %d)\n", A(1), i, w->num); }
     if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
 }
 

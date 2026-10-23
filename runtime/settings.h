@@ -30,6 +30,9 @@ typedef struct {
     bool movie_audio;
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
     int frame_rate;       // 60 or 120 (runtime/frame_rate.h: 120 only where the game supports it)
+    int screen_filter;   // 0 Off, 1 Game Boy, 2 Game Boy Color, 3 Grayscale (runtime/nvn/screen_filter.h)
+    bool fullscreen;     // the window fills the display
+    bool bg_input;       // controllers keep working while the window isn't in front
     bool hd_textures;     // texture packs (runtime/nvn/custom_tex.c: mods/<pack>/textures), applied live on Vulkan
     bool reshade;         // Windows: load the ReShade layer that ships with the app on the next launch
     char game_dir[1024];  // the game folder (nx-platform rt_game_dir): "" = extracted/ in the data root
@@ -37,12 +40,16 @@ typedef struct {
     bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
 } Settings;
 
+enum { N_ENEMY_COLOUR_MODES = 3, N_SCREEN_FILTERS = 4 };
+extern const char *const g_screen_filters[N_SCREEN_FILTERS];  // (the menu's names)
+
 extern Settings g_settings;
 
 #include "nx_settings.h"  // settings_load / settings_save
 // The code served to the game as its system language: settings_language, as the game wants it (nx_game hooks
 // language_code: e.g. zh-Hans for zh-CN)
 const char *settings_language_code(void);
+void settings_resolve_defaults(bool integrated);  // the defaults this GPU implies (upscaler, resolution)
 void settings_game_started(void);       // (boot) the language the game starts with
 bool settings_language_pending(void);   // the language setting changed since: the game must restart for it
 void rt_settings_register(void);  // the runtime's and the game's sections (main, before anything loads settings)

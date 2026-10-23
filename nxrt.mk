@@ -164,6 +164,13 @@ $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_CFLAGS='"$(strip $(filter-out -I$(RT),$(GENFLAGS)))"' \
                                 -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"'
 
+# the shader precompiler's list of variant shaders, as a C string (runtime/nvn/shader_prep.c)
+$(B)/inc/shader_variants.inc: $(RT)/nvn/shader_variants.txt
+	@mkdir -p $(dir $@)
+	LC_ALL=C tr -d '\r' < $< | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' > $@; echo '""' >> $@
+$(B)/rt/nvn/shader_prep.o: $(B)/inc/shader_variants.inc
+$(B)/rt/nvn/shader_prep.o: RTFLAGS += -I$(B)/inc
+
 $(B)/rt/%.o: $(RT)/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -c $< -o $@

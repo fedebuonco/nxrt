@@ -15,6 +15,13 @@ bool g_gpu_integrated;  // (platform: an integrated GPU)
 #include "nx_settings.h"
 #include "nxgame.h"
 
+void settings_resolve_defaults(bool integrated) {  // (Apple GPUs keep MetalFX; an integrated one starts at 1x)
+    g_gpu_integrated = integrated;
+    if (integrated && g_settings.res_mode == 0) g_settings.res_mode = RES_MATCH;
+}
+
+const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game Boy Color", "Grayscale"};
+
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
     .volume = 1.0f,
