@@ -599,8 +599,33 @@ static void tab_about(void) {
 
 
 // The host's game is gone (the runtime's in-place reboot): menu and name dialog close; the ImGui context stays.
+// ---- reusing the overlay's last drawing (NXRT_OVERLAY_CACHE=0: off): while only the FPS counter is up (no menu,
+// no name entry, no game overlay - those may animate), the overlay draws the same thing frame after frame, so ImGui's
+// NewFrame / layout / Render run for nothing on the render thread. The last frame's draw data (ImGui keeps it until
+// the next NewFrame) is drawn again while the key (size, the counter's text) stays; after three frames built with it
+// (an auto-sized window settles over the frames after its text changes). The counter shows the last 60 frames' average,
+// sampled twice a second, instead of ImGui's io.Framerate.
+static int g_ov_cache = -1;
+static char g_ov_key[96];
+static int g_ov_same;  // frames built in a row with g_ov_key
+static float g_fps_dt[60];
+static int g_fps_n, g_fps_i;
+static double g_fps_sum, g_fps_shown, g_fps_at;
+static void fps_note(double now, float dt) {
+    if (g_fps_n == 60) g_fps_sum -= g_fps_dt[g_fps_i];
+    else g_fps_n++;
+    g_fps_dt[g_fps_i] = dt;
+    g_fps_sum += dt;
+    g_fps_i = (g_fps_i + 1) % 60;
+    if (now - g_fps_at >= 0.5 || now < g_fps_at) {
+        g_fps_at = now;
+        g_fps_shown = g_fps_sum > 0 ? g_fps_n / g_fps_sum : 0;
+    }
+}
+
 void menu_reset(void) {
     set_open(false);
+    g_ov_same = 0;
     g_kbd = 0;
     osk_cancel();
     pthread_mutex_lock(&q_lock);
@@ -836,6 +861,7 @@ void menu_render(void *frame, double tw, double th) {
     bool kbd = g_kbd.load() == 1;
     if (!open && !kbd && !g_ui_settings.show_fps && !overlay) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
+        g_ov_same = 0;  // (shown again: built afresh first)
         return;
     }
     if (!g_inited) init();
@@ -847,6 +873,31 @@ void menu_render(void *frame, double tw, double th) {
     double now = SDL_GetTicks() / 1000.0;
     io.DeltaTime = last > 0 && now > last ? (float)(now - last) : 1.0f / 60;
     last = now;
+    if (g_ov_cache < 0) g_ov_cache = !getenv("NXRT_OVERLAY_CACHE") || atoi(getenv("NXRT_OVERLAY_CACHE")) != 0;
+    char key[sizeof g_ov_key];
+    key[0] = 0;
+    if (g_ov_cache) {
+        fps_note(now, io.DeltaTime);
+        pthread_mutex_lock(&q_lock);
+        bool events = !q_events.empty();
+        pthread_mutex_unlock(&q_lock);
+        // (only the counter; the game's overlays are left out: a timer or a card animates)
+        if (!open && !kbd && !overlay && !events)
+            snprintf(key, sizeof key, "%.0fx%.0f fps %d %.0f", tw, th, (int)g_ui_settings.show_fps, g_fps_shown);
+        ImDrawData *dd = ImGui::GetDrawData();
+        if (key[0] && g_ov_same >= 3 && !strcmp(key, g_ov_key) && dd && dd->Valid) {
+            static bool told;
+            if (!told && getenv("NXRT_OVERLAY_CACHE_TRACE")) told = true, fprintf(stderr, "[ui] overlay cached: %s\n", key);
+            g_backend->new_frame(frame);  // (the backend's target description only)
+            g_backend->render(frame);     // the last frame's draw data, unchanged
+            return;
+        }
+        if (key[0] && !strcmp(key, g_ov_key)) g_ov_same++;
+        else { memcpy(g_ov_key, key, sizeof key); g_ov_same = key[0] ? 1 : 0; }
+        if (getenv("NXRT_OVERLAY_CACHE_TRACE") && g_ov_same == 2)
+            fprintf(stderr, "[ui] cache key '%s' (open %d kbd %d overlay %d fps %d)\n", key, open, kbd, overlay,
+                    (int)g_ui_settings.show_fps);
+    }
     drain_events(io);
     // fonts are built at 34/56 px for a ~1080 px tall output; scale to the window
     float scale = (float)(th / 1080.0);
@@ -870,7 +921,7 @@ void menu_render(void *frame, double tw, double th) {
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("%.0f fps", io.Framerate);
+        ImGui::Text("%.0f fps", g_ov_cache ? g_fps_shown : io.Framerate);
         ImGui::End();
     }
 
