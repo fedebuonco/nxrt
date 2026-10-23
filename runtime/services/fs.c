@@ -1166,3 +1166,29 @@ bool romfs_find_file(const char *rel, int *out_fd, uint64_t *out_off, uint64_t *
 }
 
 ssize_t romfs_pread(int fd, void *dst, size_t n, off_t off) { return pread(fd, dst, n, off); }
+
+// ------------------------------------------------------------------ the RomFS file index, for shader_prep.c
+// The shader preparation (runtime/nvn/shader_prep.c) indexes the BNSH containers in the game's files to prepare the
+// shaders the player has already met. A folder game can be walked on disk, but a package's RomFS exists only as an
+// image read in place - so its file table (rom_index) is the only listing there is. Both kinds go through this.
+void romfs_index_ready(void) {
+    if (!g_base_open) {
+        base_open();
+        rom_index();
+    }
+}
+
+int romfs_file_count(void) { return rom_nfiles; }
+
+const char *romfs_file_path(int i) { return i >= 0 && i < rom_nfiles ? rom_files[i].path : NULL; }
+
+uint64_t romfs_file_size(int i) { return i >= 0 && i < rom_nfiles ? rom_files[i].size : 0; }
+
+// n bytes of file i at off within it (patches and a seed's replacements are served as any other read)
+ssize_t romfs_file_read(int i, void *dst, size_t n, uint64_t off) {
+    if (i < 0 || i >= rom_nfiles) return -1;
+    const RomFile *f = &rom_files[i];
+    if (off >= f->size) return 0;
+    if (n > f->size - off) n = (size_t)(f->size - off);
+    return base_pread(dst, n, f->off + off);
+}
