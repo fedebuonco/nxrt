@@ -18,6 +18,19 @@ Headers did land with the import (`ShaderKey`/`ShaderInfo` incl. `ssbo_read`), s
 WIP's `shader.h` lacks the `alpha_func`/`dual_source` fields that `beta5-merge`'s Vulkan path uses; the translator
 choice (beta_5's vs nxrt's, `b89db46`) is decided by a screenshot on the new renderer, not by argument.
 
+## Status (2026-10-23)
+
+- 1 done: the branch was 15 commits behind, and the start screen had a nil Metal layer. Both fixed.
+- 2 done: LAS boots and holds 60 fps on beta_5's renderer (Metal); title/file select/intro screenshotted.
+- 3 in progress: the tint hooks and the window title are back; a dungeon pass (pots, the Hint Sheet icon) is still
+  to be looked at.
+- 4 pending (Vulkan).
+- 5 pending: the translator still needs nxrt's later fixes ported forward.
+- 6 moved: Sky no longer stalls in `WaitProcessWideKey`; it now dies inside `nn::applet` (see HANDOFF_NVN.md).
+- 7 pending.
+
+EoW runs at 60 fps on this branch after porting two nxrt `objects.c` fixes (ZCull size, packed sampler builder).
+
 ## Phases
 
 ### 1. Reproduce and explain the hang
