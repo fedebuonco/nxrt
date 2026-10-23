@@ -52,6 +52,18 @@ void nxin_set_stick_deadzone(int radius);        // controller sticks inside thi
 // own steering of the scripted pad (NULL: none)
 void nxin_frame(uint64_t frame, void (*script)(uint64_t frame, NxPad *p));
 
+// ---- rumble: HD Rumble approximated with a two-motor gamepad (the runtime's HID vibration sends these; a port
+// drives the pad's light through input_led_set). Called once per presented frame by the presenter.
+typedef struct { float low_amp, low_hz, high_amp, high_hz; } RumbleValue;
+void input_rumble_send(uint32_t handle, const RumbleValue *value);
+RumbleValue input_rumble_get(uint32_t handle);
+void input_rumble_permit(bool permitted);
+bool input_rumble_permitted(void);
+void input_rumble_poll(void);
+void input_led_set(uint8_t r, uint8_t g, uint8_t b);
+void input_led_poll(void);
+void input_led_stop(void);
+
 // ---- the pad (any thread). captured: a menu has the input (only test scripts reach the game)
 void nxin_read(NxPad *p, bool captured);                     // 1. held buttons and sticks
 void nxin_dpad_walk(NxPad *p, bool captured, bool mirrored); // 2. the d-pad moves the left stick (setting)

@@ -4,6 +4,7 @@
 #include "../hle.h"
 #include "../ipc.h"
 #include "../settings.h"
+#include "nx_input.h"
 
 static uint32_t new_event_handle(void) {
     uint32_t w, r;
@@ -32,7 +33,36 @@ SERVICE("hid", hid) {
     case 101: OUT(uint32_t, 0) = 0x1F; resp_size(resp, 4); break;  // GetSupportedNpadStyleSet
     case 121: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadJoyHoldType
     case 129: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadHandheldActivationMode
-    case 201: case 202: case 203: case 206: case 207: case 208: case 209: break;  // vibration
+    case 201: {  // SendVibrationValue(handle, value, ...)
+        if (req->data_size < 32) { resp->result = 0xD401; break; }
+        uint32_t h;
+        RumbleValue v;
+        memcpy(&h, req->data, sizeof h);
+        memcpy(&v, req->data + 4, sizeof v);
+        input_rumble_send(h, &v);
+        break;
+    }
+    case 202: {  // GetActualVibrationValue(handle) -> the value it is driving
+        RumbleValue v = input_rumble_get(IN(uint32_t, 0));
+        memcpy(resp->data, &v, sizeof v);
+        resp_size(resp, sizeof v);
+        break;
+    }
+    case 206: {  // SendVibrationValues: parallel handle and value buffers
+        IpcBuf *hs = in_buf(req, 0), *vs = in_buf(req, 1);
+        if (!hs || !vs) { resp->result = 0xD401; break; }
+        uint64_t n = hs->size / 4;
+        if (vs->size / sizeof(RumbleValue) < n) n = vs->size / sizeof(RumbleValue);
+        for (uint64_t i = 0; i < n; i++) {
+            uint32_t h;
+            RumbleValue v;
+            memcpy(&h, (const void *)(uintptr_t)(hs->addr + i * 4), sizeof h);
+            memcpy(&v, (const void *)(uintptr_t)(vs->addr + i * sizeof v), sizeof v);
+            input_rumble_send(h, &v);
+        }
+        break;
+    }
+    case 203: case 207: case 208: case 209: break;  // activation is HLE'd; GC ERM / permit sessions not implemented
     case 200: memset(resp->data, 0, 0x10); OUT(uint32_t, 0) = 1; resp_size(resp, 0x10); break;
     default: break;  // Activate*/Set*: accept
     }

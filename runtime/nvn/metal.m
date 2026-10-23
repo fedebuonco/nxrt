@@ -1555,6 +1555,9 @@ int ui_run(void) {
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        input_rumble_permit(!menu_is_open());  // (an open menu is not playing: no rumble)
+        input_rumble_poll();                   // (a port's HID vibration -> the pad; UI thread, as SDL wants)
+        input_led_poll();
         int w, h;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);

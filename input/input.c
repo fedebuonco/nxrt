@@ -18,6 +18,9 @@
 
 _Static_assert(NX_BTN_DOWN == BIND_DOWN && NX_BTN_ZL == BIND_ZL, "bindings follow the button bits");
 
+static _Atomic uint64_t rumble_frame_ms;  // (rumble: the last presented frame's time; set in nxin_frame)
+static uint16_t rumble_last_lo, rumble_last_hi;
+static uint32_t led_last;
 static _Atomic uint64_t key_buttons, pad_buttons;
 static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, pad_ry;
 static uint8_t keys_down[SDL_SCANCODE_COUNT];
@@ -211,7 +214,12 @@ void input_handle_event(const SDL_Event *e) {
         if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
         break;
     case SDL_EVENT_GAMEPAD_REMOVED:
-        if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) { SDL_CloseGamepad(pad); pad = NULL; note_family(); }
+        if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) {
+            SDL_CloseGamepad(pad);
+            pad = NULL;
+            rumble_last_lo = rumble_last_hi = 0, led_last = 0;
+            note_family();
+        }
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
@@ -373,6 +381,7 @@ NxInputSettings g_input_settings;
 int g_input_prompt_styles = 4;
 
 void nxin_frame(uint64_t frame, void (*script)(uint64_t frame, NxPad *p)) {
+    atomic_store(&rumble_frame_ms, SDL_GetTicks());  // (the rumble watchdog: frames are still coming)
     host_test_frame(frame);
     const char *spec = getenv("NXRT_INPUT");
     if (!spec) return;
@@ -446,6 +455,93 @@ void nxin_stick_buttons(NxPad *p) {
     if (p->ry > 16000) p->buttons |= 1ull << 21;
     if (p->rx > 16000) p->buttons |= 1ull << 22;
     if (p->ry < -16000) p->buttons |= 1ull << 23;
+}
+
+// ------------------------------------------------------------------ rumble and the controller LED
+// beta_5's mapping: Switch vibration values are amplitudes (no duration) latched until changed, renewed on SDL's
+// 250 ms effect while frames advance; a stalled presenter or an unfocused window lets them stop. The LED is only
+// carried here: a port decides what a colour means (LAS: Link's health).
+static SDL_SpinLock rumble_lock;
+static RumbleValue rumble_values[2];
+static bool rumble_allowed = true;
+static uint64_t rumble_last_ms;
+static bool rumble_warned;
+static _Atomic uint32_t led_want;
+static _Atomic bool led_pending;
+static uint64_t led_last_ms;
+
+static uint16_t rumble_amplitude(float a) {
+    if (!isfinite(a) || a <= 0) return 0;
+    if (a >= 1) return 65535;
+    return (uint16_t)(a * 65535.0f + 0.5f);
+}
+// handles: style | player<<8 | side<<16 (beta_5's layout); the older synthetic 0x03000000 | player<<8 | side too
+static int rumble_side(uint32_t h) {
+    if ((h & ~1u) == 0x03000000u) return (int)(h & 1);
+    if ((h & 0xff00ff00u) == 0 && (h & 255) >= 3 && (h & 255) <= 5 && ((h >> 16) & 255) <= 1) return (int)((h >> 16) & 1);
+    return -1;  // this runtime exposes player 1 only
+}
+void input_rumble_send(uint32_t h, const RumbleValue *v) {
+    int side = rumble_side(h);
+    if (side < 0) return;
+    SDL_LockSpinlock(&rumble_lock);
+    if (rumble_allowed) rumble_values[side] = *v;
+    SDL_UnlockSpinlock(&rumble_lock);
+}
+RumbleValue input_rumble_get(uint32_t h) {
+    int side = rumble_side(h);
+    RumbleValue v = {0};
+    if (side < 0) return v;
+    SDL_LockSpinlock(&rumble_lock);
+    v = rumble_values[side];
+    SDL_UnlockSpinlock(&rumble_lock);
+    return v;
+}
+void input_rumble_permit(bool permitted) {
+    SDL_LockSpinlock(&rumble_lock);
+    rumble_allowed = permitted;
+    if (!permitted) memset(rumble_values, 0, sizeof rumble_values);
+    SDL_UnlockSpinlock(&rumble_lock);
+}
+bool input_rumble_permitted(void) { return rumble_allowed; }
+
+void input_rumble_poll(void) {
+    uint64_t now = SDL_GetTicks();
+    uint64_t last_frame = atomic_load(&rumble_frame_ms);
+    uint16_t lo = 0, hi = 0;
+    bool suppress = !pad || host_test || !SDL_GetKeyboardFocus() ||
+                    (now > last_frame && now - last_frame > 250);
+    SDL_LockSpinlock(&rumble_lock);
+    if (!suppress && rumble_allowed) {
+        uint16_t a = rumble_amplitude(rumble_values[0].low_amp), b = rumble_amplitude(rumble_values[1].low_amp);
+        lo = a > b ? a : b;
+        a = rumble_amplitude(rumble_values[0].high_amp);
+        b = rumble_amplitude(rumble_values[1].high_amp);
+        hi = a > b ? a : b;
+    }
+    SDL_UnlockSpinlock(&rumble_lock);
+    if (pad && (lo != rumble_last_lo || hi != rumble_last_hi || ((lo || hi) && now - rumble_last_ms >= 100))) {
+        if (!SDL_RumbleGamepad(pad, lo, hi, (lo || hi) ? 250 : 0) && !rumble_warned) {
+            LOG("[rumble] unavailable: %s\n", SDL_GetError());
+            rumble_warned = true;
+        }
+        rumble_last_ms = now;
+    }
+    rumble_last_lo = lo, rumble_last_hi = hi;
+}
+
+void input_led_set(uint8_t r, uint8_t g, uint8_t b) {
+    atomic_store(&led_want, (uint32_t)r | (uint32_t)g << 8 | (uint32_t)b << 16);
+    atomic_store(&led_pending, true);
+}
+void input_led_stop(void) { atomic_store(&led_pending, false); }
+void input_led_poll(void) {
+    if (!atomic_load(&led_pending) || !pad) return;
+    uint32_t c = atomic_load(&led_want);
+    uint64_t now = SDL_GetTicks();
+    if (c == led_last && now - led_last_ms < 1000) return;  // (re-applied once a second: a reset pad loses it)
+    SDL_SetGamepadLED(pad, (Uint8)(c & 255), (Uint8)((c >> 8) & 255), (Uint8)((c >> 16) & 255));
+    led_last = c, led_last_ms = now;
 }
 
 // ------------------------------------------------------------------ settings (nx_settings.h)
