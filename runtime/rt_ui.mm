@@ -677,7 +677,8 @@ static void prelaunch_tab(float sc) {
 #endif
     ImGui::SameLine();
     static bool shot_del = getenv("NXRT_LAUNCHER_SHOT") && strstr(getenv("NXRT_LAUNCHER_SHOT"), ":askdelete");
-    if (ImGui::Button("Delete game files") || shot_del) ImGui::OpenPopup("##delfiles"), shot_del = false;  // (test: :askdelete)
+    static int del_opened = -1;  // the frame the popup opened (ImGui can activate a default-focused button on that frame)
+    if (ImGui::Button("Delete game files") || shot_del) ImGui::OpenPopup("##delfiles"), del_opened = ImGui::GetFrameCount(), shot_del = false;  // (test: :askdelete)
     if (ImGui::BeginPopupModal("##delfiles", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
         ImGui::PushFont((ImFont *)nxui_start_font(1));
         ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Are you sure?");
@@ -691,7 +692,10 @@ static void prelaunch_tab(float sc) {
             ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "Dev checkout: this is %s", where.c_str());
         }
         ImGui::Spacing();
-        if (ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
+        // a press on the frame the popup opened is not the player's: ImGui focuses this button and can activate it
+        // while the popup is still being opened (it deleted on its own, every start, before this guard)
+        bool armed = del_opened >= 0 && ImGui::GetFrameCount() > del_opened + 1;
+        if (armed && ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
             bool ok = rt_remove_game_files(g_root.c_str());  // (runtime/paths.c: only what the extraction made)
             set_job(ok ? "Game files deleted." : "Could not delete the game files (not in the app's data folder?).", !ok);
             g_files_deleted = true, gb = -1;
