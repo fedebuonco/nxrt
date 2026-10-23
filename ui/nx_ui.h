@@ -103,6 +103,15 @@ typedef struct NxUiGameFiles {
 } NxUiGameFiles;
 void nxui_set_game_files(const NxUiGameFiles *g);
 
+// Shader preparation on the start screen (runtime/nvn/shader_prep.h): after the game files are set up, and in the
+// background on later starts; PLAY waits for it while the launcher draws its bar. Skipped when there is no romfs
+// folder to read (a game package) or NXRT_SHADER_PREP=0.
+void nxui_shader_prep_run(void);        // do it now, blocking (the setup thread, after the files are ready)
+void nxui_shader_prep_start(void);      // start it in the background, once (any thread)
+bool nxui_shader_prep_busy(void);
+float nxui_shader_prep_progress(void);  // 0..1
+void nxui_shader_prep_skip(void);       // stop it early (the shaders already built stay)
+
 // Boot profiles next to "Vanilla" on PLAY (e.g. randomizer seeds)
 typedef struct NxUiProfiles {
     int (*list)(char names[][128], int max);

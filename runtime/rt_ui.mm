@@ -28,6 +28,7 @@ extern "C" {
 #include "nx_ui.h"
 #include "nxgame.h"
 #include "nxpkg.h"
+#include "nvn/shader_prep.h"
 #include "paths.h"
 #include "platform.h"
 #include "romfs_build.h"
@@ -37,6 +38,8 @@ SDL_Window *ui_window(void);
 void renderer_get_scale(float *sx, float *sy);
 double output_scale_dynamic_factor(void);
 }
+
+static std::string prep_romfs(void);  // (the start screen's shader preparation: defined below, used by the setup thread)
 
 // ------------------------------------------------------------------ pages: Video, Audio
 static bool tab_display(float) {
@@ -479,6 +482,10 @@ check:
     {
         std::string why = check_game_files(g_root);
         if (why.empty()) {
+            if (!prep_romfs().empty()) {
+                set_job("Preparing shaders (Skip to play now)...");
+                nxui_shader_prep_run();
+            }
             set_job("Game files ready.");
             // remembered: the next start uses this game folder ("" = the default, extracted/ in the data root)
             bool chosen = g_root != "extracted";
@@ -612,6 +619,51 @@ static void reveal_folder(const std::string &dir) {
 }
 
 static bool g_files_deleted;  // set here: the start screen goes back to setting the game files up (files_deleted)
+
+// ---- shader preparation (runtime/nvn/shader_prep.h): after setup, and in the background on later starts
+static std::atomic<bool> g_prep_busy{false}, g_prep_started{false};
+static std::atomic<float> g_prep_frac{-1.f};
+static volatile int g_prep_skip;  // (beta_5's shader_prep_run takes a volatile cancel flag)
+static bool prep_enabled(void) {
+    const char *e = getenv("NXRT_SHADER_PREP");  // (0: off; the NXRT_SHADER_PREP=1 test path in objects.c is separate)
+    return !e || atoi(e) != 0;
+}
+static std::string prep_romfs(void) {
+    std::string root = g_root.empty() ? "extracted" : g_root;
+    if (!(root[0] == '/' || (root.size() > 1 && root[1] == ':'))) root = std::string(rt_data_root()) + "/" + root;
+    struct stat sb;
+    return stat((root + "/romfs").c_str(), &sb) == 0 && S_ISDIR(sb.st_mode) ? root + "/romfs" : "";
+}
+static void prep_progress(int done, int total) { g_prep_frac.store(total ? (float)done / (float)total : 0.f); }
+extern "C" void nxui_shader_prep_run(void) {
+    if (!prep_enabled()) return;
+    std::string romfs = prep_romfs();
+    if (romfs.empty()) return;  // (a package: its bytes are read through the runtime, not a folder to scan)
+    g_prep_skip = 0;
+    g_prep_frac.store(0.f);
+    g_prep_busy.store(true);
+    if (!shader_prep_run(romfs.c_str(), prep_progress, &g_prep_skip))
+        LOG("[launcher] shader preparation could not start\n");
+    g_prep_frac.store(-1.f);
+    g_prep_busy.store(false);
+}
+static void *prep_thread(void *) {
+    nxui_shader_prep_run();
+    return NULL;
+}
+extern "C" void nxui_shader_prep_start(void) {
+    if (!prep_enabled() || g_prep_started.exchange(true)) return;
+    g_prep_busy.store(true);  // (before the thread runs: the launcher must see it)
+    pthread_t t;
+    if (pthread_create(&t, NULL, prep_thread, NULL) == 0) pthread_detach(t);
+    else g_prep_started.store(false), g_prep_busy.store(false);
+}
+extern "C" bool nxui_shader_prep_busy(void) { return g_prep_busy.load(); }
+extern "C" float nxui_shader_prep_progress(void) {
+    float p = g_prep_frac.load();
+    return p < 0 ? 0.f : p > 1 ? 1.f : p;
+}
+extern "C" void nxui_shader_prep_skip(void) { g_prep_skip = 1; }
 static std::string g_src_desc, g_setup_desc;  // the Game Files rows' explanations (the game's name and version: nxui_init)
 
 // (defined with the rest of the game-files callbacks, below)
@@ -657,7 +709,10 @@ static void prelaunch_tab(float sc) {
         opt_section("Set up");
         if (busy || (src.empty() && !files_copied())) opt_disable_next();
         if (opt_action("Set up game files", busy ? "Working..." : "", g_setup_desc.c_str(), true) && !busy) files_start();
-        if (busy) ImGui::ProgressBar(files_progress(), ImVec2(-1, 0));
+        if (busy) {
+            ImGui::ProgressBar(files_progress(), ImVec2(-1, 0));
+            if (nxui_shader_prep_busy() && ImGui::Button("Skip preparing shaders")) nxui_shader_prep_skip();
+        }
     } else {
     {   // where they are kept (the Game Files page's "Keep the game")
         std::string where = is_abs(g_root) ? g_root : std::string(rt_data_root()) + "/" + g_root;
@@ -840,9 +895,12 @@ static bool files_busy(void) {
     pthread_mutex_lock(&g_lock);
     bool b = g_busy;
     pthread_mutex_unlock(&g_lock);
-    return b;
+    return b || g_prep_busy.load();  // (the shader preparation runs inside the same "working" state)
 }
-static float files_progress(void) { return extract_progress(); }
+static float files_progress(void) {
+    if (g_prep_busy.load()) return nxui_shader_prep_progress();  // (after the copy/build: its own bar)
+    return extract_progress();
+}
 static bool files_recompiling(void) { return g_build_frac >= 0; }
 static void files_job(char *line, size_t n, char *hint, size_t hn, bool *failed) {
     pthread_mutex_lock(&g_lock);
