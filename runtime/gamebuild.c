@@ -442,6 +442,10 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     int queued[NX_MAX_MODULES] = {0};  // chunk files of each module put in units so far
     bool tables[NX_MAX_MODULES] = {false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
+    {   // (a game much bigger than the default job count assumes can exhaust memory)
+        const char *e = getenv("NXRT_BUILD_JOBS");
+        if (e && atoi(e) > 0) jobs = atoi(e) > 64 ? 64 : atoi(e);
+    }
     struct { PlatProc p; int unit; } run[64];
     int nrun = 0;
     int reused = 0, compiled = 0;
