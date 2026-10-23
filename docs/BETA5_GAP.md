@@ -5,8 +5,8 @@ Measured 2026-10-23 against **`peiikai/LASRecomp` `beta_5` = `f7b986e`** (2026-1
 game built on nxrt uses. beta_5's LAS game code (its 16.3k lines of randomizer, overlays, cosmetics and version
 tables) is deliberately excluded; that belongs to the LAS port and is not library work.
 
-**Verdict: 96.5% of beta_5's shared runtime lines are in place, every shared file exists, and what is left is
-roughly 650 lines of UX plus getting Vulkan to build and run.**
+**Verdict: 96.5% of beta_5's shared runtime lines are in place, every shared file exists, and the shared UX list is
+now done — what remains is Vulkan (needs a machine where it builds) and the optional kernel diagnostics.**
 
 ## Method
 
@@ -44,18 +44,18 @@ made game-agnostic and gained mechanisms beta_5 had inside its game layer. Area 
 
 ## What is left in the shared runtime
 
-| item | what's actually left | size |
-|---|---|---:|
-| **Vulkan backend** | beta_5's code, never compiled here: **38 references to LAS-only symbols** (`pot_tint`, `recolour_tint_draw`, `texpatch_*`, `escape_bottle_tint`, `pets_*`), no `RECOLOUR_TINT_FLOATS`, no tint v2, no chunked heap | ~150 lines of decoupling + the chunking, then a Vulkan machine to verify |
-| **Startup shader preparation** | `shader_prep_run` + progress bar + Skip on the start screen; the code is imported, but only reachable through the `NXRT_SHADER_PREP` test at device init | ~35 lines of launcher wiring |
-| **Overlay caching** | beta_5 renders HUD overlays into a cached texture (`g_ov_cache`); here they are re-rendered every frame | ~70 lines |
-| **Controls rows for the new mechanisms** | rumble on/off + intensity, LED on/off, LiveSplit on/host/port — mechanisms and ini keys exist, the rows do not | ~50 lines |
-| **`opt_colour` row** | the colour-picker row type in `option_rows` | ~20 lines |
-| **OneDrive warning** | Windows start screen warning when the data root is in a synced folder | ~70 lines |
-| **Kernel diagnostics** | beta_5's `KTRACE`/wait trace; optional developer tooling | ~460 lines |
+Done on 2026-10-23 (each verified, see the commits): **startup shader preparation** (its own bar, Skip, PLAY waits;
+background on later starts), **overlay caching** (the last drawing is reused while only the FPS counter is up),
+the **Controls rows** for the mechanisms (Rumble on/off + strength, Controller light, LiveSplit server/port), and the
+**OneDrive warning** (measured size, Keep here).
 
-That is the whole shared list: **~650 lines of UX plus Vulkan** (the kernel diagnostics are optional and not needed by
-any game).
+| item | state | size |
+|---|---|---:|
+| **Vulkan backend** | still beta_5's code, never compiled here: **38 references to LAS-only symbols** (`pot_tint`, `recolour_tint_draw`, `texpatch_*`, `escape_bottle_tint`, `pets_*`), no `RECOLOUR_TINT_FLOATS`, no tint v2, no chunked heap. Needs a machine where Vulkan builds — see "The one unknown" | ~150 lines of decoupling + the chunking |
+| **`opt_colour` row** | skipped by decision: it is cosmetics-only, and beta_5's version depends on the game's palette types (`CosColour`), so a shared one would need a different API first | ~20 lines |
+| **Kernel diagnostics** | beta_5's `KTRACE`/wait trace; optional developer tooling, not needed by any game | ~460 lines |
+
+So the only shared work left that matures the library is **Vulkan**; the kernel diagnostics are optional.
 
 ## Two things that look like gaps but are not
 
@@ -67,9 +67,11 @@ any game).
 
 ## The one unknown
 
-**Vulkan.** The code is beta_5's, unchanged, but this machine cannot run it and it has never been compiled here. Its
-line count is complete; its runtime behaviour is unproven. Everything else shared — kernel, HLE, services, Metal NVN,
-UI framework — is in and exercised by LAS, EoW and Sky.
+**Vulkan.** The code is beta_5's, unchanged, but this machine cannot run it and has never compiled it (there are no
+Vulkan headers here, and the backend still calls LAS-only symbols). Its line count is complete; its build and runtime
+behaviour are unproven. Rather than blind-edit 38 call sites, it should be done on a machine where the backend builds.
+Everything else shared — kernel, HLE, services, Metal NVN, UI framework, the start-screen flows — is in and exercised
+by LAS, EoW and Sky.
 
 Reproduce:
 
