@@ -24,6 +24,7 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 }
 #define LOG(...) rt_log(__VA_ARGS__)
 #define FATAL(...) (rt_fatal_msg(__VA_ARGS__), rt_fatal_trace())  // (runtime/crash_explain.c keeps the line)
+void rt_fatal_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));  // (runtime/crash_explain.c)
 
 // ---- address space layout (guest addresses == host addresses; GUEST_SHIFT lower on Android, cpu.h)
 // macOS reserves 0x2_0000_0000-0x70_0000_0000, and guest addresses must fit in 39 bits, so the

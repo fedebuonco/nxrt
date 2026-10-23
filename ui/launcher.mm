@@ -105,7 +105,6 @@ static std::string tag_label(const std::string &t, bool with_word) {
     char end;
     if (sscanf(t.c_str(), "alpha_%d%c", &n, &end) == 1) return "Alpha " + std::to_string(n);
     if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1) return "Beta " + std::to_string(n);
-    if (!t.compare(0, 5, "test-")) return "Test build " + t.substr(5);
     std::string v = t.size() > 1 && t[0] == 'v' ? t.substr(1) : t;
     return with_word ? "Version " + v : v;
 }
@@ -229,91 +228,6 @@ static bool menu_tip(float s) {
     return go;
 }
 
-// The game files page's example: a Finder-style window (the same on every platform) with the folder to choose -
-// "Game files", opened: exefs in it opened (its files), romfs closed. All drawn here (shapes and the page's font, sized from the font: sharp at
-// any scale), up to w wide, at the cursor; it takes its space with a Dummy.
-enum { FOLDER_EXAMPLE_ROWS = 9 };
-static float folder_example_height(void) {  // (its window, without the Dummy's gap under it)
-    float fs = ImGui::GetFontSize();
-    return fs * 1.45f + fs * 0.35f * 2 + FOLDER_EXAMPLE_ROWS * fs * 1.12f;
-}
-static void draw_folder_example(float w) {
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    ImFont *font = ImGui::GetFont();
-    float fs = ImGui::GetFontSize(), ts = fs * 0.82f;  // (the rows' text a little under the page's)
-    float rh = fs * 1.12f, bar = fs * 1.45f, pad = fs * 0.35f, r = fs * 0.45f;
-    struct Item { const char *name; int depth; int kind; };  // kind: 0 file, 1 folder opened, 2 folder closed
-    static const Item items[] = {{"Game files", 0, 1}, {"exefs", 1, 1}, {"main", 2, 0}, {"main.npdm", 2, 0},
-                                 {"rtld", 2, 0}, {"sdk", 2, 0}, {"subsdk0", 2, 0}, {"subsdk1", 2, 0}, {"romfs", 1, 2}};
-    const int n = FOLDER_EXAMPLE_ROWS;
-    static_assert(sizeof items / sizeof items[0] == FOLDER_EXAMPLE_ROWS, "one row per item");
-    w = fminf(w, fs * 15);
-    float h = folder_example_height();
-    ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + w, a.y + h);
-    const ImU32 body = IM_COL32(24, 28, 27, 255), title = IM_COL32(40, 45, 43, 255), edge = IM_COL32(255, 255, 255, 38),
-                text = IM_COL32(220, 216, 205, 255), dim = IM_COL32(150, 152, 144, 255),
-                gold = IM_COL32(236, 194, 84, 255), gold_tab = IM_COL32(200, 160, 62, 255),
-                paper = IM_COL32(226, 224, 216, 255), fold = IM_COL32(160, 158, 150, 255),
-                select = IM_COL32(32, 84, 176, 255), text_sel = IM_COL32(250, 250, 255, 255);
-    dl->AddRectFilled(ImVec2(a.x, a.y + fs * 0.12f), ImVec2(b.x, b.y + fs * 0.22f), IM_COL32(0, 0, 0, 70), r);  // shadow
-    dl->AddRectFilled(a, b, body, r);
-    dl->AddRectFilled(a, ImVec2(b.x, a.y + bar), title, r, ImDrawFlags_RoundCornersTop);
-    dl->AddLine(ImVec2(a.x, a.y + bar), ImVec2(b.x, a.y + bar), IM_COL32(0, 0, 0, 90), 1.0f);
-    dl->AddRect(a, b, edge, r, 0, 1.0f);
-    // the title bar: three dots on the left, the folder it's in (a typical one) in the middle
-    static const ImU32 dots[] = {IM_COL32(255, 95, 87, 255), IM_COL32(254, 188, 46, 255), IM_COL32(40, 200, 64, 255)};
-    float dr = fs * 0.21f, cy = a.y + bar * 0.5f;
-    for (int i = 0; i < 3; i++) dl->AddCircleFilled(ImVec2(a.x + fs * 0.65f + i * fs * 0.62f, cy), dr, dots[i]);
-    const char *t = "Documents";
-    ImVec2 tsz = font->CalcTextSizeA(ts, FLT_MAX, 0, t);
-    dl->AddText(font, ts, ImVec2(a.x + (w - tsz.x) * 0.5f, cy - tsz.y * 0.5f), text, t);
-    // the list: a disclosure triangle on folders, the folder / file glyph, the name
-    float g = fs * 0.78f;  // (glyph size)
-    for (int i = 0; i < n; i++) {
-        const Item &it = items[i];
-        float y = a.y + bar + pad + i * rh, my = y + rh * 0.5f;
-        if (i == 0)  // the folder to choose: selected, as Finder shows it
-            dl->AddRectFilled(ImVec2(a.x + fs * 0.25f, y), ImVec2(b.x - fs * 0.25f, y + rh), select, fs * 0.25f);
-        else if (i & 1) dl->AddRectFilled(ImVec2(a.x + 1, y), ImVec2(b.x - 1, y + rh), IM_COL32(255, 255, 255, 9));
-        float x = a.x + fs * 0.5f + it.depth * fs * 1.25f;
-        if (it.kind) {  // ▼ opened, ▶ closed
-            float u = fs * 0.2f, cx = x + u;
-            ImU32 tc = i == 0 ? text_sel : dim;
-            if (it.kind == 1)
-                dl->AddTriangleFilled(ImVec2(cx - u, my - u * 0.6f), ImVec2(cx + u, my - u * 0.6f),
-                                      ImVec2(cx, my + u * 0.75f), tc);
-            else
-                dl->AddTriangleFilled(ImVec2(cx - u * 0.6f, my - u), ImVec2(cx - u * 0.6f, my + u),
-                                      ImVec2(cx + u * 0.75f, my), tc);
-        }
-        x += fs * 0.6f;
-        float gx = x, gy = my - g * 0.5f;
-        if (it.kind) {  // folder: a tab, then the body over it
-            dl->AddRectFilled(ImVec2(gx, gy + g * 0.12f), ImVec2(gx + g * 0.46f, gy + g * 0.42f), gold_tab, g * 0.1f);
-            dl->AddRectFilled(ImVec2(gx, gy + g * 0.26f), ImVec2(gx + g, gy + g * 0.9f), gold, g * 0.1f);
-        } else {  // file: a page with its top right corner folded
-            float l = gx + g * 0.16f, rr = gx + g * 0.84f, tp = gy + g * 0.02f, bt = gy + g * 0.98f, c = g * 0.24f;
-            ImVec2 pts[] = {ImVec2(l, tp), ImVec2(rr - c, tp), ImVec2(rr, tp + c), ImVec2(rr, bt), ImVec2(l, bt)};
-            dl->AddConvexPolyFilled(pts, 5, paper);
-            dl->AddTriangleFilled(ImVec2(rr - c, tp), ImVec2(rr - c, tp + c), ImVec2(rr, tp + c), fold);
-        }
-        ImVec2 nsz = font->CalcTextSizeA(ts, FLT_MAX, 0, it.name);
-        float nx = x + g + fs * 0.4f;
-        dl->AddText(font, ts, ImVec2(nx, my - nsz.y * 0.5f), i == 0 ? text_sel : text, it.name);
-        if (i == 0) {  // an arrow pointing back at the name, then what to do (smaller when the row is narrow)
-            const char *hint = "Choose this one";
-            float ax = nx + nsz.x + fs * 0.5f, aw = fs * 1.1f, gap = fs * 0.3f, room = b.x - fs * 0.6f - ax;
-            float hs = ts, hw = font->CalcTextSizeA(hs, FLT_MAX, 0, hint).x;
-            if (aw + gap + hw > room) hs *= fmaxf(0.7f, (room - aw - gap) / hw);
-            float hx = ax + aw + gap, th = fs * 0.09f, hd = fs * 0.26f;
-            dl->AddLine(ImVec2(ax + th, my), ImVec2(ax + aw, my), gold, th);
-            dl->AddTriangleFilled(ImVec2(ax - th, my), ImVec2(ax + hd, my - hd), ImVec2(ax + hd, my + hd), gold);
-            dl->AddText(font, hs, ImVec2(hx, my - font->CalcTextSizeA(hs, FLT_MAX, 0, hint).y * 0.5f), gold, hint);
-        }
-    }
-    ImGui::Dummy(ImVec2(w, h));
-}
-
 // Start-screen text: a soft drop shadow, then the text with a top-to-bottom colour gradient (top == bottom: flat)
 static void text_fx(ImDrawList *dl, ImFont *font, float size, ImVec2 p, ImU32 top, ImU32 bottom, const char *t,
                     float shadow) {
@@ -395,9 +309,26 @@ static bool menu_item(const char *label, bool enabled, bool *hovered = NULL, con
     return clicked;
 }
 
-// Controllers, as in the in-game menu (runtime/ui/menu.mm): read straight from SDL, confirm / back as the Confirm
-// button setting says (pad_nav.h: the game's layout, or the controller's convention); d-pad / left stick move.
-// (ImGui's own SDL gamepad handling is switched off: per the user, it didn't work on the start screen.)
+// Controllers, as in the in-game menu (runtime/ui/menu.mm): read straight from SDL, Nintendo layout - the right face
+// button (A) confirms, the bottom one (B) goes back; d-pad / left stick move. (ImGui's own SDL gamepad handling is
+// switched off: it used the Xbox layout and, per the user, didn't work on the start screen.)
+static ImGuiKey launcher_pad_key(Uint8 b) {
+    switch (b) {
+    case SDL_GAMEPAD_BUTTON_EAST: return ImGuiKey_GamepadFaceDown;   // A: activate
+    case SDL_GAMEPAD_BUTTON_SOUTH: return ImGuiKey_GamepadFaceRight; // B: back
+    case SDL_GAMEPAD_BUTTON_NORTH: return ImGuiKey_GamepadFaceUp;
+    case SDL_GAMEPAD_BUTTON_WEST: return ImGuiKey_GamepadFaceLeft;
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: return ImGuiKey_GamepadDpadUp;
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return ImGuiKey_GamepadDpadDown;
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return ImGuiKey_GamepadDpadLeft;
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return ImGuiKey_GamepadDpadRight;
+    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return ImGuiKey_GamepadL1;
+    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return ImGuiKey_GamepadR1;
+    case SDL_GAMEPAD_BUTTON_START: return ImGuiKey_GamepadStart;
+    case SDL_GAMEPAD_BUTTON_BACK: return ImGuiKey_GamepadBack;
+    default: return ImGuiKey_None;
+    }
+}
 
 static void launcher_pad_open_all(void) {
     int n = 0;
@@ -415,7 +346,7 @@ static bool launcher_pad_event(const SDL_Event &e) {
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
-        ImGuiKey k = ui_pad_key(e.gbutton.which, e.gbutton.button, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+        ImGuiKey k = launcher_pad_key(e.gbutton.button);
         if (k != ImGuiKey_None) io.AddKeyEvent(k, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
         return true;
     }
@@ -530,20 +461,6 @@ extern "C" void launcher_run(void) {
     static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
     const char *ap = getenv("NXRT_LAUNCHER_AUTOPLAY");
     if (ap && status.empty() && !(runs && !strcmp(ap, "once"))) play = true;  // (test: PLAY at once)
-    if (getenv("NXRT_LAUNCHER_PREPARE") && status.empty() && !runs) {  // (test) the setup's shader preparation
-        g_busy = true;                                                      // alone, then PLAY with AUTOPLAY
-        page = SETUP, play = false;
-        pthread_t th;
-        pthread_create(&th, NULL, [](void *) -> void * {
-            prepare_shaders();
-            set_job("Game files ready.");
-            pthread_mutex_lock(&g_lock);
-            g_busy = false;
-            pthread_mutex_unlock(&g_lock);
-            return NULL;
-        }, NULL);
-        pthread_detach(th);
-    }
     runs++;
     if (const char *t = getenv("NXRT_LAUNCHER_EXTRACT")) {  // (test) <folder>: set the game files up, log, exit
         if (g_files.test_extract) g_files.test_extract(t);
@@ -565,39 +482,7 @@ extern "C" void launcher_run(void) {
         fprintf(stderr, "[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
         if (!status.empty()) { g_bg = 0; page = SETTINGS, menu_tabs_focus(true), g_tab_request_ext = -1; }
     }
-    if (g_onedrive < 0) {  // (once per launch: a "Title screen" reboot keeps it)
-        const char *t = getenv("NXRT_TEST_ONEDRIVE");
-        g_onedrive = t ? atoi(t) != 0 : plat_onedrive_synced(rt_data_root());
-        if (g_onedrive) fprintf(stderr, "[launcher] the data folder is synced by OneDrive%s: %s\n",
-                                g_settings.onedrive_kept ? " (kept there)" : "", rt_data_root());
-    }
-    // the shader preparation of every later start: in the background (first setups and updates do theirs above)
-    if (status.empty() && !g_busy && !getenv("NXRT_LAUNCHER_PREPARE")) start_background_prep();
-    // (test) NXRT_LAUNCHER_PLAY_AT=<s>: PLAY that many seconds in; NXRT_LAUNCHER_SKIP_AT=<s>: Skip then
-    const char *play_at_env = getenv("NXRT_LAUNCHER_PLAY_AT"), *skip_at_env = getenv("NXRT_LAUNCHER_SKIP_AT");
-    uint64_t loop_t0 = SDL_GetTicks(), last_frame = loop_t0, bg_gap = 0, bg_frames = 0;
-    bool bg_logged = false;
-    for (;;) {
-        uint64_t now = SDL_GetTicks();
-        if (g_bg_prep) bg_frames++, bg_gap = std::max(bg_gap, now - last_frame);
-        else if (!bg_logged && bg_frames) {  // (how the start screen kept up meanwhile)
-            bg_logged = true;
-            fprintf(stderr, "[launcher] background shader preparation: %llu frames meanwhile, longest %llu ms\n",
-                    (unsigned long long)bg_frames, (unsigned long long)bg_gap);
-        }
-        last_frame = now;
-        if (play_at_env && status.empty() && now - loop_t0 >= (uint64_t)(atof(play_at_env) * 1000)) play = true, play_at_env = NULL;
-        if (skip_at_env && g_prep_wait && now - loop_t0 >= (uint64_t)(atof(skip_at_env) * 1000)) g_prep_skip = 1, skip_at_env = NULL;
-        // PLAY while that still runs: its bar (with Skip) until it's done
-        if (play && g_bg_prep) {
-            play = false, g_prep_wait = true;
-            fprintf(stderr, "[launcher] PLAY: waiting for the shader preparation\n");
-        }
-        if (g_prep_wait && !g_bg_prep) {
-            g_prep_wait = false, play = true;
-            fprintf(stderr, "[launcher] shader preparation %s: playing\n", g_prep_skip ? "skipped" : "done");
-        }
-        if (play) break;
+    while (!play) {
         menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
         // the profile PLAY would start, kept current (the game's pages may depend on it)
         profile_choose(choice ? choices[choice] : "");
@@ -620,7 +505,6 @@ extern "C" void launcher_run(void) {
         }
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            input_cursor_event(&e);  // (pad / key: the cursor hides; ImGui's backend leaves it so, below)
             if (page == SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
             if (!launcher_pad_event(e)) ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
@@ -650,22 +534,17 @@ extern "C" void launcher_run(void) {
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
             ImGui::GetIO().FontGlobalScale = s * 0.5f;
             ImDrawList *bg = ImGui::GetBackgroundDrawList();
-            // an update by itself: only its bar, on the start screen's background (gray without it; a failure or
-            // Cancel then shows the Game Files page)
-            const bool update_only = g_auto_update && busy;
-            if (g_bg && (status.empty() || update_only)) {  // cover the window, keep the aspect
+            if (g_bg) {  // cover the window, keep the aspect
                 float ia = (float)g_bg_w / g_bg_h, wa = ds.x / ds.y;
                 ImVec2 uv0(0, 0), uv1(1, 1);
                 if (wa > ia) { float v = ia / wa; uv0.y = (1 - v) / 2; uv1.y = 1 - uv0.y; }
                 else { float u = wa / ia; uv0.x = (1 - u) / 2; uv1.x = 1 - uv0.x; }
                 bg->AddImage(BG_TEXID, ImVec2(0, 0), ds, uv0, uv1);
-            } else if (update_only) {
-                bg->AddRectFilled(ImVec2(0, 0), ds, IM_COL32(40, 40, 40, 255));
             } else {
                 bg->AddRectFilledMultiColor(ImVec2(0, 0), ds, IM_COL32(18, 34, 40, 255), IM_COL32(40, 70, 64, 255),
                                             IM_COL32(12, 20, 24, 255), IM_COL32(8, 12, 16, 255));
             }
-            if (!update_only) {  // a shadow banner fading in from the left behind the menu, and one from the right behind the version
+            {  // a shadow banner fading in from the left behind the menu, and one from the right behind the version
                 const float stops[][2] = {{0.0f, 225}, {0.3f, 215}, {0.44f, 165}, {0.55f, 95}, {0.64f, 35}, {0.74f, 0}};
                 for (int i = 0; i + 1 < (int)(sizeof stops / sizeof stops[0]); i++) {
                     ImU32 a = IM_COL32(6, 10, 34, (int)stops[i][1]), b = IM_COL32(6, 10, 34, (int)stops[i + 1][1]);
@@ -683,8 +562,6 @@ extern "C" void launcher_run(void) {
             ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
             ImGui::Begin("##launcher", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
-            const bool waiting = g_prep_wait;  // (the menu waits under the bar)
-            ImGui::BeginDisabled(waiting);
             ImGui::SetScrollX(0);  // (the start screen never scrolls; a long seed name or a stray nav move mustn't shift it)
             ImGui::SetScrollY(0);
             float x0 = 90 * s;
@@ -844,7 +721,7 @@ extern "C" void launcher_run(void) {
                 menu_tabs_draw(sc, g_font_small, g_font_menu, false, g_files.prelaunch);
                 int cap_dev;
                 bind_capture_active(&cap_dev, NULL, NULL);
-                if (!popup && !typing && cap_dev < 0 && !controls_ui_took_back() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                if (!popup && !typing && cap_dev < 0 && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
                     (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
                     back = true;
                 ImGui::PopFont();
@@ -882,14 +759,7 @@ extern "C" void launcher_run(void) {
             } else {
                 ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  %s", busy ? "Setting up the game files..." : status.c_str());
                 ImGui::SetCursorPosX(x0);
-                ImGui::TextDisabled("%s", busy ? "Set up the game files to play." : status_hint(status));
-            }
-            if (g_onedrive > 0 && !g_settings.onedrive_kept) {
-                float w = fminf(ds.x * 0.42f, 560 * s);
-                ImGui::SetCursorPos(ImVec2(ds.x - w - 60 * s, 60 * s));
-                int r = onedrive_notice(s, w, status.empty());
-                if (r == 1) onedrive_keep();
-                else if (r == 2) choose_data_folder();
+                ImGui::TextDisabled("Set up the game files to play.");
             }
             if (const char *f = getenv("NXRT_LAUNCHER_FONT")) {  // (test) which typeface this window shows
                 const char *b = strrchr(f, '/');
@@ -937,11 +807,8 @@ extern "C" void launcher_run(void) {
             }
             ImGui::PopFont();
             }
-            ImGui::EndDisabled();
-            data_folder_popup(s);  // (another data folder picked: move / start fresh, then restart)
             ImGui::End();
             ImGui::PopStyleColor();
-            if (waiting) draw_busy_overlay(ds, "", false, true);
             osk_draw(g_font_menu, s * 0.7f);  // (a text field activated with the controller)
             typed_before = ui_text_busy();
 
