@@ -377,7 +377,7 @@ static void host_test_frame(uint64_t frame) {
 
 
 // ------------------------------------------------------------------ the pad, for the host
-NxInputSettings g_input_settings;
+NxInputSettings g_input_settings = {.rumble = true, .rumble_strength = 100, .led = true};
 int g_input_prompt_styles = 4;
 
 void nxin_frame(uint64_t frame, void (*script)(uint64_t frame, NxPad *p)) {
@@ -509,7 +509,7 @@ void input_rumble_poll(void) {
     uint64_t now = SDL_GetTicks();
     uint64_t last_frame = atomic_load(&rumble_frame_ms);
     uint16_t lo = 0, hi = 0;
-    bool suppress = !pad || host_test || !SDL_GetKeyboardFocus() ||
+    bool suppress = !pad || host_test || !SDL_GetKeyboardFocus() || !g_input_settings.rumble ||
                     (now > last_frame && now - last_frame > 250);
     SDL_LockSpinlock(&rumble_lock);
     if (!suppress && rumble_allowed) {
@@ -518,6 +518,9 @@ void input_rumble_poll(void) {
         a = rumble_amplitude(rumble_values[0].high_amp);
         b = rumble_amplitude(rumble_values[1].high_amp);
         hi = a > b ? a : b;
+        int pct = g_input_settings.rumble_strength;
+        if (pct <= 0) lo = hi = 0;
+        else if (pct < 100) lo = (uint16_t)((uint32_t)lo * (uint32_t)pct / 100), hi = (uint16_t)((uint32_t)hi * (uint32_t)pct / 100);
     }
     SDL_UnlockSpinlock(&rumble_lock);
     if (pad && (lo != rumble_last_lo || hi != rumble_last_hi || ((lo || hi) && now - rumble_last_ms >= 100))) {
@@ -536,7 +539,7 @@ void input_led_set(uint8_t r, uint8_t g, uint8_t b) {
 }
 void input_led_stop(void) { atomic_store(&led_pending, false); }
 void input_led_poll(void) {
-    if (!atomic_load(&led_pending) || !pad) return;
+    if (!atomic_load(&led_pending) || !pad || !g_input_settings.led) return;
     uint32_t c = atomic_load(&led_want);
     uint64_t now = SDL_GetTicks();
     if (c == led_last && now - led_last_ms < 1000) return;  // (re-applied once a second: a reset pad loses it)
@@ -547,6 +550,9 @@ void input_led_poll(void) {
 // ------------------------------------------------------------------ settings (nx_settings.h)
 static bool input_key(const char *key, const char *val) {
     if (!strcmp(key, "dpad_move")) g_input_settings.dpad_move = atoi(val) != 0;
+    else if (!strcmp(key, "rumble")) g_input_settings.rumble = atoi(val) != 0;
+    else if (!strcmp(key, "rumble_strength")) g_input_settings.rumble_strength = atoi(val);
+    else if (!strcmp(key, "led")) g_input_settings.led = atoi(val) != 0;
     else if (!strcmp(key, "prompts")) g_input_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?
                                                                  PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION :
                                                                  !strcmp(val, "keyboard") ? PROMPTS_KEYBOARD : PROMPTS_AUTO;
@@ -555,6 +561,8 @@ static bool input_key(const char *key, const char *val) {
 }
 static void input_write(FILE *f) {
     fprintf(f, "dpad_move = %d\n", g_input_settings.dpad_move);
+    fprintf(f, "rumble = %d\nrumble_strength = %d\nled = %d\n", g_input_settings.rumble, g_input_settings.rumble_strength,
+            g_input_settings.led);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation", "keyboard"};
     fprintf(f, "prompts = %s\n", g_input_settings.prompts >= 0 && g_input_settings.prompts < 5 ? prompts[g_input_settings.prompts] : "auto");
     bind_settings_save(f);

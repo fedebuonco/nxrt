@@ -27,6 +27,9 @@ enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTA
 typedef struct NxInputSettings {
     bool dpad_move;  // the d-pad (and arrow keys) move the player like the stick
     int prompts;     // PROMPTS_*: button glyphs the game shows (auto = follow the controller SDL reports)
+    bool rumble;         // controller vibration (Controls tab)
+    int rumble_strength; // 0..100: the game's amplitudes scaled
+    bool led;            // the controller's light, where it has one
 } NxInputSettings;
 extern NxInputSettings g_input_settings;
 extern int g_input_prompt_styles;  // the styles the host's game draws: 4 (auto .. PlayStation), 5 with Keyboard

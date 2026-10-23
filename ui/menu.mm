@@ -578,6 +578,17 @@ static void tab_about(void) {
     toggle("D-pad moves the player", &g_input_settings.dpad_move);
     for (int i = 0; i < g_nrows[NXUI_ROWS_MOVEMENT]; i++) g_rows[NXUI_ROWS_MOVEMENT][i]();
     ImGui::Spacing();
+    header("Feedback");
+    if (toggle("Rumble", &g_input_settings.rumble)) settings_save();
+    if (g_input_settings.rumble) {
+        static const char *const strengths[] = {"25%", "50%", "75%", "100%"};
+        int i = g_input_settings.rumble_strength / 25 - 1;
+        if (i < 0) i = 0;
+        if (i > 3) i = 3;
+        if (choice("Rumble strength", &i, strengths, 4)) g_input_settings.rumble_strength = (i + 1) * 25, settings_save();
+    }
+    if (toggle("Controller light", &g_input_settings.led)) settings_save();
+    ImGui::Spacing();
     header("Button prompts");
     {
         static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
@@ -590,6 +601,7 @@ static void tab_about(void) {
     for (int i = 0; i < g_nrows[NXUI_ROWS_CONTROLS]; i++) g_rows[NXUI_ROWS_CONTROLS][i]();  // (each ends with Spacing)
     header("Controls");
     controls_bindings_draw(ImGui::GetFontSize() / 34);
+    ImGui::Spacing();
     ImGui::Spacing();
     header("Menu");
     ImGui::TextUnformatted("Open / close this menu:  F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start");

@@ -151,6 +151,26 @@ void tab_mods(float scale);
 static bool tab_mods_page(float scale) { tab_mods(scale); return false; }
 
 // ------------------------------------------------------------------ Controls page: the system language
+// LiveSplit: the run clock's client (runtime/livesplit.c). The settings are the runtime's, so the rows are here
+// (registered on the Controls tab, next to the system language).
+static void livesplit_rows(void) {
+    menu_header("LiveSplit");
+    if (menu_toggle("Send the run clock to LiveSplit", &g_settings.livesplit)) settings_save();
+    if (g_settings.livesplit) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Server");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##lshost", g_settings.livesplit_host, sizeof g_settings.livesplit_host)) settings_save();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Port");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputInt("##lsport", &g_settings.livesplit_port, 0, 0)) settings_save();
+        menu_hint("LiveSplit's Server component (Tools > Start Server), default port 16834.");
+    }
+}
+
 static void language_rows(void) {
     menu_header("System language");
     {
@@ -1006,6 +1026,7 @@ extern "C" void rt_ui_register(void) {
         nxui_add_game_page(&g_game_tabs[i]);
     }
     nxui_add_rows(NXUI_ROWS_CONTROLS, language_rows);
+    nxui_add_rows(NXUI_ROWS_CONTROLS, livesplit_rows);
     for (int i = 0; i < NX_HOOK(noverlays); i++)
         if (NX_HOOK(overlays)[i].wanted && NX_HOOK(overlays)[i].draw)
             nxui_add_overlay(NX_HOOK(overlays)[i].wanted, NX_HOOK(overlays)[i].draw);
