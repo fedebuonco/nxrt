@@ -10,8 +10,6 @@
 #include "imgui.h"
 #include "imgui_internal.h"  // (SetKeyOwner, NavCursorVisible)
 
-extern "C" {
-}
 #include "option_rows.h"
 #include "osk.h"
 
@@ -251,58 +249,6 @@ bool opt_action(const char *label, const char *value, const char *desc, bool upp
     return row(label, value ? value : "", changed, desc, upper) == 2;
 }
 
-bool opt_colour(const char *label, CosColour *c, int slot, const char *desc) {
-    int prev = c->pick;
-    const char *names[N_COL];
-    for (int i = 0; i < N_COL; i++) names[i] = g_col_names[i];
-    char seed[48];
-    int sp = col_pick(c, slot);  // (Default: the seed's own colour, shown as such)
-    if (c->pick == COL_DEFAULT && sp != COL_DEFAULT) snprintf(seed, sizeof seed, "Seed: %s", g_col_names[sp]), names[0] = seed;
-    bool changed = opt_choice(label, &c->pick, names, N_COL, COL_DEFAULT, desc);
-    if (changed && c->pick == COL_CUSTOM && prev != COL_CUSTOM)  // (Custom starts from the colour it was on)
-        c->rgb = prev > COL_DEFAULT && prev < COL_RANDOM ? g_col_rgb[prev] : (c->rgb ? c->rgb : 0xF2F0EA);
-    if (c->pick != COL_CUSTOM) return changed;
-    ImGui::PushID(label);
-    char hex[16];
-    snprintf(hex, sizeof hex, "#%06X", (unsigned)(c->rgb & 0xFFFFFF));
-    opt_indent(1);
-    bool open = opt_action("Custom color", hex, "Any color: pick its hue, saturation and brightness.", true, true);
-    opt_indent(-1);
-    ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-    {   // a swatch of it, left of the value
-        float fs = ImGui::GetFontSize(), sw = fs * 1.1f, vw = ImGui::CalcTextSize(hex).x;
-        float x1 = mx.x - 16 * g_scale - vw - fs * 0.5f, y0 = (mn.y + mx.y - sw) * 0.5f;
-        ImU32 col = IM_COL32(c->rgb >> 16 & 255, c->rgb >> 8 & 255, c->rgb & 255, 255);
-        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(x1 - sw, y0), ImVec2(x1, y0 + sw), col, 4 * g_scale);
-        ImGui::GetWindowDrawList()->AddRect(ImVec2(x1 - sw, y0), ImVec2(x1, y0 + sw), IM_COL32(255, 255, 255, 90),
-                                            4 * g_scale);
-    }
-    static int test_open = -1;  // NXRT_OPEN_PICKER=1 (test): the first Custom row's picker opens by itself
-    if (test_open < 0) test_open = getenv("NXRT_OPEN_PICKER") != NULL;
-    if (test_open) test_open = 0, open = true;
-    if (open) ImGui::OpenPopup("##picker");
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * g_scale, 14 * g_scale));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 9 * g_scale);
-    ImGui::PushStyleColor(ImGuiCol_Border, kGold);
-    ImGui::SetNextWindowPos(ImVec2(mx.x + 12 * g_scale, mn.y), ImGuiCond_Appearing);  // (beside the row, over the description)
-    if (ImGui::BeginPopup("##picker")) {
-        float f[3] = {(c->rgb >> 16 & 255) / 255.0f, (c->rgb >> 8 & 255) / 255.0f, (c->rgb & 255) / 255.0f};
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11);
-        if (ImGui::ColorPicker3("##colour", f, ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_NoSidePreview |
-                                                   ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_NoAlpha)) {
-            c->rgb = (uint32_t)lroundf(f[0] * 255) << 16 | (uint32_t)lroundf(f[1] * 255) << 8 | (uint32_t)lroundf(f[2] * 255);
-            changed = true;
-        }
-        if (ImGui::Button("Done") || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-            ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(2);
-    ImGui::PopID();
-    return changed;
-}
-
 bool opt_link(const char *label, const char *desc) { return row(label, "", false, desc, true, false, true) == 2; }
 
 static ImGuiID g_text_editing;  // the text row turned into a field (one at a time)
@@ -329,7 +275,7 @@ bool opt_text(const char *label, char *buf, size_t cap, const char *hint, const 
 // the left pane's end: its child window, and the description the right pane shows
 static void left_end(void) {
     ImGui::PopStyleVar();
-    if (const char *t = getenv("NXRT_OPT_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
+    if (const char *t = getenv("LARECOMP_OPT_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
     ImGui::EndChild();
     // the description: the hovered row (mouse) wins, else the selected one (controller), else the last shown
     if (!g_desc_hover.empty()) g_desc_shown = g_desc_hover;

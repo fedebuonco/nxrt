@@ -2,7 +2,7 @@
 #include "pad_nav.h"
 #include <atomic>
 #include "input_bind.h"
-#include "../settings.h"
+#include "settings.h"
 
 static std::atomic<SDL_JoystickID> g_last_pad{0};
 

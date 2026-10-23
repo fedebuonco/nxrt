@@ -17,6 +17,7 @@
 #endif
 
 #include "paths.h"
+#include "nx_app.h"
 #include "platform.h"
 
 static char g_root[1024], g_start[1024], g_exe_dir[1024];
@@ -130,11 +131,11 @@ static void default_home(char *root, size_t n) {
 #elif defined(__linux__)
     // (the AppImage is read-only): $XDG_DATA_HOME/lasrecomp, ~/.local/share/lasrecomp by default
     const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
-    if (xdg && *xdg == '/') snprintf(root, n, "%s/lasrecomp", xdg);
-    else snprintf(root, n, "%s/.local/share/lasrecomp", home && *home ? home : "/tmp");
+    if (xdg && *xdg == '/') snprintf(root, n, "%s/%s", xdg, nx_app.data_dir);
+    else snprintf(root, n, "%s/.local/share/%s", home && *home ? home : "/tmp", nx_app.data_dir);
 #else
     const char *home = getenv("HOME");
-    snprintf(root, n, "%s/Library/Application Support/" RT_BUNDLE_ID, home && *home ? home : "/tmp");
+    snprintf(root, n, "%s/Library/Application Support/%s", home && *home ? home : "/tmp", nx_app.bundle_id);
 #endif
 }
 
@@ -353,9 +354,8 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) {
 // ---- game files
 // What the setup (runtime/ui/launcher.mm) creates in extracted/, plus what older versions' extraction and manual
 // extractions left there (never read at run time).
-static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", GAMELIB_NAME, GAMELIB_NAME ".id", ".gamebuild",
-                                         ".zigcache", ".extract", "extract.log", "xci_secure", "nso_raw", "update_pfs",
-                                         ".DS_Store"};
+static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", ".gamebuild", ".zigcache", ".extract",
+                                         "extract.log", "xci_secure", "nso_raw", "update_pfs", ".DS_Store"};
 
 // <data root>/extracted with links resolved (false: no data root, or it can't be resolved)
 static bool game_dir_want(char *want, size_t n) {

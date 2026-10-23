@@ -214,10 +214,10 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
                                                                                // itself aborting looped, 5.7 GB log)
     uint64_t fa = (uint64_t)si->si_addr;
     uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr;
-    if (rt_fault_watch(fa, pc)) return;
+    if (plat_fault_watch(fa, pc)) return;
     char what[32];
     snprintf(what, sizeof what, "signal %d", sig);
-    rt_fault_report(what, fa, pc, lr);
+    plat_fault_report(what, fa, pc, lr);
 }
 
 void plat_crash_handler_install(void) {

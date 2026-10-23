@@ -14,7 +14,7 @@
 
 extern "C" {
 #include "input_bind.h"
-#include "settings.h"
+#include "nx_settings.h"
 int input_pad_family(void);              // runtime/hle/input.c
 SDL_JoystickID input_active_pad(void);   // runtime/hle/input.c: the controller the game reads (0: none yet)
 void input_apply_background(void);

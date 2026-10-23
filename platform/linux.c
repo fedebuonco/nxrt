@@ -393,10 +393,10 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     uint64_t pc = (uint64_t)uc->uc_mcontext.gregs[REG_RIP], sp = (uint64_t)uc->uc_mcontext.gregs[REG_RSP], lr = 0;
     if (sig != SIGSEGV || (fa & ~0xFFFull) != (sp & ~0xFFFull)) lr = *(uint64_t *)(uintptr_t)sp;
 #endif
-    if (rt_fault_watch(fa, pc)) return;
+    if (plat_fault_watch(fa, pc)) return;
     char what[32];
     snprintf(what, sizeof what, "signal %d", sig);
-    rt_fault_report(what, fa, pc, lr);
+    plat_fault_report(what, fa, pc, lr);
 }
 
 void plat_crash_handler_install(void) {
