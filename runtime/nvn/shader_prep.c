@@ -281,7 +281,8 @@ void shader_first_visit(const char *what, uint64_t a, uint64_t b, uint64_t id) {
 typedef struct { uint64_t hash; uint32_t file, off, size, const_offset, const_size; } IdxEnt;
 static IdxEnt *idx_tab;
 static size_t idx_cap, idx_n;
-typedef struct { char *path; uint8_t *mem; } IdxSrc;  // a game file, or (the main module's read-only data) memory
+typedef struct { char *path; uint8_t *mem; int rom; } IdxSrc;  // a game file (host path, RomFS index + 1), or
+                                                                // (the main module's read-only data) memory
 static IdxSrc *idx_files;
 static int idx_nfiles;
 
@@ -390,7 +391,7 @@ static void idx_file(const char *path) {
             if (!memcmp(d + i, "BNSH\0\0\0\0", 8)) { any = true; idx_bnsh(d, (size_t)n, i, file); }
         if (any) {
             idx_files = realloc(idx_files, sizeof *idx_files * (size_t)(idx_nfiles + 1));
-            idx_files[idx_nfiles++] = (IdxSrc){strdup(path), NULL};
+            idx_files[idx_nfiles++] = (IdxSrc){strdup(path), NULL, 0};
         }
     }
     free(d);
@@ -422,12 +423,127 @@ static void idx_nso(const char *path) {
                 if (!memcmp(seg + i, "BNSH\0\0\0\0", 8)) { any = true; idx_bnsh(seg, size, i, file); }
             if (any) {
                 idx_files = realloc(idx_files, sizeof *idx_files * (size_t)(idx_nfiles + 1));
-                idx_files[idx_nfiles++] = (IdxSrc){NULL, seg};
+                idx_files[idx_nfiles++] = (IdxSrc){NULL, seg, 0};
             } else free(seg);
         }
     }
     free(raw);
     fclose(f);
+}
+
+// A game's RomFS as its file table lists it (folder and package alike): the archive's shader files, read through the
+// fs service. The player's own seen list and the shipped variants are then looked up in here.
+extern void romfs_index_ready(void);
+extern int romfs_file_count(void);
+extern const char *romfs_file_path(int i);
+extern uint64_t romfs_file_size(int i);
+extern ssize_t romfs_file_read(int i, void *dst, size_t n, uint64_t off);
+static void idx_dir(const char *dir, int depth);
+
+// The index of the game's shaders is built by reading every shader archive in the RomFS (EoW: 195 files, 780 MB), which
+// is far too slow to do at boot every time. It is kept in cache/shader_index.bin, tagged by the game's file set: the
+// next boot looks the same shaders up in milliseconds instead.
+#define IDX_CACHE "cache/shader_index.bin"
+#define IDX_CACHE_MAGIC 0x5844494e5852444eull  // "NDRXNIDX"
+#define IDX_CACHE_VERSION 1u
+typedef struct { uint64_t magic, tag; uint32_t version, n, nfiles; } IdxCacheHdr;
+typedef struct { uint64_t hash; uint32_t file, off, size, coff, csize; } IdxCacheEnt;
+
+static uint64_t idx_tag(int nfiles) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    const char *id = nx_app.id ? nx_app.id : "";
+    for (const char *p = id; *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001B3ull;
+    for (const char *p = nx_app.version ? nx_app.version : ""; *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001B3ull;
+    uint64_t total = 0;
+    for (int i = 0; i < nfiles; i++) total += romfs_file_size(i);
+    h = (h ^ (uint64_t)nfiles) * 0x100000001B3ull;
+    h = (h ^ total) * 0x100000001B3ull;
+    return h ^ (h >> 32);
+}
+
+static bool idx_cache_load(uint64_t tag) {
+    FILE *f = fopen(IDX_CACHE, "rb");
+    if (!f) return false;
+    IdxCacheHdr h;
+    bool ok = fread(&h, sizeof h, 1, f) == 1 && h.magic == IDX_CACHE_MAGIC && h.version == IDX_CACHE_VERSION &&
+              h.tag == tag && h.n && h.nfiles && h.nfiles < (1u << 20);
+    if (ok) {
+        idx_files = calloc(h.nfiles, sizeof *idx_files);
+        for (uint32_t i = 0; ok && i < h.nfiles; i++) {
+            uint32_t rom;
+            ok = fread(&rom, sizeof rom, 1, f) == 1;
+            if (ok) idx_files[idx_nfiles++] = (IdxSrc){NULL, NULL, (int)rom};
+        }
+        for (uint32_t i = 0; ok && i < h.n; i++) {
+            IdxCacheEnt e;
+            ok = fread(&e, sizeof e, 1, f) == 1;
+            if (ok) idx_add(e.hash, e.file, e.off, e.size, e.coff, e.csize);
+        }
+    }
+    fclose(f);
+    return ok && idx_n;
+}
+
+static void idx_cache_save(uint64_t tag) {
+    if (!idx_n) return;
+    mkdir("cache", 0755);
+    FILE *f = fopen(IDX_CACHE ".tmp", "wb");
+    if (!f) return;
+    IdxCacheHdr h = {IDX_CACHE_MAGIC, tag, IDX_CACHE_VERSION, (uint32_t)idx_n, (uint32_t)idx_nfiles};
+    bool ok = fwrite(&h, sizeof h, 1, f) == 1;
+    for (int i = 0; ok && i < idx_nfiles; i++) ok = fwrite(&idx_files[i].rom, sizeof(uint32_t), 1, f) == 1;
+    for (size_t i = 0; ok && i < idx_cap; i++) {
+        if (!idx_tab[i].hash) continue;
+        IdxCacheEnt e = {idx_tab[i].hash, idx_tab[i].file, idx_tab[i].off, idx_tab[i].size, idx_tab[i].const_offset,
+                         idx_tab[i].const_size};
+        ok = fwrite(&e, sizeof e, 1, f) == 1;
+    }
+    ok &= fclose(f) == 0;
+    if (ok) ok = rename(IDX_CACHE ".tmp", IDX_CACHE) == 0;
+    if (!ok) remove(IDX_CACHE ".tmp");
+}
+
+static void idx_romfs(const char *dir) {
+    romfs_index_ready();
+    int nfiles = romfs_file_count();
+    if (nfiles <= 0) { idx_dir(dir, 0); return; }  // (no image: a bare romfs/ folder)
+    uint64_t tag = idx_tag(nfiles);
+    if (idx_cache_load(tag)) {
+        LOG("[shader] index: %d shaders from cache (%d files, no archives read)\n", (int)idx_n, idx_nfiles);
+        return;
+    }
+    int ncand = 0; uint64_t cand_bytes = 0;
+    for (int fi = 0; fi < nfiles; fi++) {
+        const char *p = romfs_file_path(fi);
+        if (!p) continue;
+        size_t l = strlen(p);
+        const char *ext = l > 5 ? p + l - 5 : "";
+        if (strcmp(ext, "bfsha") && !strstr(p, ".ptcl") && !(l > 4 && !strcmp(p + l - 4, ".arc"))) continue;
+        ncand++, cand_bytes += romfs_file_size(fi);
+    }
+    LOG("[shader] preparation: %d shader archives, %.1f MB to index\n", ncand, cand_bytes / 1048576.0);
+    for (int fi = 0; fi < nfiles; fi++) {
+        const char *p = romfs_file_path(fi);
+        if (!p) continue;
+        size_t l = strlen(p);
+        const char *ext = l > 5 ? p + l - 5 : "";
+        if (strcmp(ext, "bfsha") && !strstr(p, ".ptcl") && !(l > 4 && !strcmp(p + l - 4, ".arc"))) continue;
+        uint64_t sz = romfs_file_size(fi);
+        if (!sz || sz > (256u << 20)) continue;
+        uint8_t *d = malloc((size_t)sz);
+        if (!d || romfs_file_read(fi, d, (size_t)sz, 0) != (ssize_t)sz) { free(d); continue; }
+        uint32_t file = (uint32_t)idx_nfiles;
+        bool any = false;
+        off_reset();
+        for (size_t i = 0; i + 8 <= (size_t)sz; i += 8)
+            if (!memcmp(d + i, "BNSH\0\0\0\0", 8)) { any = true; idx_bnsh(d, (size_t)sz, i, file); }
+        if (any) {
+            idx_files = realloc(idx_files, sizeof *idx_files * (size_t)(idx_nfiles + 1));
+            idx_files[idx_nfiles++] = (IdxSrc){NULL, NULL, fi + 1};
+        }
+        free(d);
+    }
+    idx_cache_save(tag);
 }
 
 static void idx_dir(const char *dir, int depth) {
@@ -453,7 +569,10 @@ static void idx_dir(const char *dir, int depth) {
 static uint8_t *blob_read(const IdxEnt *e, ShaderBlob *b, FILE **files) {
     uint8_t *d = calloc(1, (size_t)e->size + 0x100);  // (zero padding past the constants)
     if (idx_files[e->file].mem) memcpy(d, idx_files[e->file].mem + e->off, e->size);
-    else {
+    else if (idx_files[e->file].rom) {
+        extern ssize_t romfs_file_read(int i, void *dst, size_t n, uint64_t off);
+        if (romfs_file_read(idx_files[e->file].rom - 1, d, e->size, e->off) != (ssize_t)e->size) { free(d); return NULL; }
+    } else {
         FILE **f = &files[e->file];
         if (!*f && !(*f = fopen(idx_files[e->file].path, "rb"))) { free(d); return NULL; }
         if (fseek(*f, (long)e->off, SEEK_SET) || fread(d, 1, e->size, *f) != e->size) { free(d); return NULL; }
@@ -561,7 +680,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     for (char *p = seen; p && *p; p++) total += *p == '\n';
     if (progress) progress(0, total + 1);
     if (!idx_n) {
-        idx_dir(romfs, 0);
+        idx_romfs(romfs);
         char main_nso[1100];  // (<game files>/exefs/main, next to romfs/)
         snprintf(main_nso, sizeof main_nso, "%s/../exefs/main", romfs);
         idx_nso(main_nso);
@@ -626,8 +745,23 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     return true;
 }
 
+static void *prep_thread(void *arg) {
+    shader_prep_run((const char *)arg, NULL, NULL);
+    return arg;
+}
+
 void shader_prep_boot(const char *romfs) {
     const char *e = getenv("NXRT_SHADER_PREP");
     if (!e || !atoi(e)) return;
+    // In the background: the seen shaders take ~40 s to compile, and doing that here left the window black until they
+    // were all done. The game starts at once; the preparation warms the ones it has not reached yet.
+    char *dir = strdup(romfs ? romfs : "");
+    pthread_t t;
+    if (dir && pthread_create(&t, NULL, prep_thread, dir) == 0) {
+        pthread_detach(t);
+        LOG("[shader] preparation: running in the background\n");
+        return;
+    }
+    free(dir);
     shader_prep_run(romfs, NULL, NULL);
 }
