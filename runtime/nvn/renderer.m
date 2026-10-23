@@ -2654,3 +2654,11 @@ void backend_execute(uint64_t handle) {
         else renderer_submit();  // the guest fences (nvnSyncWait) before reusing memory the GPU reads
     }
 }
+
+// TODO(nvn batch): the GPU NV12 conversion LAS beta_5 added; until it is ported, decode falls back to swscale + an RGBA
+// upload (runtime/hle/movie.c checks the return).
+typedef struct NvnTexture NvnTexture;
+bool renderer_upload_nv12(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
+    (void)t; (void)nv12; (void)w; (void)h; (void)stride; (void)uv_off;
+    return false;
+}

@@ -214,7 +214,7 @@ static std::string check_copied_files(const std::string &root) {
     fclose(f);
     if (n != 8 || memcmp(id, nx_game.info.build_id, 8)) return std::string("Wrong game version (needs v") + nx_game.info.game_version + ")";
     if (file_exists(root + "/romfs.src")) return "";  // (the RomFS read from the game package in place)
-    if (!file_exists(root + "/romfs/" + nx_game.info.romfs_probe) || !file_exists(root + "/romfs.bin")) return "Game data missing";
+    if (!file_exists(root + "/romfs/" + nx_game.info.romfs_probe)) return "Game data missing";
     return "";
 }
 
@@ -471,13 +471,7 @@ static void *extract_thread(void *) {
             rt_remove_game_files(g_root.c_str());  // (what an earlier setup built here: the player's files stay)
             g_total = rbytes;
         }
-        set_job("Building the game data image...");
-        char why[256] = "";
-        if (!romfs_build((g_root + "/romfs").c_str(), (g_root + "/romfs.bin").c_str(), setup_progress, why, sizeof why)) {
-            fprintf(stderr, "[launcher] romfs image: %s\n", why);
-            set_failure(FAIL_COPY);
-            goto done;
-        }
+        // (no data image: runtime/services/fs.c serves the RomFS from the folder, so the game's data isn't kept twice)
         if (!build_game_code()) goto done;
     }
 check:
