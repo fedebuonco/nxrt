@@ -56,7 +56,7 @@ GEN_SRC  := $(foreach m,$(GAME_MODULES),$(wildcard $(GEN)/$(firstword $(subst :,
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/gamelib_entry.o
 include $(NXRT)/nx.mk  # the layers under the runtime (nx-platform ... nx-ui)
 
-RT_SRC   := $(wildcard $(RT)/*.c) $(wildcard $(RT)/hle/*.c) $(wildcard $(RT)/services/*.c) \
+RT_SRC   := $(wildcard $(RT)/*.c) $(wildcard $(RT)/*.cpp) $(wildcard $(RT)/hle/*.c) $(wildcard $(RT)/services/*.c) \
             $(wildcard $(RT)/nvn/*.c) $(wildcard $(RT)/nvn/maxwell/*.c)
 RT_HDRS  := $(wildcard $(RT)/*.h) $(wildcard $(RT)/nvn/*.h) $(wildcard $(RT)/nvn/maxwell/*.h) \
             $(wildcard $(RT)/nvn/vulkan/*.h) $(NX_HDRS)
@@ -131,7 +131,7 @@ GAMELIB_SRCS := $(NXRT)/tools/gen.py $(NXRT)/tools/lifter.py $(NXRT)/tools/analy
 GAMELIB_FLAGS := $(filter-out -I%,$(GENFLAGS))
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GAMELIB_FLAGS) $(GAME_MODULES)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
-RT_OBJ   := $(patsubst $(RT)/%.c,$(B)/rt/%.o,$(RT_SRC))
+RT_OBJ   := $(patsubst $(RT)/%.c,$(B)/rt/%.o,$(patsubst $(RT)/%.cpp,$(B)/rt/%.o,$(RT_SRC)))
 RTINC    := -I$(RT) -I$(RT)/nvn $(INC_UI)
 # Where a source checkout's app finds the recompiler and the game-code headers (runtime/gamebuild.c, NXRT_DEV): NXRT
 # as this Makefile spelled it, so the same relative path works from the project root and from build/ (the exe's

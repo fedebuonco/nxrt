@@ -1,6 +1,6 @@
 // Builds the game code library on the player's machine (runtime/gamebuild.h).
 #include "gamebuild.h"
-#include "nxgame.h"
+#include "build_cache.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -8,8 +8,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 #include "gamelib.h"
+#include "nxgame.h"
 #include "paths.h"
 #include "platform.h"
 #include "rt.h"
@@ -20,6 +24,9 @@
 #endif
 #ifndef GAMELIB_SHARED
 #define GAMELIB_SHARED "-shared"
+#endif
+#ifndef GAMELIB_BASE_ID
+#define GAMELIB_BASE_ID "dev"
 #endif
 
 #ifdef _WIN32
@@ -74,12 +81,6 @@ static void stop(PlatProc p) {  // ends one that is still running, then forgotte
 
 static void sleep_ms(int ms) { plat_sleep_until_ns(plat_now_ns() + (uint64_t)ms * 1000000ull); }
 
-static int wait_for(PlatProc p) {
-    int r;
-    while ((r = finished(p)) < 0) sleep_ms(20);
-    return r;
-}
-
 // ------------------------------------------------------------------ argument lists
 typedef struct { char **v; int n, cap; } Args;
 static void add(Args *a, const char *s) {
@@ -103,11 +104,9 @@ static void args_free(Args *a) {
 
 // ------------------------------------------------------------------ the tools
 typedef struct {
-    char gen[1100], gen_script[1100];  // generator: nxgen, or (source checkout) the venv's python + tools/gen.py
-    char game_tools[1100];             // (source checkout) the game's tools/: its patches.py (gen.py --game)
+    char gen[1100], gen_script[1100];  // generator: lasgen, or (source checkout) the venv's python + tools/gen.py
     char cc[1100];                     // compiler: zig (as `zig cc`), or NXRT_CC / clang
     bool zig;
-    uint64_t build_stamp;
     char inc[1100], entry[1100], hle[1100];  // headers the game code includes, tools/gamelib_entry.c, HLE names
 #ifdef _WIN32
     char implib[1100];  // the .exe's import library (the runtime functions the game code calls)
@@ -115,28 +114,21 @@ typedef struct {
 #endif
 } Tools;
 
+static char g_tools_why[256];  // what find_tools could not find (the setup shows it)
+
 static bool file_exists(const char *p) {
     struct stat st;
     return stat(p, &st) == 0;
 }
 
-// What find_tools couldn't find: the setup shows it instead of a generic "builder is missing" (gamebuild_run)
-static char g_tools_why[256];
-
 static bool find_tools(Tools *t) {
     memset(t, 0, sizeof *t);
-    g_tools_why[0] = 0;
     const char *e = getenv("NXRT_GEN");
     if (e && *e) snprintf(t->gen, sizeof t->gen, "%s", e);
     else if (!rt_resource("nxgen" SEP "nxgen" PLAT_EXE_SUFFIX, NULL, t->gen, sizeof t->gen) &&
              !(rt_resource(NULL, "tools/" PLAT_VENV_PYTHON, t->gen, sizeof t->gen) &&
-               rt_resource(NULL, NXRT_DEV "tools/gen.py", t->gen_script, sizeof t->gen_script) &&
-               rt_resource(NULL, "tools", t->game_tools, sizeof t->game_tools))) {
-        snprintf(g_tools_why, sizeof g_tools_why,
-                 "the game code generator is missing from this copy of %s (it ships as nxgen, or as tools/venv with "
-                 "tools/gen.py in a source checkout)", nx_game.info.title);
+               rt_resource(NULL, NXRT_DEV "tools/gen.py", t->gen_script, sizeof t->gen_script)))
         return false;
-    }
     e = getenv("NXRT_CC");
     if (e && *e) snprintf(t->cc, sizeof t->cc, "%s", e);
     else if (rt_resource("zig" SEP "zig" PLAT_EXE_SUFFIX, NULL, t->cc, sizeof t->cc)) t->zig = true;
@@ -144,13 +136,12 @@ static bool find_tools(Tools *t) {
     // (a source checkout, a packaged app, or a player without zig: the system compiler is enough)
     else if (file_exists("/usr/bin/clang")) snprintf(t->cc, sizeof t->cc, "/usr/bin/clang");
     else if (file_exists("/usr/local/bin/clang")) snprintf(t->cc, sizeof t->cc, "/usr/local/bin/clang");
-    else if (file_exists("/usr/bin/cc")) snprintf(t->cc, sizeof t->cc, "/usr/bin/cc");  // (Linux: gcc via /usr/bin/cc)
+    else if (file_exists("/usr/bin/cc")) snprintf(t->cc, sizeof t->cc, "/usr/bin/cc");
 #endif
     else {
         snprintf(g_tools_why, sizeof g_tools_why,
 #ifdef __APPLE__
-                 "no C compiler was found: install the Xcode command line tools (xcode-select --install), or set NXRT_CC "
-                 "to a clang");
+                 "no C compiler was found: install the Xcode command line tools (xcode-select --install), or set NXRT_CC");
 #else
                  "no C compiler was found: set NXRT_CC to one (the game code is compiled on this machine)");
 #endif
@@ -158,19 +149,13 @@ static bool find_tools(Tools *t) {
     }
     if (!rt_resource("gamelib-src" SEP "cpu.h", NXRT_DEV "runtime/cpu.h", t->inc, sizeof t->inc) ||
         !rt_resource("gamelib-src" SEP "gamelib_entry.c", NXRT_DEV "tools/gamelib_entry.c", t->entry, sizeof t->entry) ||
-        !rt_resource("gamelib-src" SEP "hle_symbols.txt", NXRT_DEV "runtime/hle/hle_symbols.txt", t->hle, sizeof t->hle)) {
-        snprintf(g_tools_why, sizeof g_tools_why,
-                 "the headers the game code is built against are missing from this copy of %s", nx_game.info.title);
+        !rt_resource("gamelib-src" SEP "hle_symbols.txt", NXRT_DEV "runtime/hle/hle_symbols.txt", t->hle, sizeof t->hle))
         return false;
-    }
     char *s = strrchr(t->inc, '/'), *b = strrchr(t->inc, '\\');
     if (b > s) s = b;
     if (s) *s = 0;
 #ifdef _WIN32
-    char implib[200], implib_dev[220];
-    snprintf(implib, sizeof implib, "%s.dll.a", nx_game.info.exe);
-    snprintf(implib_dev, sizeof implib_dev, "build/%s", implib);
-    if (!rt_resource(implib, implib_dev, t->implib, sizeof t->implib)) return false;
+    if (!rt_resource("lasrecomp.dll.a", "build/lasrecomp.dll.a", t->implib, sizeof t->implib)) return false;
     t->zig_rt[0] = 0;
     if (t->zig && rt_resource("zig" SEP "rt" SEP "link.rsp", NULL, t->zig_rt, sizeof t->zig_rt)) {
         char *s = strrchr(t->zig_rt, '/'), *b = strrchr(t->zig_rt, '\\');
@@ -187,9 +172,20 @@ bool gamebuild_available(void) {
     return find_tools(&t);
 }
 
+// zig cc on Linux: an explicit target, so it uses its own glibc headers and stubs instead of looking for the system's
+// (SteamOS and other systems without development packages have none: "failed to find libc installation", #181)
+#if defined(__linux__) && defined(__x86_64__)
+#define ZIG_TARGET "x86_64-linux-gnu"
+#elif defined(__linux__) && defined(__aarch64__)
+#define ZIG_TARGET "aarch64-linux-gnu"
+#else
+#define ZIG_TARGET ""
+#endif
+
 static void compiler(Args *a, const Tools *t) {
     add(a, t->cc);
     if (t->zig) add(a, "cc");
+    if (t->zig && ZIG_TARGET[0]) add(a, "-target"), add(a, ZIG_TARGET);
 }
 
 // ------------------------------------------------------------------ generator progress (its log)
@@ -239,9 +235,36 @@ static void log_tail(const char *path, char *out, size_t n) {  // the last line 
     snprintf(out, n, "%s", nl ? nl + 1 : buf);
 }
 
+// A helper that failed (plat_proc_wait's r != 0): its log's last line for our log, and how it ended when that says
+// nothing or a signal ended it (the system killing it for memory writes nothing). A signal also gives the player why.
+static bool g_killed;
+static void helper_failed(const char *what, int r, const char *log, char *why, size_t why_size) {
+    char last[300], how[120] = "";
+    log_tail(log, last, sizeof last);
+#ifndef _WIN32
+    if (r > PLAT_PROC_SIGNALED) {
+        int sig = r - PLAT_PROC_SIGNALED;
+        if (sig == SIGKILL) {
+            snprintf(how, sizeof how, "killed by signal %d (SIGKILL: likely out of memory)", sig);
+            snprintf(why, why_size, "A build helper was killed by the system, likely out of memory.");
+        } else {
+            snprintf(how, sizeof how, "killed by signal %d (%s)", sig, strsignal(sig));
+            snprintf(why, why_size, "A build helper crashed (signal %d).", sig);
+        }
+        g_killed = true;
+    } else
+#endif
+    if (!last[0]) {
+        snprintf(how, sizeof how, "exit status %d", r);
+    }
+    LOG("[gamebuild] %s failed: %s%s%s\n", what, how, how[0] && last[0] ? ": " : "", last);
+}
+
+bool gamebuild_killed(void) { return g_killed; }
+
 // ------------------------------------------------------------------ compiling
 typedef struct {
-    char src[1100], obj[1100], log[1100], stamp[1100];  // stamp: what obj was compiled from (resuming, below)
+    char src[1100], obj[1100], tmp[1100], log[1100], stem[64], source_hash[65];
     unsigned long long bytes;
 } Unit;
 
@@ -258,8 +281,9 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
     Unit *u = &us->u[us->n++];
     snprintf(u->src, sizeof u->src, "%s", src);
     snprintf(u->obj, sizeof u->obj, "%s" SEP "%s.o", work, stem);
+    snprintf(u->tmp, sizeof u->tmp, "%s" SEP "%s.o.tmp", work, stem);
+    snprintf(u->stem, sizeof u->stem, "%s", stem);
     snprintf(u->log, sizeof u->log, "%s" SEP "%s.log", work, stem);
-    snprintf(u->stamp, sizeof u->stamp, "%s" SEP "%s.stamp", work, stem);
     struct stat st;
     u->bytes = stat(src, &st) == 0 ? (unsigned long long)st.st_size : 0;
 }
@@ -281,80 +305,22 @@ static void add_cflags(Args *a, const Tools *t) {
     }
 }
 
-// ------------------------------------------------------------------ resuming
-// A stopped or failed build keeps its work folder. Each object gets a stamp: FNV-1a of the compiler, its flags, the
-// header contents, GAMELIB_ID and the C it was compiled from. The generator writes the same C again on the next run,
-// so a unit whose stamp still matches (and whose object is there) isn't compiled again.
-static uint64_t fnv(uint64_t h, const void *p, size_t n) {
-    for (const unsigned char *b = (const unsigned char *)p; n--; b++) h = (h ^ *b) * 0x100000001b3ull;
-    return h;
-}
-
-static bool hash_file(uint64_t *hash, const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-    char buf[65536];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof buf, f)) != 0) *hash = fnv(*hash, buf, n);
-    bool ok = !ferror(f);
-    fclose(f);
-    return ok;
-}
-
-static bool build_stamp(Tools *t) {
-    uint64_t h = 0xcbf29ce484222325ull;
-    const char *seed[] = {t->cc, GAMELIB_CFLAGS, t->inc, GAMELIB_ID};
-    for (size_t i = 0; i < sizeof seed / sizeof *seed; i++) h = fnv(h, seed[i], strlen(seed[i]) + 1);
-    if (!hash_file(&h, t->cc)) return false;
-    const char *headers[] = {"cpu.h", "simd.h", "simd_fp.h", "gamelib.h"};
-    for (size_t i = 0; i < sizeof headers / sizeof *headers; i++) {
-        char path[1200];
-        snprintf(path, sizeof path, "%s" SEP "%s", t->inc, headers[i]);
-        if (!hash_file(&h, path)) return false;
-    }
-    t->build_stamp = h;
-    return true;
-}
-
-static bool unit_stamp(const Tools *t, const Unit *u, char *out, size_t n) {
-    uint64_t h = t->build_stamp;
-    if (!h || !hash_file(&h, u->src)) return false;
-    snprintf(out, n, "%016llx", (unsigned long long)h);
-    return true;
-}
-
-static bool unit_done(const Tools *t, const Unit *u) {
-    struct stat st;
-    char want[32], have[32] = "";
-    if (stat(u->obj, &st) != 0 || st.st_size == 0 || !unit_stamp(t, u, want, sizeof want)) return false;
-    FILE *f = fopen(u->stamp, "rb");
-    if (!f) return false;
-    size_t k = fread(have, 1, sizeof have - 1, f);
-    fclose(f);
-    have[k] = 0;
-    return !strcmp(want, have);
-}
-
-static void unit_mark(const Tools *t, const Unit *u) {
-    char s[32];
-    if (!unit_stamp(t, u, s, sizeof s)) return;
-    FILE *f = fopen(u->stamp, "wb");
-    if (f) fputs(s, f), fclose(f);
-}
+static char g_full_id[GAMELIB_FULL_ID_SIZE];  // this build's library id (gamelib_full_id): GAMELIB_ID-<build ID>
 
 static PlatProc start_compile(const Tools *t, const Unit *u) {
-    remove(u->stamp);  // (until it compiles: a stopped compile can leave part of an object)
     Args a = {0};
     compiler(&a, t);
     add_cflags(&a, t);
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
-    add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
+    char id[GAMELIB_FULL_ID_SIZE + 32];
+    snprintf(id, sizeof id, "-DGAMELIB_ID=\"%s\"", g_full_id);
+    add(&a, id);
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
-    add(&a, u->obj);
+    add(&a, u->tmp);
     PlatProc p = spawn(a.v, u->log);
     args_free(&a);
     return p;
@@ -365,26 +331,52 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     uint64_t t0 = plat_now_ns();
     static bool registered;
     if (!registered) registered = true, atexit(end_all);
+    g_killed = false;
+    if (!gamelib_full_id(game_dir, g_full_id, sizeof g_full_id)) {
+        snprintf(why, why_size, "the game files' exefs/main is missing or unreadable");
+        return false;
+    }
     Tools t;
     if (!find_tools(&t)) {
-        snprintf(why, why_size, "%s", g_tools_why[0] ? g_tools_why : "the game code builder is missing from this copy");
+        snprintf(why, why_size, "the game code builder is missing from this copy of LAS Recomp");
         return false;
     }
-    if (!build_stamp(&t)) {
-        snprintf(why, why_size, "the compiler or game code headers could not be read");
-        return false;
-    }
-    char work[1100], lib[1100], tmp[1100];
+    char work[1100], tmp[1100];
     snprintf(work, sizeof work, "%s" SEP ".gamebuild", game_dir);
-    snprintf(lib, sizeof lib, "%s" SEP "%s", game_dir, nx_gamelib_name());
     snprintf(tmp, sizeof tmp, "%s" SEP "%s.tmp", work, nx_gamelib_name());
-    // (.gamebuild stays: a stopped or failed build's objects are reused where their stamps match - resuming, above)
-    rt_remove_game_file(game_dir, nx_gamelib_name());
-    char lib_id[80];
-    snprintf(lib_id, sizeof lib_id, "%s.id", nx_gamelib_name());
-    rt_remove_game_file(game_dir, lib_id);
-    mkdir(work, 0755);
-    if (t.zig) {  // its caches in the work folder too (deleted below), not ~/.cache: hundreds of MB, used once
+    char input_paths[6][1100], spec[4096];
+    snprintf(input_paths[0], sizeof input_paths[0], "%s" SEP "exefs" SEP "main", game_dir);
+    snprintf(input_paths[1], sizeof input_paths[1], "%s" SEP "exefs" SEP "sdk", game_dir);
+    const char *headers[] = {"cpu.h", "simd.h", "simd_fp.h", "gamelib.h"};
+    for (int i = 0; i < 4; ++i) snprintf(input_paths[i+2], sizeof input_paths[i+2], "%s" SEP "%s", t.inc, headers[i]);
+    // Generator changes should rebuild only chunks whose C changed, as in the existing incremental builder.
+    // Compiler/header/flag changes invalidate every object; entry always rebuilds because it embeds the library id.
+    const char *inputs[] = {input_paths[2], input_paths[3], input_paths[4], input_paths[5], t.cc};
+    // The compiler's contents identify it, so relocating the app does not discard reusable objects.
+    snprintf(spec, sizeof spec, "LASBUILD3\n%s\n%s\n%s\nzig=%d pointer=%d%s%s\n", GAMELIB_BASE_ID,
+             GAMELIB_CFLAGS, GAMELIB_SHARED, t.zig, (int)sizeof(void *),  // (+ the Linux zig target: objects from
+             t.zig && ZIG_TARGET[0] ? " target=" : "", t.zig ? ZIG_TARGET : "");  // before it are rebuilt once)
+    if (o->progress) o->progress(0, "Checking completed build files...");
+    bool resuming = build_cache_resumable(game_dir);  // (a cancelled or interrupted build; read before open marks this one)
+    BuildCache *cache = build_cache_open(game_dir, spec, inputs, 5, why, why_size);
+    if (!cache) return false;
+    // an update keeps the last good build's objects (open drops them when compiler, headers or flags changed)
+    bool update = false;
+    if (!resuming) {
+        char rp[1200];
+        struct stat st;
+        snprintf(rp, sizeof rp, "%s" SEP "gamelib_entry.receipt", work);
+        update = stat(rp, &st) == 0;
+    }
+    const char *gen_inputs[5] = {input_paths[0], input_paths[1], t.gen, t.hle};
+    int ngen = 4;
+    if (t.gen_script[0]) gen_inputs[ngen++] = t.gen_script;
+    if (!build_cache_prepare_generation(cache, GAMELIB_ID, gen_inputs, ngen, why, why_size)) {
+        build_cache_failed(cache);
+        build_cache_close(cache);
+        return false;
+    }
+    if (t.zig) {  // keep its caches with this installation; the explicit Clear action removes them too
         char zc[1200];
         snprintf(zc, sizeof zc, "%s" SEP "zig-cache", work);
 #ifdef _WIN32
@@ -398,69 +390,56 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
         t.cc, t.zig ? " cc" : "", o->jobs);
 
-    // 1. the generator, every module of the game at once (nx_game.info.modules: those whose file is there); their
-    // finished files are compiled while it goes on
-    Gen gens[NX_MAX_MODULES] = {{0}};
-    char base[NX_MAX_MODULES][24], modlist[400] = "";
-    int NMODULES = 0;
-    for (int i = 0; i < nx_module_count(); i++) {
-        char nso[1100];
-        snprintf(nso, sizeof nso, "%s" SEP "exefs" SEP "%s", game_dir, nx_module_name(i));
-        if (!file_exists(nso)) continue;  // (left out, as the loader does)
-        gens[NMODULES].name = nx_module_name(i);
-        snprintf(base[NMODULES], sizeof base[0], "0x%llx", (unsigned long long)nx_module_base_at(i));
-        size_t l = strlen(modlist);
-        snprintf(modlist + l, sizeof modlist - l, "X(%s) ", nx_module_name(i));
-        NMODULES++;
-    }
-    bool ok = NMODULES > 0;
-    if (!ok) snprintf(why, why_size, "the game's code modules aren't there");
-    for (int i = 0; i < NMODULES && ok; i++) {
+    // 1. the generator, both modules at once; their finished files are compiled while it goes on
+    Gen gens[2] = {{.name = "main"}, {.name = "sdk"}};
+    static const char *const base[2] = {"0x7000000000", "0x7004000000"};
+    bool ok = true;
+    for (int i = 0; i < 2 && ok; i++) {
         Gen *g = &gens[i];
         g->exit = -1;
         snprintf(g->log, sizeof g->log, "%s" SEP "gen_%s.log", work, g->name);
         snprintf(g->out, sizeof g->out, "%s" SEP "%s", work, g->name);
+        if (build_cache_generation(cache, g->name, &g->files)) {
+            g->exit = 0;
+            LOG("[gamebuild] reused generated %s: %d chunks\n", g->name, g->files);
+            continue;
+        }
         char nso[1100];
         snprintf(nso, sizeof nso, "%s" SEP "exefs" SEP "%s", game_dir, g->name);
         Args a = {0};
         add(&a, t.gen);
         if (t.gen_script[0]) add(&a, t.gen_script);
-        if (t.game_tools[0]) { add(&a, "--game"); add(&a, t.game_tools); }
         add(&a, g->name);
         add(&a, nso);
         add(&a, base[i]);
         add(&a, g->out);
-        if (!strcmp(g->name, "sdk")) { add(&a, "--hle"); add(&a, t.hle); }
+        if (i == 1) { add(&a, "--hle"); add(&a, t.hle); }
         g->p = spawn(a.v, g->log);
         args_free(&a);
         if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }
     }
 
     Units units = {0};
-    int queued[NX_MAX_MODULES] = {0};  // chunk files of each module put in units so far
-    bool tables[NX_MAX_MODULES] = {false};
+    int queued[2] = {0, 0};  // chunk files of each module put in units so far
+    bool tables[2] = {false, false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
     struct { PlatProc p; int unit; } run[64];
     int nrun = 0;
+    int reused = 0, compiled = 0;
     unsigned long long done_bytes = 0;
-    int resumed = 0;  // units an earlier run compiled already
     double shown = 0;
     {
-        // the library's entry (tools/gamelib_entry.c) for these modules: a wrapper naming them (NX_MODULES)
-        char entry[1100], inc[1100];
-        snprintf(entry, sizeof entry, "%s" SEP "nx_entry.c", work);
-        snprintf(inc, sizeof inc, "%s", t.entry);
-        for (char *c = inc; *c; c++) if (*c == '\\') *c = '/';
-        FILE *f = fopen(entry, "wb");
-        if (f) fprintf(f, "#define NX_MODULES %s\n#include \"%s\"\n", modlist, inc), fclose(f);
-        add_unit(&units, entry, work, "gamelib_entry");
+        add_unit(&units, t.entry, work, "gamelib_entry");
     }
     while (ok) {
+        if (o->cancelled && o->cancelled()) {
+            snprintf(why, why_size, "Compilation cancelled. Completed files are kept for Resume."); ok = false; break;
+        }
         // generator progress, newly finished files
         bool gens_done = true;
         double gen_frac = 0;
         unsigned long long written = 0;
-        for (int i = 0; i < NMODULES; i++) {
+        for (int i = 0; i < 2; i++) {
             Gen *g = &gens[i];
             if (g->exit < 0) {
                 read_gen_log(g);
@@ -469,11 +448,12 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                     g->exit = r;
                     read_gen_log(g);
                     if (r != 0) {
-                        char last[300];
-                        log_tail(g->log, last, sizeof last);
-                        LOG("[gamebuild] generator (%s) failed (exit 0x%08x, log %s): %s\n",
-                            g->name, (unsigned)r, g->log, last[0] ? last : "no output was written");
+                        char what[64];
+                        snprintf(what, sizeof what, "generator (%s)", g->name);
                         snprintf(why, why_size, "the game code couldn't be prepared");
+                        helper_failed(what, r, g->log, why, why_size);
+                        ok = false;
+                    } else if (!build_cache_save_generation(cache, g->name, g->files, why, why_size)) {
                         ok = false;
                     }
                 }
@@ -492,19 +472,17 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 add_unit(&units, src, work, stem);
                 tables[i] = true;
             }
-            gen_frac += g->exit == 0 ? 1.0 / NMODULES : g->n ? (double)g->ci / ((double)g->n * NMODULES) : 0;
+            gen_frac += g->exit == 0 ? 0.5 : g->n ? 0.5 * (double)g->ci / (double)g->n : 0;
         }
         if (!ok) break;
         for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
 
         // compiles
         while (nrun < jobs && next < units.n) {
-            if (unit_done(&t, &units.u[next])) {  // (compiled by an earlier, stopped run)
-                Unit *u = &units.u[next++];
-                done_bytes += u->bytes, resumed++;
-                if (next - 1 > 0) remove(u->src);
-                continue;
-            }
+            Unit *u = &units.u[next];
+            int cached = build_cache_object(cache, u->stem, u->src, u->source_hash);
+            if (cached < 0) { snprintf(why, why_size, "A generated source file is missing or unreadable."); ok = false; break; }
+            if (cached && next != 0) { done_bytes += u->bytes; ++reused; ++next; continue; }
             PlatProc p = start_compile(&t, &units.u[next]);
             if (!p) { snprintf(why, why_size, "the compiler didn't start"); ok = false; break; }
             run[nrun].p = p, run[nrun].unit = next++;
@@ -515,16 +493,17 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             if (r < 0) continue;
             Unit *u = &units.u[run[k].unit];
             if (r != 0) {
-                char last[300];
-                log_tail(u->log, last, sizeof last);
-                LOG("[gamebuild] compiling %s failed: %s\n", u->src, last);
+                char what[1200];
+                snprintf(what, sizeof what, "compiling %s", u->src);
                 snprintf(why, why_size, "the game code didn't compile");
+                helper_failed(what, r, u->log, why, why_size);
+                ok = false;
+            } else if (!build_cache_save_object(cache, u->stem, u->src, u->source_hash, why, why_size)) {
                 ok = false;
             } else {
-                unit_mark(&t, u);
+                ++compiled;
             }
             done_bytes += u->bytes;
-            if (run[k].unit > 0) remove(u->src);  // (generated C, done with: not kept. Unit 0 is the shipped entry file)
             run[k--] = run[--nrun];
         }
         if (!ok) break;
@@ -535,15 +514,16 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         double est_total = gens_done ? (double)written : gen_frac > 0.02 ? (double)written / gen_frac : 0;
         double comp_frac = est_total > 0 ? (double)done_bytes / est_total : 0;
         if (comp_frac > 1) comp_frac = 1;
-        double f = 0.2 * gen_frac + 0.75 * comp_frac;
+        // (an update that keeps the last build's pieces compiles little: generating the C is most of its time)
+        double f = update ? 0.85 * gen_frac + 0.1 * comp_frac : 0.2 * gen_frac + 0.75 * comp_frac;
         double secs = (double)(plat_now_ns() - t0) / 1e9;
         if (gen_frac == 0) f = 0.05 * (secs / (secs + 20));  // (the generator's first pass: no count yet)
         if (f > shown) shown = f;
-        if (o->progress) o->progress(shown, gen_frac < 1 && !gens_done ? "Reading the game code..." : "Recompiling...");
+        if (o->progress) o->progress(shown, gen_frac < 1 && !gens_done ? "Reading the game code..." : resuming ? "Resuming compilation..." : "Recompiling...");
         sleep_ms(50);
     }
     for (int k = 0; k < nrun; k++) stop(run[k].p);  // (a failure: the rest is of no use - the failure shows at once)
-    for (int i = 0; i < NMODULES; i++)
+    for (int i = 0; i < 2; i++)
         if (gens[i].p && gens[i].exit < 0) stop(gens[i].p);
 
     // 2. link
@@ -591,30 +571,32 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         }
         PlatProc p = f ? spawn(a.v, log) : 0;
         args_free(&a);
-        int r = p ? wait_for(p) : 255;
-        if (r != 0) {
-            char last[300];
-            log_tail(log, last, sizeof last);
-            LOG("[gamebuild] linking failed: %s\n", last);
+        int r = p ? -1 : 255;
+        while (p && (r = finished(p)) < 0) {
+            if (o->cancelled && o->cancelled()) { stop(p); r = 130; break; }
+            sleep_ms(50);
+        }
+        if (r == 130) {
+            LOG("[gamebuild] linking cancelled\n");
+            snprintf(why, why_size, "Compilation cancelled. Completed files are kept for Resume.");
+            ok = false;
+        } else if (!p) {
+            LOG("[gamebuild] linking failed: the linker didn't start\n");
             snprintf(why, why_size, "the game code didn't link");
             ok = false;
-        }
-    }
-    if (ok) {
-        remove(lib);
-        char idp[1100];
-        snprintf(idp, sizeof idp, "%s.id", lib);
-        FILE *f = NULL;
-        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", GAMELIB_ID) < 0) {
-            snprintf(why, why_size, "the game code couldn't be saved");
+        } else if (r != 0) {
+            snprintf(why, why_size, "the game code didn't link");
+            helper_failed("linking", r, log, why, why_size);
             ok = false;
         }
-        if (f) fclose(f);
     }
+    if (ok) ok = build_cache_publish(cache, nx_gamelib_name(), g_full_id, why, why_size);
+    bool cancelled = !ok && o->cancelled && o->cancelled();
+    if (!ok && !cancelled) build_cache_failed(cache);
     free(units.u);
-    if (ok) rt_remove_game_file(game_dir, ".gamebuild");  // the C, the objects, the logs (kept to resume a failure)
-    LOG("[gamebuild] %s in %.0fs (%d units reused from an earlier run)\n", ok ? "done" : "failed",
-        (double)(plat_now_ns() - t0) / 1e9, resumed);
+    build_cache_close(cache);
+    LOG("[gamebuild] reused %d objects, compiled %d objects\n", reused, compiled);
+    LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : cancelled ? "cancelled" : "failed", (double)(plat_now_ns() - t0) / 1e9);
     if (ok && o->progress) o->progress(1, "Finishing...");
     return ok;
 }
