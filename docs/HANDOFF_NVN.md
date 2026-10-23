@@ -20,7 +20,8 @@ renderer, with `beta5-merge` merged into it). `master` and `v0.1.0` are untouche
 ```
 nvn-renderer-wip @ 76abe95   beta5-merge merged in; beta_5's renderer runs
   LAS  boots and plays at 60 fps on beta_5's renderer (Metal); title, file select and intro verified
-  EoW  not yet run on this branch
+  EoW  boots at 60 fps; its first frame is byte-identical to the beta5-merge build's (black: this dump has no
+       rd000_Title.webm). Gameplay verification still needs a controller in hand.
   Sky  boots; the library-applet wait is fixed, it now dies inside nn::applet (see "Sky's stall")
 ```
 
@@ -114,9 +115,10 @@ The import claimed the hooks were back; `draw_tint`, `instance_tint` and `instan
 
 ### Next, in order
 
-1. **EoW on this branch** (Metal): boot, play, screenshot; it is the gate for the translator differences.
+1. **EoW in game** (Metal): its boot frame is byte-identical to beta5-merge's (black, no title movie in this dump)
+   and it holds 60 fps; what is left is a play session to the first 3D scene, the gate for the translator differences.
 2. **LAS in a dungeon**: pots/items (draw_tint, instance_tint) and the Hint Sheet icon (`tex_replace`), against
-   beta5-merge's renderer.
+   beta5-merge's renderer. `draw_tint` is confirmed called in the field; the item/pot visuals are not yet compared.
 3. **Vulkan**: the same interface audit in `vulkan/exec.c` + `record.c`, on a machine where it runs.
 4. Then the rest of beta_5's `kernel.c` (the merge deadlocks EoW — see `e481c2a`; port it with the EoW boot as the
    gate), `tex_hash`, `shader_prep`/`seen`, `pace`, `slowframe`.

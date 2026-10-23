@@ -30,6 +30,8 @@ choice (beta_5's vs nxrt's, `b89db46`) is decided by a screenshot on the new ren
 - 7 pending.
 
 EoW runs at 60 fps on this branch after porting two nxrt `objects.c` fixes (ZCull size, packed sampler builder).
+Its boot frame is byte-identical to the `beta5-merge` build's (black: this dump has no `rd000_Title.webm`), so the
+remaining EoW gate is a play session, not a render comparison.
 
 ## Phases
 
