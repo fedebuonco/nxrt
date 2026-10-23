@@ -258,4 +258,16 @@ $(B)/rt/platform/windows_rc.o: $(NXRT)/platform/windows.rc $(WINDOWS_ICON)
 	@mkdir -p $(dir $@)
 	$(WINDRES) -I $(dir $(WINDOWS_ICON)) -O coff $< -o $@
 
-.PHONY: all gen venv gen-objs runtime-objs
+# The library's host-side tests (tests/README.md): no game files, GPU or window needed.
+test:
+	@$(NXRT)/tests/run.sh
+
+# Formatting and static analysis (tools/format.sh, tools/tidy.sh): Homebrew LLVM's clang-format/clang-tidy.
+format:
+	@$(NXRT)/tools/format.sh
+format-fix:
+	@$(NXRT)/tools/format.sh --fix
+tidy:
+	@$(NXRT)/tools/tidy.sh
+
+.PHONY: all gen venv gen-objs runtime-objs test format format-fix tidy

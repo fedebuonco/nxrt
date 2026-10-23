@@ -1,0 +1,51 @@
+---
+# LLVM's style, adjusted to this repository: 4-space indentation and 120 columns (the code was written that way),
+# includes left in their groups, and comments/strings not reflowed (they carry the explanations and are wrapped by
+# hand). Use:
+#   clang-format -i <files>      (or tools/format.sh)
+#   clang-format --dry-run --Werror <files>
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+# `T *p`, matching the sources.
+PointerAlignment: Right
+ReferenceAlignment: Pointer
+DerivePointerAlignment: false
+
+# Keep the author's include grouping and order (the layers' dependencies are meaningful).
+SortIncludes: Never
+IncludeBlocks: Preserve
+IndentPPDirectives: None
+
+# Comments and string literals are hand-wrapped (many are long explanations).
+ReflowComments: false
+BreakStringLiterals: false
+
+# The one-line forms this code uses: `if (x) return;`, one-line loops, short empty/simple functions, `case ...: x;`.
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+
+BreakBeforeBraces: Attach
+SpaceBeforeParens: ControlStatements
+IndentCaseLabels: false
+IndentGotoLabels: false
+
+# Existing code packs arguments/parameters; keep it.
+BinPackArguments: true
+BinPackParameters: true
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignTrailingComments: true
+SpacesBeforeTrailingComments: 2  # the sources' `;  // comment`
+...

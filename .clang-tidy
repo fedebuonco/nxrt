@@ -1,0 +1,50 @@
+---
+# clang-tidy for the runtime and the layers. LLVM's style is the base (`llvm-else-after-return`), with the
+# high-signal bug-prone/readability checks and the Clang static analyzer. The code deliberately uses one-line
+# `if (x) return;` and 4-space indentation, so the style checks that would rewrite it (braces, identifier naming,
+# magic numbers) are not enabled here; the formatter is `.clang-format`.
+#
+#   tools/tidy.sh                 (regenerates the compile database when needed)
+#   tools/tidy.sh --regen         (force a new build/compile_commands.json)
+#   tools/tidy.sh --fix           (apply the fixes clang-tidy can make; review the diff!)
+#
+Checks: >
+  -*,
+  clang-analyzer-core.*,
+  clang-analyzer-unix.*,
+  -clang-analyzer-unix.Stream,
+  clang-analyzer-security.*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  clang-analyzer-deadcode.*,
+  clang-analyzer-cplusplus.*,
+  llvm-else-after-return,
+  bugprone-argument-comment,
+  bugprone-assert-side-effect,
+  -bugprone-assignment-in-if-condition,
+  bugprone-branch-clone,
+  bugprone-casting-through-void,
+  bugprone-dangling-handle,
+  bugprone-incorrect-roundings,
+  -bugprone-macro-parentheses,
+  -bugprone-casting-through-void,
+  bugprone-macro-repeated-side-effects,
+  bugprone-misplaced-widening-cast,
+  bugprone-multiple-statement-macro,
+  bugprone-sizeof-expression,
+  bugprone-suspicious-memory-comparison,
+  bugprone-too-small-loop-variable,
+  performance-*,
+  -performance-no-int-to-ptr,
+  -performance-enum-size,
+  readability-else-after-return,
+  readability-misleading-indentation,
+  readability-redundant-control-flow,
+  -readability-redundant-declaration,
+  readability-simplify-boolean-expr,
+  readability-static-accessed-through-instance
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(\.\./\.\./)?(runtime|platform|input|settings|save|ui|tests)/([A-Za-z0-9_]+/)*[A-Za-z0-9_]+\.(h|hpp)$'
+ExcludeHeaderFilterRegex: '(third_party|build|games)/.*'
+FormatStyle: file
+UseColor: false

@@ -5,6 +5,7 @@
 //   -> PFS0 (ExeFS) / RomFS.
 // Hashes are not verified (the files are the player's own dump; a bad one shows up as a game error).
 #include "nxpkg.h"
+#include "lz4_block.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -201,34 +202,9 @@ static void aes_xts_decrypt(const uint8_t key[32], uint8_t *data, size_t len, ui
 
 // ------------------------------------------------------------------ LZ4 block
 int nx_lz4_decompress(const uint8_t *src, int src_len, uint8_t *dst, int dst_len) {
-    const uint8_t *ip = src, *iend = src + src_len;
-    uint8_t *op = dst, *oend = dst + dst_len;
-    while (ip < iend) {
-        unsigned tok = *ip++;
-        size_t lit = tok >> 4;
-        if (lit == 15) {
-            unsigned b;
-            do { if (ip >= iend) return -1; b = *ip++; lit += b; } while (b == 255);
-        }
-        if ((size_t)(iend - ip) < lit || (size_t)(oend - op) < lit) return -1;
-        memcpy(op, ip, lit);
-        op += lit, ip += lit;
-        if (ip >= iend) break;  // the last sequence has literals only
-        if (iend - ip < 2) return -1;
-        size_t off = ip[0] | ip[1] << 8;
-        ip += 2;
-        size_t ml = tok & 15;
-        if (ml == 15) {
-            unsigned b;
-            do { if (ip >= iend) return -1; b = *ip++; ml += b; } while (b == 255);
-        }
-        ml += 4;
-        if (!off || off > (size_t)(op - dst) || (size_t)(oend - op) < ml) return -1;
-        const uint8_t *m = op - off;
-        if (off >= ml) memcpy(op, m, ml), op += ml;
-        else while (ml--) *op++ = *m++;  // overlapping: byte by byte
-    }
-    return (int)(op - dst);
+    if (src_len < 0 || dst_len < 0) return -1;
+    size_t got = rt_lz4_decompress(src, (size_t)src_len, dst, (size_t)dst_len);
+    return got == (size_t)dst_len ? (int)got : -1;
 }
 
 // ------------------------------------------------------------------ keys
@@ -304,7 +280,11 @@ static bool read_fs0(int fd, uint64_t base, Entries *out) {
     if (n > 4096 || strsz > (1u << 20)) return false;
     size_t esz = hfs ? 0x40 : 0x18, meta = 16 + n * esz + strsz;
     uint8_t *m = malloc(meta);
-    if (!pread_all(fd, m, meta, base)) { free(m); return false; }
+    if (m && !pread_all(fd, m, meta, base)) {
+        free(m);
+        return false;
+    }
+    if (!m) return false;
     const char *strs = (const char *)m + 16 + n * esz;
     for (uint32_t i = 0; i < n; i++) {
         uint64_t off, size;
@@ -348,6 +328,7 @@ static bool section_info(const Nca *nca, int i, Section *s) {
     uint32_t st, en;
     memcpy(&st, nca->hdr + 0x240 + i * 16, 4), memcpy(&en, nca->hdr + 0x244 + i * 16, 4);
     if (st == 0 && en == 0) return false;
+    if (en < st) return false;  // (a corrupt header: the size would wrap)
     const uint8_t *fh = nca->hdr + 0x400 + i * 0x200;
     memset(s, 0, sizeof *s);
     s->off = (uint64_t)st * 0x200, s->size = (uint64_t)(en - st) * 0x200;
@@ -369,6 +350,9 @@ static bool section_info(const Nca *nca, int i, Section *s) {
     } else return false;
     memcpy(&s->comp_off, fh + 0x178, 8), memcpy(&s->comp_size, fh + 0x180, 8);
     memcpy(s->comp_hdr, fh + 0x188, 16);
+    // The hash layer's data and the compression table live inside the section.
+    if (s->data_off > s->size || s->data_size > s->size - s->data_off) return false;
+    if (s->comp_size && (s->comp_off > s->data_size || s->comp_size > s->data_size - s->comp_off)) return false;
     return true;
 }
 
@@ -379,6 +363,7 @@ static bool section_read(int fd, uint64_t nca_base, const Section *s, const uint
     if (s->enc_type == 1) return pread_all(fd, dst, n, nca_base + s->off + off);
     if (s->enc_type != 3) return false;
     uint8_t *tmp = pre ? malloc(n + pre) : dst;
+    if (!tmp) return false;
     if (!pread_all(fd, tmp, n + pre, nca_base + s->off + a)) { if (pre) free(tmp); return false; }
     uint8_t iv[16];
     memcpy(iv, s->ctr_hi, 8);
@@ -415,17 +400,27 @@ static bool comp_load(NxRomfs *r, char *why, size_t why_size) {
     int32_t count;
     memcpy(&count, h + 8, 4);
     const uint64_t NODE = 0x4000, ENTRY = 0x18;
+    // A corrupt table must fail here, before anything indexes it: there is no entry without its 0x18 bytes.
+    if (count <= 0 || (uint64_t)count > r->sec.comp_size / ENTRY)
+        return WHY("bad compression table entry count (%d)", count);
+    if (!r->sec.comp_size) return WHY("empty compression table");
     uint8_t *table = malloc(r->sec.comp_size);
+    if (!table) return WHY("out of memory for the compression table");
     if (!section_read(r->fd, r->nca_base, &r->sec, r->key, table, r->sec.data_off + r->sec.comp_off, r->sec.comp_size)) {
         free(table);
         return WHY("can't read the compression table (package cut short?)");
     }
-    uint64_t per_set = (NODE - 0x10) / ENTRY, sets = (count + per_set - 1) / per_set, per_node = (NODE - 0x10) / 8;
+    uint64_t per_set = (NODE - 0x10) / ENTRY, sets = ((uint64_t)count + per_set - 1) / per_set,
+             per_node = (NODE - 0x10) / 8;
     uint64_t l2 = sets <= per_node ? 0 : (sets - per_node + per_node - 2) / (per_node - 1);
     uint64_t node_storage = (1 + l2) * NODE;
     r->ent = calloc((size_t)count + 1, sizeof *r->ent);
+    if (!r->ent) {
+        free(table);
+        return WHY("out of memory for the compression table");
+    }
     r->nent = 0;
-    int64_t end = 0;
+    int64_t end = 0, prev_virt = 0;
     for (uint64_t s = 0; s < sets; s++) {
         uint64_t b = node_storage + s * NODE;
         if (b + NODE > r->sec.comp_size) { free(table); return WHY("compression table cut short"); }
@@ -436,10 +431,19 @@ static bool comp_load(NxRomfs *r, char *why, size_t why_size) {
             const uint8_t *p = table + b + 0x10 + e * ENTRY;
             CEntry *c = &r->ent[r->nent++];
             memcpy(&c->virt, p, 8), memcpy(&c->phys, p + 8, 8), c->type = p[16], memcpy(&c->psize, p + 20, 4);
+            // Virtual offsets grow; a physical block is inside the section; a type we know is 0, 1 or 3.
+            if (c->virt < prev_virt || c->phys < 0 || c->psize > r->sec.size ||
+                (c->type != 0 && c->type != 1 && c->type != 3)) {
+                free(table);
+                return WHY("bad compression table entry %llu", (unsigned long long)(r->nent - 1));
+            }
+            prev_virt = c->virt;
         }
     }
     free(table);
     if (r->nent != (uint64_t)count) return WHY("compression table: %llu entries of %d", (unsigned long long)r->nent, count);
+    if (r->ent[0].virt != 0) return WHY("compression table doesn't start at 0");
+    if (end < prev_virt) return WHY("compression table: the last block ends before it starts");
     r->ent[r->nent].virt = end;  // (the sentinel: the end of the last entry)
     r->size = (uint64_t)end;
     return true;
@@ -453,9 +457,18 @@ static const uint8_t *comp_block(NxRomfs *r, uint64_t i, uint32_t *len) {
         if (c->data && c->entry == i) { c->stamp = ++r->stamp; *len = c->len; return c->data; }
         if (!c->data || c->stamp < victim->stamp) victim = c;
     }
+    if (i >= r->nent) return NULL;
     const CEntry *e = &r->ent[i];
-    uint32_t vlen = (uint32_t)(r->ent[i + 1].virt - e->virt);
+    int64_t vend = r->ent[i + 1].virt;
+    if (vend < e->virt) return NULL;
+    uint64_t vlen64 = (uint64_t)(vend - e->virt);
+    if (vlen64 > r->size || vlen64 > 0xFFFFFFFFull || e->psize > r->sec.size) return NULL;
+    uint32_t vlen = (uint32_t)vlen64;
     uint8_t *raw = malloc(e->psize ? e->psize : 1), *out = malloc(vlen ? vlen : 1);
+    if (!raw || !out) {
+        free(raw), free(out);
+        return NULL;
+    }
     if (!section_read(r->fd, r->nca_base, &r->sec, r->key, raw, r->sec.data_off + (uint64_t)e->phys, e->psize) ||
         nx_lz4_decompress(raw, (int)e->psize, out, (int)vlen) != (int)vlen) {
         free(raw), free(out);
@@ -684,9 +697,21 @@ bool nx_setup(const char *package, const char *keys_path, const char *out_dir, u
         }
         uint32_t n, strsz;
         memcpy(&n, h + 4, 4), memcpy(&strsz, h + 8, 4);
-        size_t meta = 16 + n * 0x18 + strsz;
+        if (n > 4096 || strsz > (1u << 20)) {
+            WHY("bad ExeFS table");
+            goto out;
+        }
+        size_t meta = 16 + (size_t)n * 0x18 + strsz;
         uint8_t *m = malloc(meta);
-        section_read(fd, nca.base, &exefs, nca.ctr_key, m, exefs.data_off, meta);
+        if (!m) {
+            WHY("out of memory for the ExeFS table");
+            goto out;
+        }
+        if (!section_read(fd, nca.base, &exefs, nca.ctr_key, m, exefs.data_off, meta)) {
+            free(m);
+            WHY("can't read the ExeFS table");
+            goto out;
+        }
         char dir[1200];
         snprintf(dir, sizeof dir, "%s/exefs", out_dir);
         mkdir(out_dir, 0755), mkdir(dir, 0755);
@@ -695,8 +720,9 @@ bool nx_setup(const char *package, const char *keys_path, const char *out_dir, u
             uint64_t off, size;
             uint32_t no;
             memcpy(&off, m + 16 + i * 0x18, 8), memcpy(&size, m + 24 + i * 0x18, 8), memcpy(&no, m + 32 + i * 0x18, 4);
+            if (no >= strsz) continue;
             const char *name = (const char *)m + 16 + n * 0x18 + no;
-            if (no >= strsz || strchr(name, '/') || name[0] == '.') continue;
+            if (strchr(name, '/') || strchr(name, '\\') || name[0] == '.') continue;
             char path[1400];
             snprintf(path, sizeof path, "%s/%.*s", dir, (int)strnlen(name, strsz - no), name);
             wrote = write_file(path, fd, nca.base, &exefs, nca.ctr_key, exefs.data_off + meta + off, size);

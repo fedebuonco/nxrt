@@ -33,6 +33,37 @@ cd examples/game-template && make venv && SDKROOT=$(xcrun --show-sdk-path) make 
 `make` builds the app. The game code itself is generated from the player's own copy, at setup, on their machine. Windows
 and Linux build with clang and Vulkan, but haven't been re-verified since the ports were merged.
 
+## Tests
+
+The library's host-side units — settings, saves, mods, the NSO/RomFS/package parsers, the texture layout and the
+shared hashes — build and run without a game, a GPU or a window:
+
+```bash
+tests/run.sh
+```
+
+They compile the sources for real, with AddressSanitizer and UndefinedBehaviorSanitizer on by default, so a parser
+that reads past a buffer fails the run. From a game project that includes `nxrt.mk`, `make test` runs them too; see
+[`tests/README.md`](tests/README.md) for what each test covers and how to add one. The recompiler and renderer have
+their own differential/fuzz tests under [`tools/`](tools), some of which need a game's own files or shader dumps.
+
+## Formatting and static analysis
+
+The tree carries [`.clang-format`](.clang-format) (LLVM's style, adjusted to the sources: 4 spaces, 120 columns) and
+[`.clang-tidy`](.clang-tidy) (LLVM's `llvm-else-after-return` plus the high-signal bug-prone/readability checks and
+the Clang static analyzer). Apple's clang ships neither tool; use Homebrew LLVM (`brew install llvm`).
+
+```bash
+tools/format.sh            # check the tracked sources
+tools/format.sh --fix      # rewrite them
+tools/tidy.sh              # clang-tidy over the runtime and layers (makes build/compile_commands.json)
+tools/tidy.sh --all        # every translation unit, including the UI's .m/.mm
+```
+
+From a game project that includes `nxrt.mk`, the same is `make format`, `make format-fix` and `make tidy`. The
+existing tree predates the formatter: the first `tools/format.sh --fix` is a large, formatting-only change and should
+be its own commit. New code is expected to be formatted.
+
 ## Put a game on nxrt
 
 Copy [`examples/game-template`](examples/game-template) to `games/<id>/`, fill in `nx_game.info`, add hooks as the game

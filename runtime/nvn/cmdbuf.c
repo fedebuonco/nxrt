@@ -162,7 +162,7 @@ NVN(nvnCommandBufferBindProgram) {
     // nvnCommandBufferBindProgram(cmd, program, stages): a NULL program clears only the stages in the mask. Unity binds
     // the real vertex+fragment program (0x3) and then NULL for the geometry/tessellation/compute stages (0x3c), which
     // must not clear the vertex+fragment binding.
-    if (!A(1)) return;
+    if (!A(1) && getenv("NXRT_UNITY_NVN")) return;  // (Unity binds NULL for stages it has no shaders for)
     if (ENV("NXRT_LOG_NVN")) {
         static int n;
         if (n < 20) { n++; LOG("[nvn] BindProgram cmd=%#llx program=%#llx stages=%#llx\n",

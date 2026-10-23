@@ -615,6 +615,7 @@ static void render_frame(Renderer *r, float *stereo) {
             apply_effects(r, (int32_t)m, s);
             Mix *t = find_mix(r, s->dest);
             if (!t || t == s) continue;
+            if (!s->buf || !t->buf) continue;
             for (uint32_t i = 0; i < s->bufs; i++)
                 for (uint32_t j = 0; j < t->bufs; j++) {
                     float g = s->volume * s->vol[i * MIXBUF_MAX + j];
@@ -629,7 +630,7 @@ static void render_frame(Renderer *r, float *stereo) {
     if (f) apply_effects(r, 0, f);
     for (uint32_t i = 0; i < N; i++) {
         float ch[6] = {0};
-        if (f && r->sink_used)
+        if (f && f->buf && r->sink_used)
             for (int c = 0; c < r->sink_inputs && c < 6; c++)
                 if (r->sink_input[c] < f->bufs) ch[c] = f->buf[r->sink_input[c] * N + i] * f->volume;
         float L = ch[0], R = ch[1];
@@ -1035,17 +1036,21 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
 }
 
 static void renderer_open_output(Renderer *r) {
-    if (getenv("NXRT_AUDIO_TRACE")) r->trace = fopen(getenv("NXRT_AUDIO_TRACE"), "wb");
-    if (getenv("NXRT_AUDIO_WAV")) {
-        r->wav = fopen(getenv("NXRT_AUDIO_WAV"), "wb");
+    const char *trace = getenv("NXRT_AUDIO_TRACE");
+    if (trace) r->trace = fopen(trace, "wb");
+    const char *wav_path = getenv("NXRT_AUDIO_WAV");
+    if (wav_path) {
+        r->wav = fopen(wav_path, "wb");
         if (r->wav) wav_header(r->wav, 0, r->sample_rate);
     }
-    if (getenv("NXRT_NO_AUDIO") && strcmp(getenv("NXRT_NO_AUDIO"), "0")) return;
+    const char *no_audio = getenv("NXRT_NO_AUDIO");
+    if (no_audio && strcmp(no_audio, "0")) return;
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) { LOG("[audren] SDL audio init failed: %s\n", SDL_GetError()); return; }
     SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, (int)r->sample_rate};
     r->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
     if (!r->stream) { LOG("[audren] SDL audio open failed: %s\n", SDL_GetError()); return; }
-    if (getenv("NXRT_AUDIO_GAIN")) SDL_SetAudioStreamGain(r->stream, (float)atof(getenv("NXRT_AUDIO_GAIN")));
+    const char *gain = getenv("NXRT_AUDIO_GAIN");
+    if (gain) SDL_SetAudioStreamGain(r->stream, (float)atof(gain));
     SDL_ResumeAudioStreamDevice(r->stream);
 }
 
@@ -1352,12 +1357,15 @@ SERVICE("audout:u", audout_u) {
         a->state = 1;
         pthread_mutex_init(&a->lock, NULL);
         a->event = kernel_create_event_pair(&a->ev_w, &a->ev_r);
-        if (getenv("NXRT_AUDOUT_WAV")) a->wav = fopen(getenv("NXRT_AUDOUT_WAV"), "wb");
-        if (!(getenv("NXRT_NO_AUDIO") && strcmp(getenv("NXRT_NO_AUDIO"), "0")) && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        const char *wav_path = getenv("NXRT_AUDOUT_WAV");
+        if (wav_path) a->wav = fopen(wav_path, "wb");
+        const char *no_audio = getenv("NXRT_NO_AUDIO");
+        if (!(no_audio && strcmp(no_audio, "0")) && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)a->channels, (int)a->rate};
             a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
             if (a->stream) {
-                if (getenv("NXRT_AUDIO_GAIN")) SDL_SetAudioStreamGain(a->stream, (float)atof(getenv("NXRT_AUDIO_GAIN")));
+                const char *gain = getenv("NXRT_AUDIO_GAIN");
+                if (gain) SDL_SetAudioStreamGain(a->stream, (float)atof(gain));
                 SDL_ResumeAudioStreamDevice(a->stream);
             }
         }

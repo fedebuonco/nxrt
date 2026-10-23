@@ -40,7 +40,11 @@ SERVICE("pctl:r", pctl_r) { pctl_root(s, req, resp); }
 SERVICE("aoc:u", aoc_u) {
     (void)s;
     switch (req->cmd) {
-    case 2: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;   // CountAddOnContent
+    // NOLINTNEXTLINE(bugprone-branch-clone): CountAddOnContent and ListAddOnContent both return 0
+    case 2:
+        OUT(uint32_t, 0) = 0;
+        resp_size(resp, 4);
+        break;                                                 // CountAddOnContent
     case 3: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;   // ListAddOnContent
     case 5: OUT(uint64_t, 0) = nx_game.info.title_id + 0x1000; resp_size(resp, 8); break;  // GetAddOnContentBaseId
     case 8: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;

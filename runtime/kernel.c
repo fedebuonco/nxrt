@@ -460,7 +460,6 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
 
 static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
     pthread_mutex_lock(&g_klock);
-    uint32_t kbefore = rdw(key);
     int woken = 0;
     bool any_left = false;
     for (;;) {
@@ -869,7 +868,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
             break;
         }
         case 7: case 22: v = heap_size + 0x4000000; break;
-        case 8: v = 0; break;
+        case 8: v = 0; break;  // NOLINT(bugprone-branch-clone): both queries (8, 9) are zero
         case 9: v = 0; break;
         case 11: v = ((uint64_t)arc4random() << 32) | arc4random(); break;
         case 12: v = GUEST_LO; break;

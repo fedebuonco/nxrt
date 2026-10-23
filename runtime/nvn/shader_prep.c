@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "../lz4_block.h"
 #include "nvn.h"
 #include "shader_prep.h"
 #include "nx_app.h"
@@ -228,6 +229,7 @@ void shader_rec_note(const ShaderRec *r) {
         loaded = true;
         FILE *f = fopen(path, "r");
         char l[2048];
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): the first load, once per process
         while (f && fgets(l, sizeof l, f)) {
             l[strcspn(l, "\r\n")] = 0;
             if (l[0] == 'G' || l[0] == 'C') seen_add(shader_code_hash((const uint8_t *)l, strlen(l)));
@@ -400,7 +402,6 @@ static void idx_file(const char *path) {
 
 // The main module (exefs/main, an NSO) holds a few shaders of its own in its data (LZ4-compressed in the file): its
 // read-only and read-write data segments are kept decompressed for the run when they have any
-size_t rt_lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, size_t dstlen);
 static void idx_nso(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return;
@@ -454,10 +455,14 @@ static uint64_t idx_tag(int nfiles) {
     const char *id = nx_app.id ? nx_app.id : "";
     for (const char *p = id; *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001B3ull;
     for (const char *p = nx_app.version ? nx_app.version : ""; *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001B3ull;
-    uint64_t total = 0;
-    for (int i = 0; i < nfiles; i++) total += romfs_file_size(i);
     h = (h ^ (uint64_t)nfiles) * 0x100000001B3ull;
-    h = (h ^ total) * 0x100000001B3ull;
+    // Every file's path and size, not just the count and total: a game update that replaces a file in place (same
+    // count, same total) still invalidates the cached offsets.
+    for (int i = 0; i < nfiles; i++) {
+        const char *p = romfs_file_path(i);
+        for (; p && *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001B3ull;
+        h = (h ^ romfs_file_size(i)) * 0x100000001B3ull;
+    }
     return h ^ (h >> 32);
 }
 
@@ -654,17 +659,19 @@ bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), c
 static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
     double t0 = ms_now();
     char *list = NULL;
-    if (getenv("NXRT_SHADER_LIST")) {
-        FILE *f = fopen(getenv("NXRT_SHADER_LIST"), "rb");
+    const char *list_path = getenv("NXRT_SHADER_LIST");
+    if (list_path) {
+        FILE *f = fopen(list_path, "rb");
         if (f) {
             fseek(f, 0, SEEK_END);
             long n = ftell(f);
             fseek(f, 0, SEEK_SET);
-            list = calloc(1, (size_t)(n > 0 ? n : 0) + 1);
-            if (n > 0 && fread(list, 1, (size_t)n, f) != (size_t)n) list[0] = 0;
+            list = n >= 0 ? calloc(1, (size_t)n + 1) : NULL;
+            if (list && n > 0 && fread(list, 1, (size_t)n, f) != (size_t)n) list[0] = 0;
             fclose(f);
         }
-    } else list = strdup(shipped_list);
+    } else
+        list = strdup(shipped_list);
     // (a game without a shipped list: the player's own list is still prepared - below)
     if (!renderer_prepare_begin()) { free(list); LOG("[shader] preparation: no GPU device yet\n"); return false; }
     uint64_t seen_game;
@@ -676,7 +683,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
         return false;
     }
     int total = 0;
-    for (char *p = list; *p; p++) total += *p == '\n';
+    for (char *p = list; p && *p; p++) total += *p == '\n';
     for (char *p = seen; p && *p; p++) total += *p == '\n';
     if (progress) progress(0, total + 1);
     if (!idx_n) {
@@ -711,23 +718,29 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     }
     FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
     int done = 0, prepared = 0, missing = 0, failed = 0, prepared_seen = 0;
-    for (int own = 0; own < 2; own++)  // the shipped list, then the player's own
-    for (char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel); line = next) {
-        next = strchr(line, '\n');
-        if (next) *next++ = 0;
-        else next = line + strlen(line);
-        ShaderRec r;
-        if (!shader_rec_parse(line, &r)) continue;
-        if (own && !getenv("NXRT_SHADER_LIST") && shader_seen_shipped(line)) continue;  // (prepared already)
-        const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
-        ShaderBlob bv = {0}, bf = {0};
-        uint8_t *dv = ev ? blob_read(ev, &bv, files) : NULL, *df = ef ? blob_read(ef, &bf, files) : NULL;
-        if (!dv || (r.kind == 'G' && !df)) missing++;
-        else if (renderer_prepare(&r, &bv, &bf)) *(own ? &prepared_seen : &prepared) += 1;
-        else failed++;
-        free(dv);
-        free(df);
-        if (progress && (++done & 7) == 0) progress(done - renderer_prepare_pending(), total + 1);
+    for (int own = 0; own < 2; own++) {  // the shipped list, then the player's own
+        for (char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel); line = next) {
+            next = strchr(line, '\n');
+            if (next)
+                *next++ = 0;
+            else
+                next = line + strlen(line);
+            ShaderRec r;
+            if (!shader_rec_parse(line, &r)) continue;
+            if (own && !list_path && shader_seen_shipped(line)) continue;  // (prepared already)
+            const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
+            ShaderBlob bv = {0}, bf = {0};
+            uint8_t *dv = ev ? blob_read(ev, &bv, files) : NULL, *df = ef ? blob_read(ef, &bf, files) : NULL;
+            if (!dv || (r.kind == 'G' && !df))
+                missing++;
+            else if (renderer_prepare(&r, &bv, &bf))
+                *(own ? &prepared_seen : &prepared) += 1;
+            else
+                failed++;
+            free(dv);
+            free(df);
+            if (progress && (++done & 7) == 0) progress(done - renderer_prepare_pending(), total + 1);
+        }
     }
     while (!(cancel && *cancel) && renderer_prepare_pending()) {  // (the last builds)
         if (progress) progress(done - renderer_prepare_pending(), total + 1);

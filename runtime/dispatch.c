@@ -104,6 +104,7 @@ static uint64_t hle_next = HLE_HEAP;
 RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
 
 void *hle_alloc(uint64_t size) {
+    if (size > HLE_HEAP_SIZE) FATAL("HLE allocation too big: %#llx\n", (unsigned long long)size);
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&m);
     uint64_t a = hle_next;

@@ -571,7 +571,10 @@ static void moved(Move *m, unsigned long long n) {
 }
 
 static bool move_fail(Move *m, const char *what, const char *p) {
-    if (!m->err[0]) snprintf(m->err, m->errn, "%s %s (%s)", what, p, errno ? strerror(errno) : "differs");
+    if (!m->err[0]) {
+        // NOLINTNEXTLINE(clang-analyzer-unix.Errno): a best-effort message; errno is meaningful only after a failure
+        snprintf(m->err, m->errn, "%s %s (%s)", what, p, errno ? strerror(errno) : "differs");
+    }
     return false;
 }
 

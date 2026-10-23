@@ -497,7 +497,7 @@ NVN(nvnTextureGetSwizzle) { for (int i = 0; i < 4; i++) *(uint32_t *)AP(1 + i) =
 NVN(nvnTextureGetDepthStencilMode) { RET(TEX->ds_mode); }
 NVN(nvnTextureGetStride) { RET(TEX->stride); }
 NVN(nvnTextureGetTextureAddress) { RET(TEX->addr); }
-NVN(nvnTextureGetMemoryPool) { RET(TEX->guest_pool); }
+NVN(nvnTextureGetMemoryPool) { RET(getenv("NXRT_UNITY_NVN") ? TEX->guest_pool : 0); }  // (Unity needs the real pool)
 NVN(nvnTextureGetMemoryOffset) { RET(TEX->pool_offset); }
 NVN(nvnTextureGetStorageSize) { RET(tegra_total_size(&TEX->layout)); }
 NVN(nvnTextureGetDebugID) { RET(TEX->debug_id); }
@@ -622,7 +622,16 @@ NVN(nvnSamplerGetBorderColori) { memcpy(AP(1), SMP->border, 16); }
 NVN(nvnSamplerGetBorderColorui) { memcpy(AP(1), SMP->border, 16); }
 NVN(nvnSamplerGetMaxAnisotropy) { RETF(SMP->max_aniso); }
 NVN(nvnSamplerGetReductionFilter) { RET(SMP->reduction); }
-NVN(nvnSamplerCompare) { RET(memcmp(HOST(NvnSamplerDesc, A(0)), HOST(NvnSamplerDesc, A(1)), sizeof(NvnSamplerDesc)) == 0); }
+static bool sampler_equal(const NvnSamplerDesc *a, const NvnSamplerDesc *b) {  // (not memcmp: the struct has padding)
+    if (!a || !b) return a == b;
+    return a->min_filter == b->min_filter && a->mag_filter == b->mag_filter && a->wrap[0] == b->wrap[0] &&
+           a->wrap[1] == b->wrap[1] && a->wrap[2] == b->wrap[2] && a->compare_mode == b->compare_mode &&
+           a->compare_func == b->compare_func && a->reduction == b->reduction && a->lod_min == b->lod_min &&
+           a->lod_max == b->lod_max && a->lod_bias == b->lod_bias && a->max_aniso == b->max_aniso &&
+           a->border[0] == b->border[0] && a->border[1] == b->border[1] && a->border[2] == b->border[2] &&
+           a->border[3] == b->border[3] && a->backend == b->backend;
+}
+NVN(nvnSamplerCompare) { RET(sampler_equal(HOST(NvnSamplerDesc, A(0)), HOST(NvnSamplerDesc, A(1)))); }
 NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 
 // ================================================================== descriptor pools

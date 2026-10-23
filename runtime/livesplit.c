@@ -165,6 +165,7 @@ static bool peer_closed(sock_t fd) {
     struct timeval tv = {0, 0};
     if (select((int)fd + 1, &r, NULL, NULL, &tv) != 1) return false;
     char b[256];
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): select() just said the socket is readable
     int n = (int)recv(fd, b, sizeof b, 0);  // (LiveSplit answers get* commands only: anything else is discarded)
     return n <= 0;
 }
