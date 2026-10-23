@@ -21,6 +21,7 @@
 #include "option_rows.h"
 #include "osk.h"
 #include "imgui_impl_sdl3.h"
+#include "pad_nav.h"  // (C++: ImGuiKey, outside the extern "C" block below)
 
 extern "C" {
 #include "input_bind.h"
@@ -346,7 +347,7 @@ static bool launcher_pad_event(const SDL_Event &e) {
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
-        ImGuiKey k = launcher_pad_key(e.gbutton.button);
+        ImGuiKey k = ui_pad_key(e.gbutton.which, e.gbutton.button, true);  // (confirm / back: pad_nav.h)
         if (k != ImGuiKey_None) io.AddKeyEvent(k, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
         return true;
     }
