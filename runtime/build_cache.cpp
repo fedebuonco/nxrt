@@ -1,6 +1,7 @@
 // The game-code builder's cache: receipts validate completed objects; an OS lock keeps builders apart.
 // Generated source and logs survive interruption, but are removed after successful publication.
 #include "build_cache.h"
+#include "nxgame.h"
 #include "cache_sha256.h"
 #include <cstdio>
 #include <filesystem>
@@ -152,9 +153,7 @@ std::unique_ptr<BuildCache> acquire(const char *game_dir) {
     plain_tree(c->root);
     return c;
 }
-bool library_name(const std::string &s) {
-    return s == "lasgame.dll" || s == "lasgame.so" || s == "lasgame.dylib";
-}
+bool library_name(const std::string &s) { return s == nx_gamelib_name(); }  // (<id>game.<ext>, runtime/main.c)
 void recover(BuildCache *c) {
     // The library and its ID cannot be replaced together. A remaining journal means restore the old pair
     // before a retry or cleanup can discard the backups; repeatable recovery also survives another exit.
