@@ -1,5 +1,7 @@
 #include "settings.h"
 
+bool g_gpu_integrated;  // (platform: an integrated GPU)
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +15,13 @@
 #include "nx_settings.h"
 #include "nxgame.h"
 
+void settings_resolve_defaults(bool integrated) {  // (Apple GPUs keep MetalFX; an integrated one starts at 1x)
+    g_gpu_integrated = integrated;
+    if (integrated && g_settings.res_mode == 0) g_settings.res_mode = RES_MATCH;
+}
+
+const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game Boy Color", "Grayscale"};
+
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
     .volume = 1.0f,
@@ -22,6 +31,8 @@ Settings g_settings = {
     .frame_rate = 60,
     .hd_textures = true,
     .reshade = true,
+    .livesplit_host = "localhost",
+    .livesplit_port = 16834,
 };
 
 // The game's own text languages: its RomFS carries these per region (regionUS/USen|USes|USfr|USpt,
@@ -149,6 +160,10 @@ static bool rt_key(const char *key, const char *val) {
     else if (!strcmp(key, "game_dir")) snprintf(g_settings.game_dir, sizeof g_settings.game_dir, "%s", val);
     else if (!strcmp(key, "game_in_place")) g_settings.game_in_place = atoi(val) != 0;
     else if (!strcmp(key, "aspect_asked")) g_settings.aspect_asked = atoi(val) != 0, g_aspect_key = true;
+    else if (!strcmp(key, "onedrive_kept")) g_settings.onedrive_kept = atoi(val) != 0;
+    else if (!strcmp(key, "livesplit")) g_settings.livesplit = atoi(val) != 0;
+    else if (!strcmp(key, "livesplit_host")) snprintf(g_settings.livesplit_host, sizeof g_settings.livesplit_host, "%s", val);
+    else if (!strcmp(key, "livesplit_port")) g_settings.livesplit_port = atoi(val);
     else return false;
     return true;
 }
@@ -178,7 +193,9 @@ static void rt_write(FILE *f) {
     fprintf(f, "language = %s\n", g_language_codes[g_settings.language > LANG_AUTO && g_settings.language < N_LANGUAGES
                                                      ? g_settings.language : LANG_AUTO]);
     if (g_settings.game_dir[0]) fprintf(f, "game_dir = %s\ngame_in_place = %d\n", g_settings.game_dir, g_settings.game_in_place);
-    fprintf(f, "aspect_asked = %d\n", g_settings.aspect_asked);
+    fprintf(f, "aspect_asked = %d\nonedrive_kept = %d\n", g_settings.aspect_asked, g_settings.onedrive_kept);
+    fprintf(f, "livesplit = %d\nlivesplit_host = %s\nlivesplit_port = %d\n", g_settings.livesplit,
+            g_settings.livesplit_host, g_settings.livesplit_port);
 }
 
 // the game's own keys (nx_game hooks settings_*)

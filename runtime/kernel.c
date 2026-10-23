@@ -64,6 +64,7 @@ static void handle_close(uint32_t h) {
 
 // Threads blocked in WaitSynchronization; object signals wake only these (caller holds g_klock).
 static KThread *g_syncwaiters;
+static KThread *g_main_thread;  // (g_klock) the boot's main thread: the hang watch reads its wait
 
 static void wake(KThread *t) {
 #ifdef _WIN32
@@ -278,9 +279,13 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3; t->cpu.x[4] = x4;
     if (!thread_start(t)) FATAL("cannot start the main game thread\n");
+    pthread_mutex_lock(&g_klock);
+    g_main_thread = t;
+    pthread_mutex_unlock(&g_klock);
 }
 
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
+uint64_t kernel_current_thread_id(void) { return t_cur ? t_cur->id : 0; }  // (renderer: naming its host threads)
 Cpu *kernel_current_cpu(void) { return t_cur ? &t_cur->cpu : NULL; }
 KThread *kernel_current_thread(void) { return t_cur; }
 
@@ -325,6 +330,31 @@ static void mutex_release(uint64_t addr) {
 }
 
 KThread *g_waitlist;
+// (diagnostics) the last NXRT_KTRACE_N kernel condition-variable / mutex calls, lock-free, for the "[hang]" dump: what
+// each thread did with which key / mutex word, and the words before and after. NXRT_KTRACE=0 turns it off.
+enum { KT_WAIT, KT_WAIT_END, KT_SIGNAL, KT_LOCK, KT_LOCK_END, KT_UNLOCK };
+#define KTRACE_N 256
+typedef struct { uint64_t ns, tid, addr, addr2; uint32_t w0, w1, w2, arg, kind; } KTrace;
+static KTrace ktrace[KTRACE_N];
+static uint64_t ktrace_n;  // (__atomic builtins)
+static int ktrace_on = -1;
+static uint32_t rdw(uint64_t a) { return a ? __atomic_load_n((uint32_t *)(uintptr_t)a, __ATOMIC_SEQ_CST) : 0; }
+static void kt(uint32_t kind, uint64_t addr, uint64_t addr2, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t arg) {
+    if (ktrace_on < 0) ktrace_on = !getenv("NXRT_KTRACE") || atoi(getenv("NXRT_KTRACE")) != 0;
+    if (!ktrace_on) return;
+    KTrace *e = &ktrace[__atomic_fetch_add(&ktrace_n, 1, __ATOMIC_RELAXED) % KTRACE_N];
+    *e = (KTrace){plat_now_ns(), t_cur ? t_cur->id : 0, addr, addr2, w0, w1, w2, arg, kind};
+}
+// Keys used with timed waits (periodic pollers, e.g. a 1 ms timer thread) would fill the ring within a second: their
+// waits and signals are left out (g_klock).
+static uint64_t kt_timed[16];
+static bool kt_timed_key(uint64_t key, bool add) {
+    for (int i = 0; i < 16; i++) {
+        if (kt_timed[i] == key) return true;
+        if (!kt_timed[i] && add) { kt_timed[i] = key; return true; }
+    }
+    return false;
+}
 
 static void waitlist_add(KThread *t) { t->wnext = g_waitlist; g_waitlist = t; }
 static void waitlist_remove(KThread *t) {
@@ -337,6 +367,7 @@ static uint32_t block_current(int64_t timeout_ns) {
     KThread *t = t_cur;
     struct timespec ts;
     if (timeout_ns >= 0) deadline(&ts, timeout_ns);
+    t->wait_since = plat_now_ns();
     waitlist_add(t);
     while (t->wait_kind != WAIT_NONE) {
         if (g_rt_unwind) {  // reboot: give up the wait (the thread unwinds when its svc returns)
@@ -363,6 +394,7 @@ static uint32_t block_current(int64_t timeout_ns) {
 static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) {
     pthread_mutex_lock(&g_klock);
     uint32_t v = __atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
+    kt(KT_LOCK, addr, 0, v, 0, owner, tag);
     if (v != (owner | WAITERS_BIT)) {
         pthread_mutex_unlock(&g_klock);
         return R_OK;
@@ -372,27 +404,37 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
     t->wait_addr = addr;
     t->wait_tag = tag;
     uint32_t r = block_current(-1);
+    kt(KT_LOCK_END, addr, 0, rdw(addr), 0, 0, r);
     pthread_mutex_unlock(&g_klock);
     return r == R_CANCELLED ? R_OK : r;
 }
 
 static uint32_t svc_arbitrate_unlock(uint64_t addr) {
     pthread_mutex_lock(&g_klock);
+    uint32_t before = rdw(addr);
     mutex_release(addr);
+    kt(KT_UNLOCK, addr, 0, before, rdw(addr), 0, 0);
     pthread_mutex_unlock(&g_klock);
     return R_OK;
 }
 
 static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64_t timeout) {
+    static long late_us = -1;
+    if (late_us < 0) late_us = getenv("NXRT_DEBUG_CV_LATE_WAIT") ? atol(getenv("NXRT_DEBUG_CV_LATE_WAIT")) : 0;
+    if (late_us > 0) usleep((useconds_t)late_us);  // (test: forces notify-before-wait races in the game's code)
     pthread_mutex_lock(&g_klock);
     KThread *t = t_cur;
+    uint32_t mbefore = rdw(mutex), kbefore = rdw(key);
     mutex_release(mutex);
+    bool traced = !kt_timed_key(key, timeout >= 0);
+    if (traced) kt(KT_WAIT, key, mutex, kbefore, mbefore, rdw(mutex), 0xffffffffu);
     t->wait_kind = WAIT_CONDVAR;
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
     __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     uint32_t r = block_current(timeout);
+    if (traced) kt(KT_WAIT_END, key, mutex, rdw(key), rdw(mutex), 0, r);
     if (r != R_OK) {
         // On Horizon, svcWaitProcessWideKeyAtomic does NOT reacquire the mutex on R_TIMEOUT;
         // nn::os TimedWait calls InternalCriticalSection::Enter(mutex) in user space when r == R_TIMEOUT.
@@ -407,6 +449,7 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
 
 static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
     pthread_mutex_lock(&g_klock);
+    uint32_t kbefore = rdw(key);
     int woken = 0;
     bool any_left = false;
     for (;;) {
@@ -882,6 +925,7 @@ void kernel_reset(void) {
     }
     g_threads = NULL;
     g_waitlist = NULL;
+    g_main_thread = NULL;
     g_syncwaiters = NULL;
     memset(handles, 0, sizeof handles);
     nregions = 0;
@@ -969,9 +1013,38 @@ static void dump_threads_locked(void) {
             LOG("    arbiter word at %llx = %#x\n", (unsigned long long)t->wait_addr, av);
         }
     }
+    if (!ktrace_on) return;
+    {   // the kernel trace: oldest first
+        static const char *const kn[] = {"cv-wait", "cv-wait-end", "cv-signal", "arb-lock", "arb-lock-end", "arb-unlock"};
+        uint64_t n = __atomic_load_n(&ktrace_n, __ATOMIC_RELAXED), first = n > KTRACE_N ? n - KTRACE_N : 0, now = plat_now_ns();
+        LOG("=== [kernel trace] last %llu of %llu (ms before now; words before -> after) ===\n",
+            (unsigned long long)(n - first), (unsigned long long)n);
+        for (uint64_t i = first; i < n; i++) {
+            const KTrace *e = &ktrace[i % KTRACE_N];
+            long long ago = (long long)(now - e->ns) / 1000000;
+            switch (e->kind) {
+            case KT_WAIT:
+                LOG("  -%lld t%llu cv-wait key %llx (%x) mutex %llx %x -> %x\n", ago, (unsigned long long)e->tid,
+                    (unsigned long long)e->addr, e->w0, (unsigned long long)e->addr2, e->w1, e->w2);
+                break;
+            case KT_WAIT_END:
+                LOG("  -%lld t%llu cv-wait-end key %llx (%x) mutex %llx (%x) r %x\n", ago, (unsigned long long)e->tid,
+                    (unsigned long long)e->addr, e->w0, (unsigned long long)e->addr2, e->w1, e->arg);
+                break;
+            case KT_SIGNAL:
+                LOG("  -%lld t%llu cv-signal key %llx %x -> %x count %d woke %u\n", ago, (unsigned long long)e->tid,
+                    (unsigned long long)e->addr, e->w0, e->w1, (int)e->arg, e->w2);
+                break;
+            default:
+                LOG("  -%lld t%llu %s mutex %llx %x -> %x owner %x tag/r %x\n", ago, (unsigned long long)e->tid,
+                    kn[e->kind < 6 ? e->kind : 0], (unsigned long long)e->addr, e->w0, e->w1, e->w2, e->arg);
+            }
+        }
+    }
 }
 
-void kernel_dump_threads(void) {
+void kernel_dump_threads(const char *prefix) {
+    (void)prefix;
     pthread_mutex_lock(&g_klock);
     dump_threads_locked();
     pthread_mutex_unlock(&g_klock);
@@ -982,5 +1055,71 @@ bool kernel_try_dump_threads(void) {
     dump_threads_locked();
     pthread_mutex_unlock(&g_klock);
     return true;
+}
+
+// ------------------------------------------------------------------ the "[hang]" dump
+// NXRT_HANG_DUMP=<seconds> (default 30, 0 off). The renderer (runtime/nvn/rqueue.c) registers its checks at the GPU
+// device setup; every second they say whether something has been stuck that long (no frame, a noted wait), and a hit
+// dumps the renderer's side, every guest thread with its kernel wait, and the kernel trace. At most 6 per run.
+static bool (*hang_check_fn)(uint64_t limit_ns, char *why, size_t n);
+static void (*hang_state_fn)(const char *prefix);
+
+static void *hang_watch(void *arg) {
+    uint64_t s = (uint64_t)(uintptr_t)arg, dumped_since = 0;
+    if (getenv("NXRT_HANG_DUMP_TEST")) {  // (tests) dump once after a few seconds, hung or not: the trace and threads
+        sleep(3);
+        kernel_dump_threads("[hang] (test)");
+        return NULL;
+    }
+    for (int dumps = 0; dumps < 6;) {
+        sleep(1);
+        char why[256] = "";
+        bool have = false;
+        pthread_mutex_lock(&g_klock);
+        KThread *m = g_main_thread;  // (the current boot's: kernel_reset clears it)
+        uint64_t since = m ? m->wait_since : 0, now = plat_now_ns();
+        bool stuck = m && m->started && !m->finished && (m->wait_kind != WAIT_NONE || m->in_sync_wait) && since < now &&
+                     now - since >= s * 1000000000ull && since != dumped_since;
+        pthread_mutex_unlock(&g_klock);
+        if (stuck) {
+            snprintf(why, sizeof why, "main guest thread in one kernel wait for %llu s", (unsigned long long)s);
+            dumped_since = since;
+            have = true;
+        }
+        bool (*check)(uint64_t, char *, size_t) = __atomic_load_n(&hang_check_fn, __ATOMIC_ACQUIRE);
+        char extra[200] = "";
+        if (check && check(s * 1000000000ull, extra, sizeof extra)) {
+            if (have) snprintf(why + strlen(why), sizeof why - strlen(why), "; %s", extra);
+            else snprintf(why, sizeof why, "%s", extra);
+            have = true;
+        }
+        if (!have) continue;
+        LOG("[hang] ===== %s =====\n", why);
+        void (*state)(const char *) = __atomic_load_n(&hang_state_fn, __ATOMIC_ACQUIRE);
+        if (state) state("[hang]");
+        kernel_dump_threads("[hang]");
+        LOG("[hang] =====\n");
+        fflush(stderr);
+        dumps++;
+    }
+    return NULL;
+}
+
+void kernel_hang_hooks(bool (*check)(uint64_t limit_ns, char *why, size_t n), void (*state)(const char *prefix)) {
+    __atomic_store_n(&hang_state_fn, state, __ATOMIC_RELEASE);
+    __atomic_store_n(&hang_check_fn, check, __ATOMIC_RELEASE);
+    const char *e = getenv("NXRT_HANG_DUMP");
+    long s = e ? atol(e) : 30;
+    if (s <= 0) return;
+    static int started;
+    if (__atomic_exchange_n(&started, 1, __ATOMIC_ACQ_REL)) return;
+    pthread_t th;
+    if (pthread_create(&th, NULL, hang_watch, (void *)(uintptr_t)s) == 0) {
+        pthread_detach(th);
+        LOG("[hang] watch on: %ld s\n", s);
+    } else {
+        started = 0;
+        LOG("[hang] cannot start the watch thread\n");
+    }
 }
 

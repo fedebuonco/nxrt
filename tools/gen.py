@@ -691,6 +691,9 @@ def main():
         f.write('};\n')
         f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
         write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
+    # the main module's build id: the game code library's id includes it (runtime/gamelib.h gamelib_full_id, nxrt.mk)
+    if args.name == 'main':
+        write_if_changed(os.path.join(args.outdir, 'main_build_id.txt'), m.nso.build_id[:16].upper() + '\n')
     print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
 
 

@@ -27,6 +27,9 @@ enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTA
 typedef struct NxInputSettings {
     bool dpad_move;  // the d-pad (and arrow keys) move the player like the stick
     int prompts;     // PROMPTS_*: button glyphs the game shows (auto = follow the controller SDL reports)
+    bool rumble;         // controller vibration (Controls tab)
+    int rumble_strength; // 0..100: the game's amplitudes scaled
+    bool led;            // the controller's light, where it has one
 } NxInputSettings;
 extern NxInputSettings g_input_settings;
 extern int g_input_prompt_styles;  // the styles the host's game draws: 4 (auto .. PlayStation), 5 with Keyboard
@@ -51,6 +54,18 @@ void nxin_set_stick_deadzone(int radius);        // controller sticks inside thi
 // ---- once per presented frame: test scripts (NXRT_INPUT, NXRT_HOST_INPUT, NXRT_BIND_TEST); script: the game's
 // own steering of the scripted pad (NULL: none)
 void nxin_frame(uint64_t frame, void (*script)(uint64_t frame, NxPad *p));
+
+// ---- rumble: HD Rumble approximated with a two-motor gamepad (the runtime's HID vibration sends these; a port
+// drives the pad's light through input_led_set). Called once per presented frame by the presenter.
+typedef struct { float low_amp, low_hz, high_amp, high_hz; } RumbleValue;
+void input_rumble_send(uint32_t handle, const RumbleValue *value);
+RumbleValue input_rumble_get(uint32_t handle);
+void input_rumble_permit(bool permitted);
+bool input_rumble_permitted(void);
+void input_rumble_poll(void);
+void input_led_set(uint8_t r, uint8_t g, uint8_t b);
+void input_led_poll(void);
+void input_led_stop(void);
 
 // ---- the pad (any thread). captured: a menu has the input (only test scripts reach the game)
 void nxin_read(NxPad *p, bool captured);                     // 1. held buttons and sticks

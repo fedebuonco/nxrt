@@ -3,8 +3,11 @@
 // Nothing from the game ships with the app.
 #pragma once
 #include <stdbool.h>
+#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "cpu.h"
 
@@ -16,11 +19,28 @@
 #endif
 
 // GAMELIB_ID (-D, from the Makefile): a hash of the generator and the headers the game code is compiled against. A
-// library built with another one is rebuilt, not loaded.
+// library built with another one is rebuilt, not loaded. A library's own id (its .id file, GameLibTables.id) is
+// GAMELIB_ID-<the first 16 hex digits of the game's main build ID>: switching game versions rebuilds it too.
 #ifndef GAMELIB_ID
 #define GAMELIB_ID "dev"
 #endif
 #define GAMELIB_ABI 2
+#define GAMELIB_FULL_ID_SIZE 96
+
+// The id a library for the game files in game_dir has (GAMELIB_ID-<build ID>); false when exefs/main is unreadable.
+static inline bool gamelib_full_id(const char *game_dir, char *out, size_t size) {
+    char path[1100];
+    unsigned char hdr[0x60];
+    snprintf(path, sizeof path, "%s/exefs/main", game_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr && !memcmp(hdr, "NSO0", 4);
+    fclose(f);
+    if (!ok) return false;
+    int n = snprintf(out, size, "%s-", GAMELIB_ID);
+    for (int i = 0; i < 8 && n + 2 < (int)size; i++) n += snprintf(out + n, size - n, "%02X", hdr[0x40 + i]);
+    return true;
+}
 
 typedef struct {
     const char *name;       // the module (nx_game.info.modules)

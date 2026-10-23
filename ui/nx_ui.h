@@ -37,7 +37,9 @@ typedef struct NxUiSettings {
     bool fullscreen;
     bool show_fps;       // a frame rate counter in the corner
     bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
+    int menu_confirm;    // which button confirms in the menus: NXUI_CONFIRM_GAME (A, the game's layout) or the controller convention
 } NxUiSettings;
+enum { NXUI_CONFIRM_GAME = 0, NXUI_CONFIRM_CONTROLLER = 1 };
 extern NxUiSettings g_ui_settings;
 void nxui_set_fullscreen(bool on);  // (F11 / Alt+Enter too) applied by menu_apply_window_requests
 
@@ -92,6 +94,10 @@ typedef struct NxUiGameFiles {
     void (*setup_rows)(float scale, bool busy);  // more option rows on the Game Files page, before Set up (e.g. where)
     void (*prelaunch)(float scale);         // Settings' first tab on the start screen ("Prelaunch")
     bool (*files_deleted)(void);            // (Prelaunch deleted them: true once)
+    // OneDrive (Windows): the data root is inside a synced folder. The runtime decides once (the setting's "Keep
+    // here"), the start screen draws the warning. Returns 1 to warn and *gb = the estimate (< 0: still measuring).
+    int (*onedrive_warn)(double *gb);
+    void (*onedrive_keep)(void);
     const char *source_desc;                // the folder row's explanation (which game, which version)
     const char *setup_desc;                 // the Set up row's explanation
     const char *ready_note;                 // under "Game files ready." ("Nintendo Switch · v1.0.0")
@@ -100,6 +106,15 @@ typedef struct NxUiGameFiles {
     void (*test_extract)(const char *folder);  // set up now, from folder (blocking)
 } NxUiGameFiles;
 void nxui_set_game_files(const NxUiGameFiles *g);
+
+// Shader preparation on the start screen (runtime/nvn/shader_prep.h): after the game files are set up, and in the
+// background on later starts; PLAY waits for it while the launcher draws its bar. Skipped when there is no romfs
+// folder to read (a game package) or NXRT_SHADER_PREP=0.
+void nxui_shader_prep_run(void);        // do it now, blocking (the setup thread, after the files are ready)
+void nxui_shader_prep_start(void);      // start it in the background, once (any thread)
+bool nxui_shader_prep_busy(void);
+float nxui_shader_prep_progress(void);  // 0..1
+void nxui_shader_prep_skip(void);       // stop it early (the shaders already built stay)
 
 // Boot profiles next to "Vanilla" on PLAY (e.g. randomizer seeds)
 typedef struct NxUiProfiles {

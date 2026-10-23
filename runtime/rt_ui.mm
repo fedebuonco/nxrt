@@ -14,6 +14,7 @@
 #include <atomic>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "option_rows.h"
 
 extern "C" {
@@ -27,6 +28,7 @@ extern "C" {
 #include "nx_ui.h"
 #include "nxgame.h"
 #include "nxpkg.h"
+#include "nvn/shader_prep.h"
 #include "paths.h"
 #include "platform.h"
 #include "romfs_build.h"
@@ -35,6 +37,35 @@ extern "C" {
 SDL_Window *ui_window(void);
 void renderer_get_scale(float *sx, float *sy);
 double output_scale_dynamic_factor(void);
+}
+
+static std::string prep_romfs(void);  // (the start screen's shader preparation: defined below, used by the setup thread)
+
+// OneDrive: is the data root inside a synced folder (Windows)? Decided once, remembered in the settings; the size is
+// measured in the background.
+static std::atomic<double> g_od_gb{-1};
+static int g_od_state = -1;
+static void *od_size_thread(void *) {
+    double gb = (double)rt_tree_size(rt_data_root()) / 1e9;
+    if (gb < 0.5) gb = 6.7;  // (nothing set up yet: game files and the built code)
+    g_od_gb = gb;
+    return NULL;
+}
+static int od_warn(double *gb) {
+    if (g_od_state < 0) {
+        g_od_state = !g_settings.onedrive_kept && (getenv("NXRT_TEST_ONEDRIVE") || plat_onedrive_synced(rt_data_root()));
+        if (g_od_state) {
+            pthread_t th;
+            if (pthread_create(&th, NULL, od_size_thread, NULL) == 0) pthread_detach(th);
+        }
+    }
+    *gb = g_od_gb;
+    return g_od_state;
+}
+static void od_keep(void) {
+    g_settings.onedrive_kept = true;
+    settings_save();
+    fprintf(stderr, "[launcher] OneDrive warning: kept here\n");
 }
 
 // ------------------------------------------------------------------ pages: Video, Audio
@@ -147,6 +178,26 @@ void tab_mods(float scale);
 static bool tab_mods_page(float scale) { tab_mods(scale); return false; }
 
 // ------------------------------------------------------------------ Controls page: the system language
+// LiveSplit: the run clock's client (runtime/livesplit.c). The settings are the runtime's, so the rows are here
+// (registered on the Controls tab, next to the system language).
+static void livesplit_rows(void) {
+    menu_header("LiveSplit");
+    if (menu_toggle("Send the run clock to LiveSplit", &g_settings.livesplit)) settings_save();
+    if (g_settings.livesplit) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Server");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##lshost", g_settings.livesplit_host, sizeof g_settings.livesplit_host)) settings_save();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Port");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputInt("##lsport", &g_settings.livesplit_port, 0, 0)) settings_save();
+        menu_hint("LiveSplit's Server component (Tools > Start Server), default port 16834.");
+    }
+}
+
 static void language_rows(void) {
     menu_header("System language");
     {
@@ -214,7 +265,7 @@ static std::string check_copied_files(const std::string &root) {
     fclose(f);
     if (n != 8 || memcmp(id, nx_game.info.build_id, 8)) return std::string("Wrong game version (needs v") + nx_game.info.game_version + ")";
     if (file_exists(root + "/romfs.src")) return "";  // (the RomFS read from the game package in place)
-    if (!file_exists(root + "/romfs/" + nx_game.info.romfs_probe) || !file_exists(root + "/romfs.bin")) return "Game data missing";
+    if (!file_exists(root + "/romfs/" + nx_game.info.romfs_probe)) return "Game data missing";
     return "";
 }
 
@@ -378,7 +429,7 @@ static bool package_setup(const std::string &package, const std::string &keys) {
         dest = keep_dir + "/" + nx_game.info.title + " game";
     }
     use_game_dir(dest, true);
-    rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's)
+rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's)
     mkdir(g_root.c_str(), 0755);
     if (!writable(g_root)) { set_failure(FAIL_WRITE); return false; }
     LOG("[launcher] game folder: %s (from the package %s)\n", g_root.c_str(), package.c_str());
@@ -457,7 +508,7 @@ static void *extract_thread(void *) {
                 set_failure(FAIL_NOT_FOUND);
                 goto done;
             }
-            rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
+rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
             mkdir(g_root.c_str(), 0755);
             g_total = 2 * rbytes;
             set_job("Copying the game files...");
@@ -468,22 +519,20 @@ static void *extract_thread(void *) {
             }
             g_phase_base = rbytes, g_done = rbytes;
         } else {
-            rt_remove_game_files(g_root.c_str());  // (what an earlier setup built here: the player's files stay)
+rt_remove_game_files(g_root.c_str());  // (what an earlier setup built here: the player's files stay)
             g_total = rbytes;
         }
-        set_job("Building the game data image...");
-        char why[256] = "";
-        if (!romfs_build((g_root + "/romfs").c_str(), (g_root + "/romfs.bin").c_str(), setup_progress, why, sizeof why)) {
-            fprintf(stderr, "[launcher] romfs image: %s\n", why);
-            set_failure(FAIL_COPY);
-            goto done;
-        }
+        // (no data image: runtime/services/fs.c serves the RomFS from the folder, so the game's data isn't kept twice)
         if (!build_game_code()) goto done;
     }
 check:
     {
         std::string why = check_game_files(g_root);
         if (why.empty()) {
+            if (!prep_romfs().empty()) {
+                set_job("Preparing shaders (Skip to play now)...");
+                nxui_shader_prep_run();
+            }
             set_job("Game files ready.");
             // remembered: the next start uses this game folder ("" = the default, extracted/ in the data root)
             bool chosen = g_root != "extracted";
@@ -617,6 +666,51 @@ static void reveal_folder(const std::string &dir) {
 }
 
 static bool g_files_deleted;  // set here: the start screen goes back to setting the game files up (files_deleted)
+
+// ---- shader preparation (runtime/nvn/shader_prep.h): after setup, and in the background on later starts
+static std::atomic<bool> g_prep_busy{false}, g_prep_started{false};
+static std::atomic<float> g_prep_frac{-1.f};
+static volatile int g_prep_skip;  // (beta_5's shader_prep_run takes a volatile cancel flag)
+static bool prep_enabled(void) {
+    const char *e = getenv("NXRT_SHADER_PREP");  // (0: off; the NXRT_SHADER_PREP=1 test path in objects.c is separate)
+    return !e || atoi(e) != 0;
+}
+static std::string prep_romfs(void) {
+    std::string root = g_root.empty() ? "extracted" : g_root;
+    if (!(root[0] == '/' || (root.size() > 1 && root[1] == ':'))) root = std::string(rt_data_root()) + "/" + root;
+    struct stat sb;
+    return stat((root + "/romfs").c_str(), &sb) == 0 && S_ISDIR(sb.st_mode) ? root + "/romfs" : "";
+}
+static void prep_progress(int done, int total) { g_prep_frac.store(total ? (float)done / (float)total : 0.f); }
+extern "C" void nxui_shader_prep_run(void) {
+    if (!prep_enabled()) return;
+    std::string romfs = prep_romfs();
+    if (romfs.empty()) return;  // (a package: its bytes are read through the runtime, not a folder to scan)
+    g_prep_skip = 0;
+    g_prep_frac.store(0.f);
+    g_prep_busy.store(true);
+    if (!shader_prep_run(romfs.c_str(), prep_progress, &g_prep_skip))
+        LOG("[launcher] shader preparation could not start\n");
+    g_prep_frac.store(-1.f);
+    g_prep_busy.store(false);
+}
+static void *prep_thread(void *) {
+    nxui_shader_prep_run();
+    return NULL;
+}
+extern "C" void nxui_shader_prep_start(void) {
+    if (!prep_enabled() || g_prep_started.exchange(true)) return;
+    g_prep_busy.store(true);  // (before the thread runs: the launcher must see it)
+    pthread_t t;
+    if (pthread_create(&t, NULL, prep_thread, NULL) == 0) pthread_detach(t);
+    else g_prep_started.store(false), g_prep_busy.store(false);
+}
+extern "C" bool nxui_shader_prep_busy(void) { return g_prep_busy.load(); }
+extern "C" float nxui_shader_prep_progress(void) {
+    float p = g_prep_frac.load();
+    return p < 0 ? 0.f : p > 1 ? 1.f : p;
+}
+extern "C" void nxui_shader_prep_skip(void) { g_prep_skip = 1; }
 static std::string g_src_desc, g_setup_desc;  // the Game Files rows' explanations (the game's name and version: nxui_init)
 
 // (defined with the rest of the game-files callbacks, below)
@@ -662,7 +756,10 @@ static void prelaunch_tab(float sc) {
         opt_section("Set up");
         if (busy || (src.empty() && !files_copied())) opt_disable_next();
         if (opt_action("Set up game files", busy ? "Working..." : "", g_setup_desc.c_str(), true) && !busy) files_start();
-        if (busy) ImGui::ProgressBar(files_progress(), ImVec2(-1, 0));
+        if (busy) {
+            ImGui::ProgressBar(files_progress(), ImVec2(-1, 0));
+            if (nxui_shader_prep_busy() && ImGui::Button("Skip preparing shaders")) nxui_shader_prep_skip();
+        }
     } else {
     {   // where they are kept (the Game Files page's "Keep the game")
         std::string where = is_abs(g_root) ? g_root : std::string(rt_data_root()) + "/" + g_root;
@@ -682,7 +779,8 @@ static void prelaunch_tab(float sc) {
 #endif
     ImGui::SameLine();
     static bool shot_del = getenv("NXRT_LAUNCHER_SHOT") && strstr(getenv("NXRT_LAUNCHER_SHOT"), ":askdelete");
-    if (ImGui::Button("Delete game files") || shot_del) ImGui::OpenPopup("##delfiles"), shot_del = false;  // (test: :askdelete)
+    static int del_opened = -1;  // the frame the popup opened (ImGui can activate a default-focused button on that frame)
+    if (ImGui::Button("Delete game files") || shot_del) ImGui::OpenPopup("##delfiles"), del_opened = ImGui::GetFrameCount(), shot_del = false;  // (test: :askdelete)
     if (ImGui::BeginPopupModal("##delfiles", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
         ImGui::PushFont((ImFont *)nxui_start_font(1));
         ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Are you sure?");
@@ -696,7 +794,10 @@ static void prelaunch_tab(float sc) {
             ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "Dev checkout: this is %s", where.c_str());
         }
         ImGui::Spacing();
-        if (ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
+        // a press on the frame the popup opened is not the player's: ImGui focuses this button and can activate it
+        // while the popup is still being opened (it deleted on its own, every start, before this guard)
+        bool armed = del_opened >= 0 && ImGui::GetFrameCount() > del_opened + 1;
+        if (armed && ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
             bool ok = rt_remove_game_files(g_root.c_str());  // (runtime/paths.c: only what the extraction made)
             set_job(ok ? "Game files deleted." : "Could not delete the game files (not in the app's data folder?).", !ok);
             g_files_deleted = true, gb = -1;
@@ -841,9 +942,12 @@ static bool files_busy(void) {
     pthread_mutex_lock(&g_lock);
     bool b = g_busy;
     pthread_mutex_unlock(&g_lock);
-    return b;
+    return b || g_prep_busy.load();  // (the shader preparation runs inside the same "working" state)
 }
-static float files_progress(void) { return extract_progress(); }
+static float files_progress(void) {
+    if (g_prep_busy.load()) return nxui_shader_prep_progress();  // (after the copy/build: its own bar)
+    return extract_progress();
+}
 static bool files_recompiling(void) { return g_build_frac >= 0; }
 static void files_job(char *line, size_t n, char *hint, size_t hn, bool *failed) {
     pthread_mutex_lock(&g_lock);
@@ -949,6 +1053,10 @@ extern "C" void rt_ui_register(void) {
         nxui_add_game_page(&g_game_tabs[i]);
     }
     nxui_add_rows(NXUI_ROWS_CONTROLS, language_rows);
+    nxui_add_rows(NXUI_ROWS_CONTROLS, livesplit_rows);
+    for (int i = 0; i < NX_HOOK(noverlays); i++)
+        if (NX_HOOK(overlays)[i].wanted && NX_HOOK(overlays)[i].draw)
+            nxui_add_overlay(NX_HOOK(overlays)[i].wanted, NX_HOOK(overlays)[i].draw);
     if (NX_HOOK(overlay_wanted) && NX_HOOK(overlay_draw)) nxui_add_overlay(NX_HOOK(overlay_wanted), NX_HOOK(overlay_draw));
     if (NX_HOOK(menu_opened)) nxui_on_menu_open(NX_HOOK(menu_opened));
     nxui_set_quit_to_start(quit_to_start);
@@ -964,6 +1072,7 @@ extern "C" void rt_ui_register(void) {
     g.recompiling = files_recompiling, g.job = files_job, g.set_job = files_set_job, g.pick = files_pick;
     g.picked = files_picked, g.start = files_start, g.size_gb = files_size_gb, g.remove = files_remove;
     g.background = load_background, g.prelaunch = prelaunch_tab, g.files_deleted = files_deleted;
+    g.onedrive_warn = od_warn, g.onedrive_keep = od_keep;
     g.setup_rows = setup_rows;
     g.source_desc = g_src_desc.c_str(), g.setup_desc = g_setup_desc.c_str(), g.ready_note = ready.c_str();
     g.test_fail = set_failure, g.test_extract = files_test_extract;

@@ -45,6 +45,7 @@ typedef struct NxGameInfo {
     const char *release_page;  // release page URL, the tag appended
     const char *headline;      // the start screen's big title ("LAS Recompiled")
     const char *romfs_probe;   // a RomFS path every complete copy of the game files has (setup check)
+    uint32_t romfs_files;      // the RomFS's file count in a complete copy (0: the crash dialog can't tell if files are missing)
     const char *title_movie;   // RomFS path of a movie whose first frame is the start screen's background (NULL: none)
     const char *nickname;      // the console account's nickname the game reads (NULL: "Player")
     const char *menu_name;     // the game's tab in the menu ("Link's Awakening"; NULL: game_name)
@@ -80,6 +81,13 @@ typedef struct NxMenuTab {
     bool (*draw)(float scale);   // render thread, inside the page: true closes the menu
 } NxMenuTab;
 
+// One HUD overlay a game draws while the menu is closed (a timer, a pickup card, a tracker). Drawn in array order,
+// under the menu, above the game image (runtime/ui/menu.mm, MAX_OVERLAYS = 8).
+typedef struct NxOverlay {
+    bool (*wanted)(void);
+    void (*draw)(float w, float h, void *font);  // ImFont *
+} NxOverlay;
+
 // ------------------------------------------------------------------ hooks
 typedef struct NxGameHooks {
     // boot (main thread)
@@ -110,6 +118,10 @@ typedef struct NxGameHooks {
     // files (runtime/services/fs.c)
     const char *(*content_dir)(void);  // the active overlay folder (it may hold romfs/ additions, save/), NULL = none
     bool (*romfs_override)(const char *path, char *host, size_t cap);  // a host file served instead of this RomFS file
+    // The game is about to see `n` bytes of a RomFS file, read at `off` in that file: the hook may rewrite `buf`
+    // (guest memory) in place and returns true when it did (a seed's room files, content patches). Called on every
+    // read of RomFS bytes, so keep it a cheap check first.
+    bool (*romfs_read_filter)(const char *path, uint64_t off, void *buf, size_t n);
     void (*romfs_file_opened)(const char *path);
     void (*save_read)(const char *path, uint64_t addr, int64_t off, int64_t size);     // after a save file read
     void (*save_written)(const char *path, uint64_t addr, int64_t off, int64_t size);  // before a save file write
@@ -127,16 +139,20 @@ typedef struct NxGameHooks {
     uint32_t (*tex_generation)(void);          // changes when restyled textures must be uploaded again
     // restyle mip level lv of texture id in place: its linear data in its own format (rows of blocks, row bytes apart)
     void (*tex_apply)(int id, uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row);
+    NvnTexture *(*tex_replace)(int id);  // a texture to sample in place of this one (a game icon over a map), or NULL
     bool (*scene_fresh_targets)(const char *scene);  // a scene that never draws its surroundings: targets start black
     // graphics: per draw (render thread), in this order. false from draw_shader / draw_textures leaves the draw out.
     bool (*draw_shader)(NxDraw *d);       // the program is known (fs_hash, ubo): before textures are bound
     bool (*draw_textures)(NxDraw *d);     // textures bound (tex_ids filled): last chance to change guest constants
     float (*draw_effect_stretch)(uint64_t fs_hash);  // a full-screen effect's horizontal stretch (1 = none)
     bool (*draw_mirror)(bool composite);  // mirror this draw (mirror mode): composite = the scene into the window
-    void (*draw_tint)(const NxDraw *d, float tint[8]);  // a draw whose shader takes a tint: rgba multiply, rgba add
+    // A draw whose shader takes a per-draw tint, as the shader sees it (ltint[4]): [0] rgb multiply + strength,
+    // [1] rgb add + luma exponent, [2]/[3] a second recolour window. strength ([0].w) < 0 = the HSV recolour
+    // (runtime/nvn/maxwell/translate.c emit_recolour); 0 = untouched.
+    void (*draw_tint)(const NxDraw *d, float ltint[16]);
     // instanced draws (ssbo0: a 4x4 model matrix per instance): instances tinted differently are drawn in runs
     bool (*instances_tinted)(void);                     // any instance may be tinted this frame
-    bool (*instance_tint)(const float *model, float tint[8]);  // true = this instance is tinted (tint filled)
+    bool (*instance_tint)(const float *model, float tint[16]);  // true = this instance is tinted (ltint[0..1] filled, rest 0)
     bool box_depth_draws;  // widescreen: depth-tested draws into the window image are boxed into 16:9 like the UI
     bool late_module_init;  // the modules but sdk start after the SDK's heap is up, main last (default: all but main first)
     // graphics: presenting (render thread)
@@ -149,7 +165,11 @@ typedef struct NxGameHooks {
     const NxMenuTab *menu_pages;
     int menu_npages;
     void (*menu_opened)(void);
-    bool (*overlay_wanted)(void);         // a game overlay is up while the menu is closed
+    // HUD overlays, in this order, while the menu is closed. A port with a single overlay can keep using the pair
+    // below (it is drawn after these).
+    const NxOverlay *overlays;
+    int noverlays;
+    bool (*overlay_wanted)(void);
     void (*overlay_draw)(float w, float h, void *font);  // ImFont *
 
     // start screen (runtime/ui/launcher.mm): the game's boot profiles (e.g. randomizer seeds) next to "Vanilla"

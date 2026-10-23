@@ -21,11 +21,16 @@ typedef KObject KEvent;
 struct KThread {
     KObject obj;  // signaled when the thread exits
     Cpu cpu;
+#ifdef _WIN32
+    uintptr_t host;
+#else
     pthread_t host;
+#endif
     uint64_t entry, tlr, id;
     uint32_t handle;
     int prio, core;
     bool cancel, in_sync_wait;
+    bool is_main;  // the process's main thread (kernel_create_main_thread)
     // wait state (protected by g_klock)
     WaitKind wait_kind;
     uint64_t wait_addr, wait_mutex;
@@ -40,6 +45,10 @@ struct KThread {
     jmp_buf unwind;
     bool started, finished;
     KThread *anext;        // every thread of this boot (g_klock)
+    // (diagnostics: kernel_dump_threads) when the current kernel wait began; the handles of a WaitSynchronization
+    uint64_t wait_since;
+    uint64_t sync_handles;
+    int32_t sync_count;
 };
 
 typedef struct KSharedMem {
@@ -64,5 +73,11 @@ uint32_t kernel_new_handle(KObject *o);
 void kernel_signal(KObject *o);  // caller holds g_klock
 KEvent *kernel_create_event_pair(uint32_t *writable, uint32_t *readable);
 KThread *kernel_current_thread(void);
+uint64_t kernel_current_thread_id(void);  // 0 on a host thread
+// (diagnostics) the "[hang]" dump (kernel.c): every guest thread and what it waits on, the kernel trace
+void kernel_dump_threads(const char *prefix);
+// The renderer's part of the hang dump (runtime/nvn/rqueue.c), called from the hang watch thread every second:
+// check fills why and returns true when it sees a hang (limit_ns: NXRT_HANG_DUMP); state logs its side.
+void kernel_hang_hooks(bool (*check)(uint64_t limit_ns, char *why, size_t n), void (*state)(const char *prefix));
 uint64_t kernel_heap_size(void);  // bytes from HEAP_BASE set by SetHeapSize
 bool kernel_try_dump_threads(void);

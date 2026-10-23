@@ -56,7 +56,7 @@ GEN_SRC  := $(foreach m,$(GAME_MODULES),$(wildcard $(GEN)/$(firstword $(subst :,
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/gamelib_entry.o
 include $(NXRT)/nx.mk  # the layers under the runtime (nx-platform ... nx-ui)
 
-RT_SRC   := $(wildcard $(RT)/*.c) $(wildcard $(RT)/hle/*.c) $(wildcard $(RT)/services/*.c) \
+RT_SRC   := $(wildcard $(RT)/*.c) $(wildcard $(RT)/*.cpp) $(wildcard $(RT)/hle/*.c) $(wildcard $(RT)/services/*.c) \
             $(wildcard $(RT)/nvn/*.c) $(wildcard $(RT)/nvn/maxwell/*.c)
 RT_HDRS  := $(wildcard $(RT)/*.h) $(wildcard $(RT)/nvn/*.h) $(wildcard $(RT)/nvn/maxwell/*.h) \
             $(wildcard $(RT)/nvn/vulkan/*.h) $(NX_HDRS)
@@ -130,8 +130,12 @@ GAMELIB_SRCS := $(NXRT)/tools/gen.py $(NXRT)/tools/lifter.py $(NXRT)/tools/analy
 # Without this, the same content gives another id when nxrt moves, and every player rebuilds for nothing.)
 GAMELIB_FLAGS := $(filter-out -I%,$(GENFLAGS))
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GAMELIB_FLAGS) $(GAME_MODULES)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
+# The library's own id adds the game's main build ID (what `make gen` wrote: $(GEN)/main/main_build_id.txt), so game
+# code made from another game version is never loaded (runtime/gamelib.h gamelib_full_id).
+GAMELIB_BUILD := $(shell cut -c1-16 $(GEN)/main/main_build_id.txt 2>/dev/null)
+GAMELIB_FULL_ID := $(GAMELIB_ID)-$(or $(GAMELIB_BUILD),unknown)
 
-RT_OBJ   := $(patsubst $(RT)/%.c,$(B)/rt/%.o,$(RT_SRC))
+RT_OBJ   := $(patsubst $(RT)/%.c,$(B)/rt/%.o,$(patsubst $(RT)/%.cpp,$(B)/rt/%.o,$(RT_SRC)))
 RTINC    := -I$(RT) -I$(RT)/nvn $(INC_UI)
 # Where a source checkout's app finds the recompiler and the game-code headers (runtime/gamebuild.c, NXRT_DEV): NXRT
 # as this Makefile spelled it, so the same relative path works from the project root and from build/ (the exe's
@@ -150,15 +154,22 @@ $(B)/obj/%.o: $(GEN)/%.c $(RT)/cpu.h
 	@mkdir -p $(dir $@)
 	@$(CC) $(GENFLAGS) -c $< -o $@
 
-$(B)/obj/gamelib_entry.o: $(NXRT)/tools/gamelib_entry.c $(GAMELIB_SRCS) $(NXRT)/nxrt.mk
+$(B)/obj/gamelib_entry.o: $(NXRT)/tools/gamelib_entry.c $(GAMELIB_SRCS) $(NXRT)/nxrt.mk $(wildcard $(GEN)/main/main_build_id.txt)
 	@mkdir -p $(dir $@)
-	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -DNX_MODULES='$(NX_MODULES_X)' -c $< -o $@
+	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_FULL_ID)"' -DNX_MODULES='$(NX_MODULES_X)' -c $< -o $@
 $(B)/rt/gamelib.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk  # (the id comes from there: a rule change is a new id)
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
 # the start screen's build of it (runtime/gamebuild.c) uses the same flags
 $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_CFLAGS='"$(strip $(filter-out -I$(RT),$(GENFLAGS)))"' \
                                 -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"'
+
+# the shader precompiler's list of variant shaders, as a C string (runtime/nvn/shader_prep.c)
+$(B)/inc/shader_variants.inc: $(RT)/nvn/shader_variants.txt
+	@mkdir -p $(dir $@)
+	LC_ALL=C tr -d '\r' < $< | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' > $@; echo '""' >> $@
+$(B)/rt/nvn/shader_prep.o: $(B)/inc/shader_variants.inc
+$(B)/rt/nvn/shader_prep.o: RTFLAGS += -I$(B)/inc
 
 $(B)/rt/%.o: $(RT)/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
@@ -207,7 +218,7 @@ $(EXE): $(NX_OBJ) $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(GAME_OBJ) $(IMGUI_OBJ)
 $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp $^
 	mv -f $@.tmp $@
-	echo $(GAMELIB_ID) > $@.id
+	echo $(GAMELIB_FULL_ID) > $@.id
 
 # Python: tools/venv in the game's folder (macOS, Linux: bin/python, Windows: Scripts/python.exe)
 PY := $(firstword $(wildcard $(GAME_TOOLS)/venv/bin/python) $(wildcard $(GAME_TOOLS)/venv/Scripts/python.exe))

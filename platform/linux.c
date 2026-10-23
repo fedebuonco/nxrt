@@ -1,30 +1,112 @@
 // Linux host layer (runtime/platform.h). x86-64 and aarch64.
 #define _GNU_SOURCE
 #include <SDL3/SDL.h>
-#include "cpu_check.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <execinfo.h>
 #include <fcntl.h>
+#include <linux/userfaultfd.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/ucontext.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "paths.h"
 #include "platform.h"
-#include "nx_app.h"
+#include "posix_log.h"
+
+void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
+
+// ---- page write tracking (plat_written_pages), the counterpart of Windows' MEM_WRITE_WATCH
+// The window is registered with a userfaultfd in asynchronous write-protect mode: the kernel itself lifts a page's
+// protection on its first write (no fault handler thread, no signal) and remembers it was written. PAGEMAP_SCAN then
+// lists the written pages of a range and protects them again in one call, like GetWriteWatch(WRITE_WATCH_FLAG_RESET).
+// Pages are only protected once a query has covered them, so memory nobody asks about never faults. Linux 6.7+;
+// without it (older kernel, userfaultfd unavailable): no tracking, as before. NXRT_WRITE_TRACKING=0: off.
+#ifndef UFFD_USER_MODE_ONLY
+#define UFFD_USER_MODE_ONLY 1
+#endif
+#ifndef UFFD_FEATURE_WP_UNPOPULATED
+#define UFFD_FEATURE_WP_UNPOPULATED (1 << 13)
+#endif
+#ifndef UFFD_FEATURE_WP_ASYNC
+#define UFFD_FEATURE_WP_ASYNC (1 << 15)
+#endif
+// linux/fs.h's PAGEMAP_SCAN ABI, spelled out (the AppImage builds against Ubuntu 22.04's headers, which predate it)
+typedef struct { uint64_t start, end, categories; } WtRegion;
+typedef struct {
+    uint64_t size, flags, start, end, walk_end, vec, vec_len, max_pages;
+    uint64_t category_inverted, category_mask, category_anyof_mask, return_mask;
+} WtScan;
+#define WT_PAGEMAP_SCAN _IOWR('f', 16, WtScan)
+#define WT_PAGE_IS_WRITTEN (1 << 1)
+#define WT_SCAN_WP_MATCHING (1 << 0)    // protect the pages reported again
+#define WT_SCAN_CHECK_WPASYNC (1 << 1)  // fail (instead of reporting nothing) where the range isn't registered
+
+static int g_uffd = -1, g_pagemap = -1;
+static uint64_t g_wt_lo, g_wt_hi, g_wt_page;
+
+static void wt_off(const char *why) {
+    fprintf(stderr, "[plat] no page write tracking: %s (%s)\n", why, strerror(errno));
+    if (g_pagemap >= 0) close(g_pagemap);
+    if (g_uffd >= 0) close(g_uffd);  // (unregisters the window)
+    g_pagemap = g_uffd = -1;
+}
+
+static bool wt_register(uint64_t lo, uint64_t hi) {
+    struct uffdio_register r = {.range = {.start = lo, .len = hi - lo}, .mode = UFFDIO_REGISTER_MODE_WP};
+    return ioctl(g_uffd, UFFDIO_REGISTER, &r) == 0;
+}
+
+static void wt_init(uint64_t lo, uint64_t hi) {
+    const char *e = getenv("NXRT_WRITE_TRACKING");
+    if (e && !atoi(e)) return;
+    // user-mode faults only: allowed without privileges (vm.unprivileged_userfaultfd=0); the asynchronous protection
+    // is lifted by the kernel either way, also for its own writes (read() into guest memory)
+    g_uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    if (g_uffd < 0) { wt_off("userfaultfd"); return; }
+    struct uffdio_api api = {.api = UFFD_API, .features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED};
+    if (ioctl(g_uffd, UFFDIO_API, &api)) { wt_off("asynchronous write protection needs Linux 6.7"); return; }
+    if (!wt_register(lo, hi)) { wt_off("register"); return; }
+    g_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    if (g_pagemap < 0) { wt_off("/proc/self/pagemap"); return; }
+    WtRegion v;
+    uint64_t pg = (uint64_t)sysconf(_SC_PAGESIZE);
+    WtScan s = {.size = sizeof s, .flags = WT_SCAN_CHECK_WPASYNC, .start = lo, .end = lo + pg, .vec = (uintptr_t)&v,
+                .vec_len = 1, .category_mask = WT_PAGE_IS_WRITTEN, .return_mask = WT_PAGE_IS_WRITTEN};
+    if (ioctl(g_pagemap, WT_PAGEMAP_SCAN, &s) < 0) { wt_off("PAGEMAP_SCAN needs Linux 6.7"); return; }
+    g_wt_lo = lo;
+    g_wt_hi = hi;
+    g_wt_page = pg;
+}
+
+// Tracking off after all (the Vulkan backend at boot, before any query protected a page: nothing is protected yet), with
+// the reason logged; NXRT_WRITE_TRACKING=1 keeps it on. Closing the userfaultfd unregisters the window.
+void plat_write_tracking_off(const char *why) {
+    if (g_uffd < 0 && g_pagemap < 0) return;
+    const char *e = getenv("NXRT_WRITE_TRACKING");
+    if (e && atoi(e)) { fprintf(stderr, "[plat] page write tracking kept on (NXRT_WRITE_TRACKING=1): %s\n", why); return; }
+    fprintf(stderr, "[plat] page write tracking off: %s\n", why);
+    if (g_pagemap >= 0) close(g_pagemap);
+    if (g_uffd >= 0) close(g_uffd);
+    g_pagemap = g_uffd = -1;
+}
 
 // ---- guest address space
 // Everything readable/writable from the start, like macOS: the guest maps at 4K granularity, and untouched pages
@@ -34,20 +116,42 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == MAP_FAILED) return false;
     if (p != (void *)(uintptr_t)lo) { munmap(p, hi - lo); return false; }  // (kernels before 4.17: just a hint)
+    wt_init(lo, hi);
     return true;
 }
 
-// Fresh zero pages over the whole window (the old ones are released at once).
+// Fresh zero pages over the whole window (the old ones are released at once). The new mapping is registered again.
 bool plat_reset_guest(uint64_t lo, uint64_t hi) {
-    return mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
-                -1, 0) == (void *)(uintptr_t)lo;
+    if (mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
+             -1, 0) != (void *)(uintptr_t)lo)
+        return false;
+    if (g_uffd >= 0 && !wt_register(lo, hi)) wt_off("register after reset");
+    return true;
 }
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
-int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {  // (no write tracking)
-    (void)addr; (void)size; (void)pages; (void)max; (void)page;
-    return -1;
+int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {
+    if (g_pagemap < 0 || addr < g_wt_lo || addr + size > g_wt_hi || max <= 0) return -1;
+    WtRegion v[64];
+    uint64_t at = addr, end = addr + size;
+    int n = 0;
+    while (at < end && n < max) {
+        WtScan s = {.size = sizeof s, .flags = WT_SCAN_WP_MATCHING | WT_SCAN_CHECK_WPASYNC, .start = at, .end = end,
+                    .vec = (uintptr_t)v, .vec_len = 64, .max_pages = (uint64_t)(max - n),
+                    .category_mask = WT_PAGE_IS_WRITTEN, .return_mask = WT_PAGE_IS_WRITTEN};
+        int r = ioctl(g_pagemap, WT_PAGEMAP_SCAN, &s);  // (stops early when vec or max_pages fills: walk_end)
+        if (r < 0 || s.walk_end <= at) return -1;
+        for (int i = 0; i < r; i++)
+            for (uint64_t p = v[i].start; p < v[i].end && n < max; p += g_wt_page) pages[n++] = p;
+        at = s.walk_end;
+    }
+    if (at < end) {  // (more than fit: protect the rest too, the caller takes all)
+        struct uffdio_writeprotect wp = {.range = {.start = addr, .len = size}, .mode = UFFDIO_WRITEPROTECT_MODE_WP};
+        ioctl(g_uffd, UFFDIO_WRITEPROTECT, &wp);
+    }
+    *page = g_wt_page;
+    return n;
 }
 
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
@@ -62,6 +166,11 @@ uint64_t plat_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+uint64_t plat_thread_cpu_ns(void) {
+    struct timespec ts;
+    return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec : 0;
+}
+
 void plat_sleep_until_ns(uint64_t t) {
     struct timespec ts = {.tv_sec = (time_t)(t / 1000000000u), .tv_nsec = (long)(t % 1000000000u)};
     while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
@@ -69,6 +178,13 @@ void plat_sleep_until_ns(uint64_t t) {
 
 // Real-time scheduling where the user may have it (rtkit / limits.conf), else just a higher priority: keeps the
 // vsync thread on time while the guest threads load every core.
+int plat_cpu_count(void) {
+    cpu_set_t set;
+    return sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : 0;
+}
+
+void plat_thread_guest(int prio) { (void)prio; }  // (the OS's default scheduling serves the game here)
+
 void plat_thread_realtime(uint64_t period_ns) {
     (void)period_ns;
     struct sched_param sp = {.sched_priority = 1};
@@ -77,28 +193,18 @@ void plat_thread_realtime(uint64_t period_ns) {
 }
 
 // ---- process
-// Started from a desktop (the AppImage) there is no terminal: stdout / stderr go to <exe>.log in the data folder
-// (runtime/paths.h; rt_paths_init runs later, so the same rule is applied here). Processes started by this one (the
-// start screen re-executing itself for the game) append to the same log.
+// Started from a desktop (the AppImage) there is no terminal: stdout / stderr go to lasrecomp.log in the data folder
+// (runtime/paths.h; rt_paths_init runs later, so the same rule is applied here), with five backups (posix_log.h).
 static char g_log_path[1024];
 
 static void log_to_file_without_terminal(void) {
     if (isatty(STDERR_FILENO)) return;
     char dir[900];
-    const char *env = getenv("NXRT_DATA_ROOT"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
-    struct stat st;
-    if (env && *env) snprintf(dir, sizeof dir, "%s", env);
-    else if (stat("extracted", &st) == 0 && S_ISDIR(st.st_mode)) return;  // dev mode: wherever stderr goes already
-    else if (xdg && *xdg == '/') snprintf(dir, sizeof dir, "%s/%s", xdg, nx_app.data_dir);
-    else snprintf(dir, sizeof dir, "%s/.local/share/%s", home && *home ? home : "/tmp", nx_app.data_dir);
+    if (!rt_data_root_early(dir, sizeof dir)) return;  // dev mode: wherever stderr goes already
     for (char *c = dir + 1; *c; c++)
         if (*c == '/') { *c = 0; mkdir(dir, 0755); *c = '/'; }
     mkdir(dir, 0755);
-    snprintf(g_log_path, sizeof g_log_path, "%s/%s.log", dir, nx_app.exe);
-    bool append = getenv("NXRT_LOG_APPEND") != NULL;
-    if (!freopen(g_log_path, append ? "a" : "w", stderr)) { g_log_path[0] = 0; return; }
-    dup2(STDERR_FILENO, STDOUT_FILENO);
-    setenv("NXRT_LOG_APPEND", "1", 1);
+    session_log_open(dir, g_log_path, sizeof g_log_path);
 }
 
 #if defined(__x86_64__)
@@ -107,16 +213,76 @@ static void log_to_file_without_terminal(void) {
 static void require_cpu(void) {
     __builtin_cpu_init();
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    fprintf(stderr, "FATAL: %s needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or "
-                    "newer).\n", nx_app.title);
+    fprintf(stderr, "FATAL: LAS Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or "
+                    "newer).\n");
     exit(1);
 }
 #else
 static void require_cpu(void) {}
 #endif
 
+// "key=value" / "key\t: value" lines: the value of the first line starting with key (quotes and spaces trimmed)
+static bool kv_line(const char *line, const char *key, char sep, char *out, size_t n) {
+    size_t k = strlen(key);
+    if (strncmp(line, key, k)) return false;
+    const char *p = line + k;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p++ != sep) return false;
+    while (*p == ' ' || *p == '\t' || *p == '"') p++;
+    snprintf(out, n, "%s", p);
+    for (size_t l = strlen(out); l && (out[l - 1] == '\n' || out[l - 1] == '"' || out[l - 1] == ' '); l--) out[l - 1] = 0;
+    return true;
+}
+
+void plat_system_info(PlatSysInfo *si) {
+    // the OS: /etc/os-release (the host's, also inside an AppImage; SteamOS: NAME="SteamOS", VERSION_ID), the kernel
+    char pretty[96] = "", name[64] = "", ver[48] = "", line[512];
+    FILE *f = fopen("/etc/os-release", "r");
+    if (!f) f = fopen("/usr/lib/os-release", "r");
+    for (; f && fgets(line, sizeof line, f);) {
+        if (!pretty[0]) kv_line(line, "PRETTY_NAME", '=', pretty, sizeof pretty);
+        if (!name[0]) kv_line(line, "NAME", '=', name, sizeof name);
+        if (!ver[0]) kv_line(line, "VERSION_ID", '=', ver, sizeof ver);
+    }
+    if (f) fclose(f);
+    char os[160];
+    if (pretty[0] && (!ver[0] || strstr(pretty, ver))) snprintf(os, sizeof os, "%s", pretty);
+    else if (pretty[0] || name[0]) snprintf(os, sizeof os, "%s %s", pretty[0] ? pretty : name, ver);
+    else snprintf(os, sizeof os, "Linux");
+    struct utsname u;
+    if (uname(&u) == 0) snprintf(si->os, sizeof si->os, "%.80s (%s, kernel %.32s)", os, u.machine, u.release);
+    else snprintf(si->os, sizeof si->os, "%.80s", os);
+    // the CPU: x86 "model name"; ARM boards often have none - the device tree's model then (e.g. "Raspberry Pi 5")
+    // cores: distinct (physical id, core id) pairs; threads: the processors online
+    si->threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    enum { MAXC = 1024 };
+    static int seen[MAXC];
+    int nseen = 0, phys = 0;
+    f = fopen("/proc/cpuinfo", "r");
+    for (char v[128]; f && fgets(line, sizeof line, f);) {
+        if (!si->cpu[0] && kv_line(line, "model name", ':', si->cpu, sizeof si->cpu)) continue;
+        if (kv_line(line, "physical id", ':', v, sizeof v)) phys = atoi(v);
+        else if (kv_line(line, "core id", ':', v, sizeof v)) {
+            int key = phys * 4096 + atoi(v), i = 0;
+            while (i < nseen && seen[i] != key) i++;
+            if (i == nseen && nseen < MAXC) seen[nseen++] = key;
+        }
+    }
+    if (f) fclose(f);
+    si->cores = nseen ? nseen : si->threads;
+    if (!si->cpu[0] && (f = fopen("/proc/device-tree/model", "r"))) {
+        size_t n = fread(si->cpu, 1, sizeof si->cpu - 1, f);
+        si->cpu[n] = 0;  // (NUL-terminated in the file already)
+        fclose(f);
+    }
+    struct sysinfo s;
+    if (sysinfo(&s) == 0) si->ram = (uint64_t)s.totalram * s.mem_unit;
+    si->package = getenv("APPIMAGE") ? "AppImage" : NULL;  // (set by the AppImage runtime; its value is a path: not logged)
+}
+
 void plat_init(void) {
     log_to_file_without_terminal();
+    raise_open_file_limit();
     require_cpu();
 }
 
@@ -154,7 +320,7 @@ void plat_exec(char *const argv[]) {
 // ---- diagnostics
 // Exported symbols only (the Makefile links with -rdynamic); frames in the generated code are left to the caller,
 // which maps them to guest functions (runtime/dispatch.c). Static runtime functions come out as the nearest guest
-// function, so backtrace lines also give the offset in the executable (addr2line -fe <exe> <offset>).
+// function, so backtrace lines also give the offset in the executable (addr2line -fe lasrecomp <offset>).
 const char *plat_symbol(uint64_t pc, uint64_t *offset) {
     Dl_info di = {0};
     if (!dladdr((void *)(uintptr_t)pc, &di) || !di.dli_sname) return NULL;
@@ -163,14 +329,36 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
 }
 
 // Fatal error without a terminal: say so in a message box rather than vanishing (the details are in the log).
+// (what happened in plain words: runtime/crash_explain.c)
 void plat_fatal_notice(void) {
+    char text[1600];
+    rt_crash_explain(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[1200];
-    snprintf(text, sizeof text, "%s stopped because of an error.\n\nDetails: %s", nx_app.title, g_log_path);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, nx_app.title, text, NULL);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
 }
 
+static void *notice_thread(void *text) {
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "LAS Recomp", text, NULL);
+    free(text);
+    return NULL;
+}
+void plat_notice(const char *text) {
+    if (!g_log_path[0]) return;
+    pthread_t t;
+    char *copy = strdup(text);
+    if (copy && !pthread_create(&t, NULL, notice_thread, copy)) pthread_detach(t);
+    else free(copy);
+}
+
+bool plat_module_name(uint64_t pc, char *out, size_t n) {
+    Dl_info di = {0};
+    if (!dladdr((void *)(uintptr_t)pc, &di) || !di.dli_fname) return false;
+    snprintf(out, n, "%s", di.dli_fname);
+    return true;
+}
+
+const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
 
 void plat_print_backtrace(void) {
     void *bt[64];
@@ -183,11 +371,11 @@ void plat_print_backtrace(void) {
         if (!dladdr(bt[i], &di)) di.dli_fname = NULL;
         bool ours = di.dli_fbase && di.dli_fbase == self.dli_fbase;
         const char *s = plat_symbol(pc, &off);
-        if (!s && ours) s = plat_host_symbol(pc, &off);
+        if (!s && ours) s = rt_host_fn_name(pc, &off);
         const char *mod = di.dli_fname ? (strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname) : "?";
         uint64_t moff = pc - (uint64_t)(uintptr_t)di.dli_fbase;
-        if (s && ours) fprintf(stderr, "  #%-2d %016llx %s+%llx (%s+%llx)\n", i, (unsigned long long)pc, s,
-                               (unsigned long long)off, nx_app.exe, (unsigned long long)moff);
+        if (s && ours) fprintf(stderr, "  #%-2d %016llx %s+%llx (lasrecomp+%llx)\n", i, (unsigned long long)pc, s,
+                               (unsigned long long)off, (unsigned long long)moff);
         else if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx (%s)\n", i, (unsigned long long)pc, s, (unsigned long long)off, mod);
         else fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, mod, (unsigned long long)moff);
     }
@@ -257,20 +445,16 @@ int plat_proc_wait(PlatProc p, bool block) {
     pid_t r = waitpid((pid_t)p, &st, block ? 0 : WNOHANG);
     if (r == 0) return -1;
     if (r < 0) return 255;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? PLAT_PROC_SIGNALED + WTERMSIG(st) : 255;
 }
 
 static int rm_entry(const char *path, const struct stat *sb, int flag, struct FTW *ftw) {
     (void)sb, (void)flag, (void)ftw;
-    return remove(path);
+    return remove(path) == 0 || errno == ENOENT ? 0 : -1;  // (gone already: e.g. a ._ file macOS removed with its folder on exFAT)
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
+bool plat_onedrive_synced(const char *dir) { (void)dir; return false; }
 
 // End the process at once, skipping the library teardown: as on Windows, the GPU driver's threads crashed in exit()
 // while the game's threads still submitted work.
 void plat_terminate(void) { _exit(0); }
-
-// (phones only: runtime/platform/android.c)
-void plat_thread_core(int role) { (void)role; }
-void plat_frame_work(uint64_t busy_ns, uint64_t target_ns) { (void)busy_ns, (void)target_ns; }
-void plat_thread_name(const char *name) { pthread_setname_np(pthread_self(), name); }

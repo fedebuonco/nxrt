@@ -83,7 +83,10 @@ static void self_controller(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 0: LOG("[am] application requested exit\n"); exit(0);
-    case 9: case 62: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    // GetLibraryAppletLaunchableEvent: signaled, as the applet can always be launched here (unsignaled, the game
+    // waited on it forever before opening a library applet - Sky's "attach the straps" guide - and never drew again).
+    case 9: resp->copy_handles[resp->ncopy++] = new_signaled_event(); break;
+    case 62: resp->copy_handles[resp->ncopy++] = new_event(); break;
     case 40: OUT(uint64_t, 0) = 1; resp_size(resp, 8); break;  // CreateManagedDisplayLayer
     case 69: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
     default: UNHANDLED("ISelfController");
@@ -103,6 +106,59 @@ static void generic_ok(Service *s, IpcReq *req, IpcResp *resp) {
     resp_size(resp, 0x10);
 }
 
+// ------------------------------------------------------------------ library applets
+// On the console a library applet is a process of its own (the "attach the straps" guide, the controller-support
+// dialog, the software keyboard). There is none here: the accessor says it started and completed at once, so a game
+// that opens one before its first scene (Sky's strap guide) carries on instead of waiting, or asserting that the
+// creation returned no accessor.
+static void library_applet_accessor(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    LOG("[am] ILibraryAppletAccessor cmd %u\n", req->cmd);
+    switch (req->cmd) {
+    case 0:  // GetAppletStateChangedEvent
+        resp->copy_handles[resp->ncopy++] = new_signaled_event();
+        break;
+    case 1:  // IsCompleted
+        OUT(uint8_t, 0) = 1;
+        resp_size(resp, 1);
+        break;
+    case 10:  // GetResult
+        OUT(uint32_t, 0) = 0;
+        resp_size(resp, 4);
+        break;
+    case 20: case 21: case 22:  // Start / RequestExit / Terminate
+        break;
+    default:
+        LOG("[am] ILibraryAppletAccessor cmd %u (ok)\n", req->cmd);
+        resp_size(resp, 0x10);
+    }
+}
+
+static Service *new_am_storage(const void *data, uint64_t size);  // (below: IStorage)
+
+static void library_applet_creator(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    switch (req->cmd) {
+    case 0:  // CreateLibraryApplet(appletId, mode): an accessor that is already done
+        LOG("[am] CreateLibraryApplet id %u mode %u\n", (unsigned)IN(uint32_t, 0), (unsigned)IN(uint32_t, 4));
+        ipc_return_object(resp, service_new("ILibraryAppletAccessor", library_applet_accessor, NULL));
+        break;
+    case 1:  // CreateStorage(size)
+        LOG("[am] CreateStorage %llu bytes\n", (unsigned long long)IN(uint64_t, 0));
+        ipc_return_object(resp, new_am_storage(NULL, IN(uint64_t, 0)));
+        break;
+    case 10:  // CreateTransferMemoryStorage(handle, size): the applet writes through the storage, not the handle
+    case 11:  // CreateHandleStorage(handle, size)
+        LOG("[am] Create%sStorage %llu bytes\n", req->cmd == 10 ? "TransferMemory" : "Handle",
+            (unsigned long long)IN(uint64_t, 8));
+        ipc_return_object(resp, new_am_storage(NULL, IN(uint64_t, 8)));
+        break;
+    default:
+        LOG("[am] ILibraryAppletCreator cmd %u (ok)\n", req->cmd);
+        resp_size(resp, 0x10);
+    }
+}
+
 // ------------------------------------------------------------------ IStorage / IStorageAccessor
 typedef struct { uint8_t *data; uint64_t size; } AmStorage;
 
@@ -114,16 +170,19 @@ static void storage_accessor(Service *s, IpcReq *req, IpcResp *resp) {
         int64_t off = IN(int64_t, 0);
         IpcBuf *a = in_buf(req, 0);
         uint64_t n = a->size;
-        if ((uint64_t)off + n > st->size) n = st->size - (uint64_t)off;
-        memcpy(st->data + off, (void *)(uintptr_t)a->addr, n);
+        // (an offset past the end must write nothing: `size - off` would underflow and memcpy into the heap)
+        if (off < 0 || (uint64_t)off >= st->size) n = 0;
+        else if ((uint64_t)off + n > st->size) n = st->size - (uint64_t)off;
+        if (n) memcpy(st->data + off, (void *)(uintptr_t)a->addr, n);
         break;
     }
     case 11: {  // Read(offset, B)
         int64_t off = IN(int64_t, 0);
         IpcBuf *b = out_buf(req, 0);
         uint64_t n = b->size;
-        if ((uint64_t)off + n > st->size) n = st->size - (uint64_t)off;
-        memcpy((void *)(uintptr_t)b->addr, st->data + off, n);
+        if (off < 0 || (uint64_t)off >= st->size) n = 0;
+        else if ((uint64_t)off + n > st->size) n = st->size - (uint64_t)off;
+        if (n) memcpy((void *)(uintptr_t)b->addr, st->data + off, n);
         break;
     }
     default: LOG("[am] IStorageAccessor cmd %u (ok)\n", req->cmd);
@@ -137,9 +196,10 @@ static void am_storage(Service *s, IpcReq *req, IpcResp *resp) {
 
 static Service *new_am_storage(const void *data, uint64_t size) {
     AmStorage *st = calloc(1, sizeof *st);
-    st->data = calloc(1, size);
     st->size = size;
-    if (data) memcpy(st->data, data, size);
+    st->data = size ? calloc(1, size) : NULL;
+    if (!st->data) st->size = 0;  // (no memory: a storage that refuses writes, not a wild pointer)
+    else if (data) memcpy(st->data, data, size);
     return service_new("IStorage", am_storage, st);
 }
 
@@ -184,7 +244,7 @@ static void application_proxy(Service *s, IpcReq *req, IpcResp *resp) {
         {3, "IAudioController", generic_ok},
         {4, "IDisplayController", generic_ok},
         {10, "IProcessWindingController", generic_ok},
-        {11, "ILibraryAppletCreator", generic_ok},
+        {11, "ILibraryAppletCreator", library_applet_creator},
         {20, "IApplicationFunctions", application_functions},
         {1000, "IDebugFunctions", generic_ok},
     };

@@ -30,10 +30,9 @@ typedef struct NvnTexture {
     NvnPool *pool;
     uint64_t pool_offset;
     void *backend;  // renderer-side texture
-    void *pending_rgba;
-    uint32_t pending_w, pending_h, pending_stride;
-    bool video_uploaded;
     uint64_t debug_id;
+    uint32_t pool_refs;  // texture pool entries that name it (cleared when it is finalized: runtime/nvn/objects.c)
+    bool format_views;   // named through a view in a format the backend can only give with a flag (Metal: PixelFormatView)
     char label[64];
 } NvnTexture;
 
@@ -51,11 +50,22 @@ typedef struct {
     uint8_t swizzle[4];
 } NvnTextureView;  // our layout of the guest NVNtextureView (0x28 bytes)
 
+// A view naming a texture (pool entry, render target, clear, copy): one in another format is told to the backend before
+// the texture is used through it.
+void backend_texture_view_format(NvnTexture *tex, uint32_t format);  // (runtime/nvn/metal.m, vulkan/textures.c)
+static inline void nvn_texture_note_view(NvnTexture *t, const NvnTextureView *v) {
+    if (t && v && (v->setmask & 4) && v->format != t->format) backend_texture_view_format(t, v->format);
+}
+
 typedef struct {
     NvnTexture *tex;
     NvnTextureView view;
     bool has_view;
+    uint32_t dead_format;  // the texture registered here was finalized (NVN format + 1; 0 = no): tex is NULL
 } NvnTexEntry;
+
+// A draw named a texture pool slot whose texture was finalized (runtime/nvn/objects.c): logged, a few times
+void nvn_dead_slot_sampled(const NvnTexEntry *e, uint32_t slot);
 
 typedef struct NvnDescPool {
     uint64_t addr;
@@ -88,12 +98,12 @@ typedef struct NvnSync {
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
 } NvnSync;
 
-// ---- command recording (stored in guest command memory)
+// ---- command recording (the records live in a host shadow of the game's command memory: cmdbuf.c)
 typedef struct {
     uint64_t mem;    // current command memory chunk (guest address)
     uint64_t size;   // chunk size (guest bytes)
-    uint64_t host;   // the chunk's shadow, where the records go (cmdbuf.c: CMD_SHADOW times the guest size)
-    uint64_t hcap;   // shadow size
+    uint64_t host;   // the chunk's shadow, where the records go
+    uint64_t hcap;   // the shadow's size (size * CMD_SHADOW)
     uint64_t used;   // bytes used in the shadow
     uint64_t start;  // first record of the list being recorded
     uint64_t callback, callback_data;
@@ -125,7 +135,7 @@ enum {
     CMD_COPY_TEXTURE_TO_TEXTURE, CMD_DOWNSAMPLE, CMD_UPDATE_UNIFORM_BUFFER, CMD_FENCE_SYNC, CMD_WAIT_SYNC,
     CMD_BARRIER, CMD_SIGNAL_EVENT, CMD_WAIT_EVENT, CMD_REPORT_COUNTER, CMD_DISCARD_COLOR,
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
-    CMD_SET_DEPTH_CLAMP, CMD_COUNT
+    CMD_COUNT
 };
 
 

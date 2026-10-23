@@ -17,12 +17,8 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "../hle.h"
-#include "../nxgame.h"
-#include "menu.h"
-#include "nx_input.h"
 #include "../settings.h"
 
 #define MOVIE_EOS 4u
@@ -119,7 +115,6 @@ HLE_FUNC("_ZN5movie6BufferC1ERKS0_", buf_copy) { *BUF(c->x[0]) = *BUF(c->x[1]); 
 HLE_FUNC("_ZN5movie6BufferaSERKS0_", buf_assign) { *BUF(c->x[0]) = *BUF(c->x[1]); }
 HLE_FUNC("_ZN5movie6BufferD1Ev", buf_dtor) { (void)c; }
 HLE_FUNC("_ZNK5movie6Buffer4BaseEv", buf_base) { c->x[0] = BUF(c->x[0])->base; }
-HLE_FUNC("_ZNK5movie6Buffer4DataEv", buf_data) { c->x[0] = BUF(c->x[0])->base + (uint32_t)BUF(c->x[0])->offset; }
 HLE_FUNC("_ZNK5movie6Buffer4SizeEv", buf_size) { c->x[0] = (uint32_t)BUF(c->x[0])->size; }
 HLE_FUNC("_ZNK5movie6Buffer6OffsetEv", buf_offset) { c->x[0] = (uint32_t)BUF(c->x[0])->offset; }
 HLE_FUNC("_ZNK5movie6Buffer8CapacityEv", buf_capacity) { c->x[0] = BUF(c->x[0])->capacity; }
@@ -136,7 +131,6 @@ HLE_FUNC("_ZNK5movie6Buffer13GetUint32DataEv", buf_get_u32) { c->x[0] = BUF(c->x
 HLE_FUNC("_ZN5movie6Buffer12SetInt32DataEi", buf_set_i32) { BUF(c->x[0])->i32 = (int32_t)c->x[1]; }
 
 HLE_FUNC("_ZN5movie12SetAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", movie_set_allocator) { (void)c; }
-HLE_FUNC("_ZN5movie11SetCoreMaskEm", movie_set_core_mask) { (void)c; }
 HLE_FUNC("_ZN5movie17SetThreadPriorityEi", movie_set_thread_priority) { (void)c; }
 HLE_FUNC("_ZN5movie17GetThreadPriorityEv", movie_get_thread_priority) { c->x[0] = 16; }
 
@@ -170,9 +164,8 @@ static void ok(Cpu *c) { c->x[0] = 0; }
 // ------------------------------------------------------------------ Extractor
 typedef struct {
     AVFormatContext *fmt;
-    AVIOContext *avio;
-    int rom_fd;
-    uint64_t rom_off, rom_size, rom_pos;
+    AVIOContext *io;       // the RomFS image as FFmpeg's input (a folder, romfs.bin or the game package)
+    uint64_t io_off, io_size, io_pos;
     int map[16], ntracks;  // exposed track -> stream
     uint64_t selected;  // bitmask of streams
     AVPacket *pkt;
@@ -180,45 +173,18 @@ typedef struct {
     bool skippable;  // the launch opening (forced on the first launch, no save yet): A / B / + ends it
 } Extractor;
 
-extern bool romfs_find_file(const char *rel, int *out_fd, uint64_t *out_off, uint64_t *out_size);
-extern ssize_t romfs_pread(int fd, void *dst, size_t n, off_t off);
-
-static int rom_avio_read(void *opaque, uint8_t *buf, int buf_size) {
-    Extractor *e = opaque;
-    if (e->rom_pos >= e->rom_size) return AVERROR_EOF;
-    uint64_t rem = e->rom_size - e->rom_pos;
-    if ((uint64_t)buf_size > rem) buf_size = (int)rem;
-    ssize_t r = romfs_pread(e->rom_fd, buf, (size_t)buf_size, (off_t)(e->rom_off + e->rom_pos));
-    if (r <= 0) return AVERROR_EOF;
-    e->rom_pos += (uint64_t)r;
-    return (int)r;
-}
-
-static int64_t rom_avio_seek(void *opaque, int64_t offset, int whence) {
-    Extractor *e = opaque;
-    if (whence == AVSEEK_SIZE) return (int64_t)e->rom_size;
-    int64_t target = 0;
-    int w = whence & ~AVSEEK_FORCE;
-    if (w == SEEK_SET) target = offset;
-    else if (w == SEEK_CUR) target = (int64_t)e->rom_pos + offset;
-    else if (w == SEEK_END) target = (int64_t)e->rom_size + offset;
-    else return -1;
-    if (target < 0) target = 0;
-    if ((uint64_t)target > e->rom_size) target = (int64_t)e->rom_size;
-    e->rom_pos = (uint64_t)target;
-    return target;
-}
-
 static bool g_skip_held;           // ex_fill: A / B held at the last look
 static double g_skip_pressed_at;    // when they were pressed (0 = not yet)
 
 static void ex_fill(Extractor *e) {
+    if (!e->fmt || !e->pkt) { e->eof = true; return; }
     if (e->skippable && !e->eof) {
         // the game skips the opening with Plus (once a save exists); A and B do too (we press Plus for it)
+        extern uint64_t input_buttons_now(void);
         extern volatile int g_inject_plus;
         bool held = g_skip_held;
         double pressed_at = g_skip_pressed_at;
-        uint64_t b = input_buttons_now(menu_input_captured());
+        uint64_t b = input_buttons_now();
         bool now = (b & ((1u << 0) | (1u << 1) | (1u << 10))) != 0;  // A / B / Plus
         if (now && !held) {
             LOG("[movie] opening: A/B/+ -> Plus (skip)\n");
@@ -247,49 +213,89 @@ static void ex_fill(Extractor *e) {
     }
 }
 
-static void ex_open_path(Cpu *c, const char *path) {
+// ---- reading the movie where it is
+// A package-served RomFS (EoW, Sky) has no romfs/ folder on disk, so "rom:/..." can't be handed to FFmpeg as a path:
+// the image is read through the runtime's RomFS reader (folder, romfs.bin and package all serve it). Without this,
+// every movie open failed and a game that plays one before its first scene (EoW's title) stayed black.
+enum { MOVIE_IO_BUF = 1 << 16 };
+static int romio_read(void *opaque, uint8_t *buf, int n) {
+    Extractor *e = opaque;
+    if (e->io_pos >= e->io_size) return AVERROR_EOF;
+    uint64_t left = e->io_size - e->io_pos;
+    if ((uint64_t)n > left) n = (int)left;
+    ssize_t r = romfs_image_pread(buf, (size_t)n, e->io_off + e->io_pos);
+    if (r <= 0) return AVERROR(EIO);
+    e->io_pos += (uint64_t)r;
+    return (int)r;
+}
+static int64_t romio_seek(void *opaque, int64_t off, int whence) {
+    Extractor *e = opaque;
+    if (whence == AVSEEK_SIZE) return (int64_t)e->io_size;
+    int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? (int64_t)e->io_pos : whence == SEEK_END ? (int64_t)e->io_size : -1;
+    if (base < 0) return -1;
+    int64_t p = base + off;
+    if (p < 0 || (uint64_t)p > e->io_size) return -1;
+    e->io_pos = (uint64_t)p;
+    return p;
+}
+static void movie_close(Extractor *e) {
+    if (e->fmt) avformat_close_input(&e->fmt);
+    if (e->io) {  // (AVFMT_FLAG_CUSTOM_IO: avformat doesn't free it)
+        av_freep(&e->io->buffer);
+        avio_context_free(&e->io);
+    }
+}
+static bool movie_open(Extractor *e, const char *host, const char *rel) {
+    if (avformat_open_input(&e->fmt, host, NULL, NULL) >= 0) return true;
+    movie_close(e);
+    uint64_t off, size;
+    if (!romfs_file_by_path(rel, &off, &size) || !size) return false;
+    e->io_off = off, e->io_size = size, e->io_pos = 0;
+    uint8_t *buf = av_malloc(MOVIE_IO_BUF);
+    e->io = buf ? avio_alloc_context(buf, MOVIE_IO_BUF, 0, e, romio_read, NULL, romio_seek) : NULL;
+    if (!e->io) { av_free(buf); return false; }
+    e->fmt = avformat_alloc_context();
+    if (!e->fmt) return false;
+    e->fmt->pb = e->io;
+    e->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+    if (avformat_open_input(&e->fmt, NULL, NULL, NULL) < 0) return false;
+    LOG("[movie] %s read from the RomFS image (%llu KB)\n", rel, (unsigned long long)(size >> 10));
+    return true;
+}
+
+static void ex_set_data_source(Cpu *c) {
     Extractor *e = self_state(c);
+    const char *path = (const char *)(uintptr_t)c->x[2];
+    // Replacing a source also drops its last packet and track selection, including after a failed open.
+    if (e->pkt) av_packet_free(&e->pkt);
+    movie_close(e);
+    e->selected = 0;
+    e->ntracks = 0;
+    e->have_pkt = e->eof = e->skippable = false;
+    if (!path || !*path) { c->x[0] = 1; return; }
     // "rom:/region_common/movie/title.webm" -> extracted/romfs/region_common/movie/title.webm
     const char *rel = path && strstr(path, ":/") ? strstr(path, ":/") + 2 : path;
-    while (rel && *rel == '/') rel++;
     char host[1024];
     snprintf(host, sizeof host, "%s/%s", g_romfs_dir, rel ? rel : "");
     LOG("[movie] open %s -> %s\n", path ? path : "(null)", host);
-    if (avformat_open_input(&e->fmt, host, NULL, NULL) < 0) {
-        if (romfs_find_file(rel, &e->rom_fd, &e->rom_off, &e->rom_size)) {
-            e->rom_pos = 0;
-            uint8_t *iobuf = av_malloc(65536);
-            e->avio = avio_alloc_context(iobuf, 65536, 0, e, rom_avio_read, NULL, rom_avio_seek);
-            e->fmt = avformat_alloc_context();
-            e->fmt->pb = e->avio;
-            LOG("[movie] streaming %s from romfs.bin (off=%#llx size=%llu)\n", rel,
-                (unsigned long long)e->rom_off, (unsigned long long)e->rom_size);
-        }
-        if (!e->fmt || avformat_open_input(&e->fmt, NULL, NULL, NULL) < 0) {
-            LOG("[movie] cannot open %s\n", host);
-            c->x[0] = 1;
-            return;
-        }
-    }
-    if (avformat_find_stream_info(e->fmt, NULL) < 0) {
-        LOG("[movie] cannot find stream info for %s\n", host);
+    if (!movie_open(e, host, rel) || avformat_find_stream_info(e->fmt, NULL) < 0) {
+        LOG("[movie] cannot open %s\n", host);
+        movie_close(e);
         c->x[0] = 1;
         return;
     }
     e->pkt = av_packet_alloc();
-    e->ntracks = 0;
+    if (!e->pkt) { movie_close(e); c->x[0] = 1; return; }
     // the opening at launch can always be skipped, vanilla and randomizer (with no save yet the game forces it)
-    e->skippable = rel && NX_HOOK(movie_skippable) && NX_HOOK(movie_skippable)(rel);  // (the game's: A / B skip it)
+    e->skippable = rel && strstr(rel, "movie/opening.webm");
     if (e->skippable) g_skip_pressed_at = 0;  // (a press that ended the title's attract replay isn't for this one)
+    // (LAS's run timer hooks here; a game gets the same through its own hooks once the timer feature is ported)
     for (unsigned i = 0; i < e->fmt->nb_streams && e->ntracks < 16; i++)
         if (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ||
             (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && g_settings.movie_audio && !getenv("NXRT_NO_MOVIE_AUDIO")))
             e->map[e->ntracks++] = (int)i;
     c->x[0] = 0;
 }
-
-static void ex_set_data_source_uri(Cpu *c) { ex_open_path(c, (const char *)(uintptr_t)c->x[1]); }
-static void ex_set_data_source(Cpu *c) { ex_open_path(c, (const char *)(uintptr_t)c->x[2]); }
 
 static void ex_get_track_count(Cpu *c) {
     Extractor *e = self_state(c);
@@ -401,8 +407,8 @@ static void movie_track(int kind, void *p, bool add) {
 
 static void ex_dtor(Cpu *c) {
     Extractor *e = self_state(c);
-    if (e && e->fmt) avformat_close_input(&e->fmt);
-    if (e && e->avio) { av_freep(&e->avio->buffer); avio_context_free(&e->avio); }
+    if (e && e->pkt) av_packet_free(&e->pkt);
+    if (e) movie_close(e);
     if (e) movie_track(0, e, false);
     c->x[0] = 0;
 }
@@ -425,13 +431,12 @@ EX_LOCKED(ex_read)
 EX_LOCKED(ex_advance)
 EX_LOCKED(ex_get_sample_time)
 EX_LOCKED(ex_cached_duration)
-EX_LOCKED(ex_set_data_source_uri)
 EX_LOCKED(ex_set_data_source)
 
 HLE_FUNC("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", movie_extractor_ctor) {
     uint64_t vt = g_ex_vt;
     if (!vt) {
-        HostFn f[16] = {ex_dtor_l, ex_dtor_l, ex_set_data_source_uri_l, movie_log_slot, ex_get_track_count_l,
+        HostFn f[16] = {ex_dtor_l, ex_dtor_l, movie_log_slot, movie_log_slot, ex_get_track_count_l,
                         ex_get_track_config_l, ex_select_track_l, movie_log_slot, ex_seek_l, ex_get_sample_track_l,
                         ex_read_l, ex_advance_l, ex_get_sample_time_l, movie_log_slot, ex_cached_duration_l,
                         ex_set_data_source_l};
@@ -515,6 +520,7 @@ static void dec_signal(Cpu *c, Decoder *d, int i) {
 
 typedef struct NvnTexture NvnTexture;
 void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride);
+bool renderer_upload_nv12(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off);
 
 static void dec_configure(Cpu *c) {
     Decoder *d = self_state(c);
@@ -573,7 +579,6 @@ static void dec_start(Cpu *c) {
     pthread_mutex_lock(&d->lock);
     d->stopped = false;
     pthread_mutex_unlock(&d->lock);
-    LOG("[movie] decoder %s started\n", d->video ? "video" : "audio");
     dec_signal(c, d, 0);  // all input buffers are free
     c->x[0] = 0;
 }
@@ -602,24 +607,18 @@ static void dec_stop(Cpu *c) {
 }
 
 static uint64_t n_acq_in, n_send, n_acq_out, n_get_out, n_rel_out, n_frames;
-static uint64_t v_acq_in, v_send, v_acq_out, v_get_out, v_frames;
 static void movie_stats(void) {
-    static int log_on = -1;
-    if (log_on < 0) log_on = getenv("NXRT_MOVIE_LOG") != NULL;
-    if (!log_on) return;
     static uint64_t last;
     uint64_t now = n_acq_in + n_send + n_acq_out + n_rel_out;
     if (now / 200 != last / 200)
-        LOG("[movie] tot(in=%llu send=%llu frm=%llu out=%llu get=%llu) vid(in=%llu send=%llu frm=%llu out=%llu get=%llu)\n",
-            n_acq_in, n_send, n_frames, n_acq_out, n_get_out,
-            v_acq_in, v_send, v_frames, v_acq_out, v_get_out);
+        LOG("[movie] acq_in %llu send %llu frames %llu acq_out %llu get_out %llu rel_out %llu\n", n_acq_in, n_send,
+            n_frames, n_acq_out, n_get_out, n_rel_out);
     last = now;
 }
 
 static void dec_acquire_input(Cpu *c) {
     Decoder *d = self_state(c);
     n_acq_in++;
-    if (d->video) v_acq_in++;
     movie_stats();
     pthread_mutex_lock(&d->lock);
     int out_free = 0;
@@ -710,7 +709,6 @@ static bool flush_pending(Decoder *d) {
 static void dec_send_input(Cpu *c) {
     Decoder *d = self_state(c);
     n_send++;
-    if (d->video) v_send++;
     int idx = (int)c->x[1], off = (int)c->x[2], size = (int)c->x[3];
     int64_t time = (int64_t)c->x[4];
     uint32_t flags = (uint32_t)c->x[5];
@@ -736,7 +734,6 @@ static void dec_send_input(Cpu *c) {
             }
         }
         n_frames++;
-        if (d->video) v_frames++;
         produced = true;
     }
     if (flags & MOVIE_EOS) { d->eos_pending = true; d->eos_time = time; }
@@ -751,7 +748,6 @@ static void dec_send_input(Cpu *c) {
 static void dec_acquire_output(Cpu *c) {
     Decoder *d = self_state(c);
     n_acq_out++;
-    if (d->video) v_acq_out++;
     pthread_mutex_lock(&d->lock);
     if (!d->nready) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }
     OutReady r = d->ready[0];
@@ -768,14 +764,21 @@ static void dec_acquire_output(Cpu *c) {
 static void dec_get_output_buffer(Cpu *c) {
     Decoder *d = self_state(c);
     n_get_out++;
-    if (d->video) v_get_out++;
     int i = (int)c->x[1];
     MBuffer *b = BUF(c->x[2]);
     if (i < 0 || i >= NOUT) { c->x[0] = 1; return; }
-    if (d->video && b->base) {
+    if (d->video && b->base && b->capacity == 8) {
         // texture output mode: the buffer points at the game's NVNtexture; write RGBA into it
         NvnTexture *t = *(NvnTexture **)(uintptr_t)b->base;
         int w = d->width, h = d->height;
+        // the GPU converts it (renderer_upload_nv12); NXRT_MOVIE_CPU_CONVERT=1: swscale + an RGBA upload, as before
+        static int gpu = -1;
+        if (gpu < 0) gpu = !getenv("NXRT_MOVIE_CPU_CONVERT");
+        if (gpu && renderer_upload_nv12(t, d->out_mem[i], (uint32_t)w, (uint32_t)h, (uint32_t)d->stride,
+                                        (uint32_t)(d->stride * ((h + 15) & ~15)))) {
+            c->x[0] = 0;
+            return;
+        }
         if (!d->sws)
             d->sws = sws_getContext(w, h, AV_PIX_FMT_NV12, w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
         if (!d->rgba) d->rgba = malloc((size_t)w * h * 4);
@@ -785,14 +788,6 @@ static void dec_get_output_buffer(Cpu *c) {
         int dst_stride[1] = {w * 4};
         sws_scale(d->sws, src, src_stride, 0, h, dst, dst_stride);
         renderer_upload_rgba(t, d->rgba, (uint32_t)w, (uint32_t)h, (uint32_t)w * 4);
-        c->x[0] = 0;
-        return;
-    }
-    if (!d->video && b->base && b->capacity >= d->out_size[i]) {
-        if (d->out_size[i] > 0)
-            memcpy((void *)(uintptr_t)b->base, d->out_mem[i], d->out_size[i]);
-        b->offset = 0;
-        b->size = (int32_t)d->out_size[i];
         c->x[0] = 0;
         return;
     }
@@ -816,20 +811,26 @@ static void dec_release_output(Cpu *c) {
     c->x[0] = 0;
 }
 
-static void dec_dtor(Cpu *c) {
-    Decoder *d = self_state(c);
-    if (!d) { c->x[0] = 0; return; }
-    dec_stop(c);
-    pthread_mutex_lock(&d->lock);
+// Both destruction and a reboot release the host allocations. The HLE input/output buffers are separate:
+// destruction returns them to the pool; a reboot discards the whole HLE heap after guest threads have stopped.
+static void dec_free(Decoder *d) {
     if (d->ctx) avcodec_free_context(&d->ctx);
-    for (int i = 0; i < NIN; i++) buf_put(d->in_mem[i], d->in_cap), d->in_mem[i] = NULL;
-    for (int i = 0; i < NOUT; i++) buf_put(d->out_mem[i], d->out_cap), d->out_mem[i] = NULL;
     for (int i = 0; i < d->npending; i++) av_frame_free(&d->pending[i]);
     d->npending = d->nready = 0;
     av_frame_free(&d->frame);
     av_packet_free(&d->pkt);
     if (d->sws) sws_freeContext(d->sws), d->sws = NULL;
     free(d->rgba), d->rgba = NULL;
+}
+
+static void dec_dtor(Cpu *c) {
+    Decoder *d = self_state(c);
+    if (!d) { c->x[0] = 0; return; }
+    dec_stop(c);
+    pthread_mutex_lock(&d->lock);
+    dec_free(d);
+    for (int i = 0; i < NIN; i++) buf_put(d->in_mem[i], d->in_cap), d->in_mem[i] = NULL;
+    for (int i = 0; i < NOUT; i++) buf_put(d->out_mem[i], d->out_cap), d->out_mem[i] = NULL;
     pthread_mutex_unlock(&d->lock);
     movie_track(1, d, false);  // (d itself stays: the game's object may still point at it)
     c->x[0] = 0;
@@ -839,10 +840,10 @@ static void dec_dtor(Cpu *c) {
 RT_ON_RESET(movie_reset) {
     for (int i = 0; i < MAX_MOVIE_OBJS; i++) {
         Extractor *e = g_movie_objs[0][i];
-        if (e && e->fmt) avformat_close_input(&e->fmt);
-        if (e && e->avio) { av_freep(&e->avio->buffer); avio_context_free(&e->avio); }
+        if (e && e->pkt) av_packet_free(&e->pkt);
+        if (e) movie_close(e);
         Decoder *d = g_movie_objs[1][i];
-        if (d && d->ctx) avcodec_free_context(&d->ctx);
+        if (d) dec_free(d);
         g_movie_objs[0][i] = g_movie_objs[1][i] = NULL;
     }
     g_ex_vt = g_dec_vt = 0;
@@ -850,10 +851,9 @@ RT_ON_RESET(movie_reset) {
     g_skip_held = false, g_skip_pressed_at = 0;
 }
 
-static void dec_get_counts(Cpu *c) {  // slot 14: GetOutputBufferSize(int32_t* size, int32_t* alignment) queried after Configure
-    Decoder *d = self_state(c);
-    if (c->x[1]) *(int32_t *)(uintptr_t)c->x[1] = d && d->out_cap ? (int32_t)d->out_cap : 0x10000;
-    if (c->x[2]) *(int32_t *)(uintptr_t)c->x[2] = 0x1000;
+static void dec_get_counts(Cpu *c) {  // slot 14: (int*, int64*) queried after Configure
+    if (c->x[1]) *(int32_t *)(uintptr_t)c->x[1] = 0;
+    if (c->x[2]) *(int64_t *)(uintptr_t)c->x[2] = 0;
     c->x[0] = 0;
 }
 

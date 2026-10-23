@@ -1,6 +1,6 @@
-// NVN command buffers: commands are recorded into the guest-provided command memory as CmdRec
-// records, so the game's own memory management and out-of-memory callbacks work as designed.
-// A command handle is the guest address of a list's first record.
+// NVN command buffers: commands are recorded as CmdRec records in a host shadow of the command memory the game
+// provides, so the game's own memory management and out-of-memory callbacks work as designed.
+// A command handle is the host address of a list's first record (opaque to the game).
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,9 +106,6 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
     for (int tries = 0; !cb->host || cb->used + size + JUMP_RESERVE > cb->hcap; tries++) {
         if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
-        LOG("[nvn] cmdbuf %llx out of command memory: chunk %llx size %#llx used %#llx, op %u needs %u (callback %llx)\n",
-            (unsigned long long)cb->guest, (unsigned long long)cb->mem, (unsigned long long)cb->size,
-            (unsigned long long)cb->used, op, size, (unsigned long long)cb->callback);
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
         c->x[0] = cb->guest;
@@ -255,10 +252,18 @@ NVN(nvnCommandBufferSetRenderTargets) {
     const uint64_t *colors = (const uint64_t *)(uintptr_t)s.x[2], *views = (const uint64_t *)(uintptr_t)s.x[3];
     for (int i = 0; i < n; i++) {
         rt.tex[i] = colors && colors[i] ? (uint64_t)(uintptr_t)HOST(NvnTexture, colors[i]) : 0;
-        if (views && views[i]) { rt.has_view[i] = 1; memcpy(&rt.views[i], (void *)(uintptr_t)views[i], sizeof(NvnTextureView)); }
+        if (views && views[i]) {
+            rt.has_view[i] = 1;
+            memcpy(&rt.views[i], (void *)(uintptr_t)views[i], sizeof(NvnTextureView));
+            nvn_texture_note_view((NvnTexture *)(uintptr_t)rt.tex[i], &rt.views[i]);
+        }
     }
     rt.depth = s.x[4] ? (uint64_t)(uintptr_t)HOST(NvnTexture, s.x[4]) : 0;
-    if (s.x[5]) { rt.has_dview = 1; memcpy(&rt.dview, (void *)(uintptr_t)s.x[5], sizeof(NvnTextureView)); }
+    if (s.x[5]) {
+        rt.has_dview = 1;
+        memcpy(&rt.dview, (void *)(uintptr_t)s.x[5], sizeof(NvnTextureView));
+        nvn_texture_note_view((NvnTexture *)(uintptr_t)rt.depth, &rt.dview);
+    }
     CmdRec *r = record(c, CMD_SET_RENDER_TARGETS, sizeof rt, &s);
     r->x[0] = (uint64_t)n;
     memcpy(r->extra, &rt, sizeof rt);
@@ -301,7 +306,7 @@ PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
 PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE)
 NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; }
-PLAIN(nvnCommandBufferSetDepthClamp, CMD_SET_DEPTH_CLAMP)
+NVN(nvnCommandBufferSetDepthClamp) { (void)c; }
 NVN(nvnCommandBufferSetRasterizerDiscard) { (void)c; }
 NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; }
 NVN(nvnCommandBufferSetConservativeRasterDilate) { (void)c; }
@@ -338,8 +343,7 @@ NVN(nvnCommandBufferGetCopyRowStride) { RET(copy_row_stride); }
 NVN(nvnCommandBufferGetCopyImageStride) { RET(copy_image_stride); }
 
 // ---- clears
-// (x[5] is the clear kind: record() copies x1..x7, and ClearColor has no x6, so it's whatever the game left there)
-NVN(nvnCommandBufferClearColor) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 0; }
+NVN(nvnCommandBufferClearColor) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 0; }  // (x[5]: float)
 NVN(nvnCommandBufferClearColori) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 1; }
 NVN(nvnCommandBufferClearColorui) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 2; }
 PLAIN(nvnCommandBufferClearDepthStencil, CMD_CLEAR_DEPTH_STENCIL)
@@ -349,7 +353,7 @@ static void clear_texture(Cpu *c, int kind) {
     Snap s = snap(c);
     ClearTexRec ct = {0};
     ct.tex = (uint64_t)(uintptr_t)HOST(NvnTexture, s.x[1]);
-    if (s.x[2]) { ct.has_view = 1; memcpy(&ct.view, (void *)(uintptr_t)s.x[2], sizeof ct.view); }
+    if (s.x[2]) { ct.has_view = 1; memcpy(&ct.view, (void *)(uintptr_t)s.x[2], sizeof ct.view); nvn_texture_note_view((NvnTexture *)(uintptr_t)ct.tex, &ct.view); }
     if (s.x[3]) memcpy(ct.region, (void *)(uintptr_t)s.x[3], sizeof ct.region);
     if (s.x[4]) memcpy(ct.color, (void *)(uintptr_t)s.x[4], 16);
     CmdRec *r = record(c, CMD_CLEAR_TEXTURE, sizeof ct, &s);
@@ -388,7 +392,7 @@ static void trace_draw(Cpu *c, uint64_t count) {
     if (n++ > 40) return;
     LOG("[trace] draw count %llu lr %llx chain:", (unsigned long long)count, (unsigned long long)c->x[30]);
     uint64_t fp = c->x[29];
-    for (int i = 0; i < 14 && fp >= GUEST_LO && fp < GUEST(0x8000000000ull) && (fp & 7) == 0; i++) {
+    for (int i = 0; i < 14 && fp >= 0x7000000000ull && fp < 0x8000000000ull && (fp & 7) == 0; i++) {
         uint64_t next = *(uint64_t *)(uintptr_t)fp, lr = *(uint64_t *)(uintptr_t)(fp + 8);
         LOG(" %llx", (unsigned long long)lr);
         if (next <= fp) break;
@@ -427,7 +431,7 @@ NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; }
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
 static void tex_ref(TexRef *t, uint64_t tex, uint64_t view, uint64_t region) {
     t->tex = tex ? (uint64_t)(uintptr_t)HOST(NvnTexture, tex) : 0;
-    if (view) { t->has_view = 1; memcpy(&t->view, (void *)(uintptr_t)view, sizeof t->view); }
+    if (view) { t->has_view = 1; memcpy(&t->view, (void *)(uintptr_t)view, sizeof t->view); nvn_texture_note_view((NvnTexture *)(uintptr_t)t->tex, &t->view); }
     if (region) memcpy(t->region, (void *)(uintptr_t)region, sizeof t->region);
 }
 NVN(nvnCommandBufferCopyBufferToTexture) {  // (cmd, src, dst, dstView, dstRegion, flags)

@@ -21,6 +21,7 @@
 #include "option_rows.h"
 #include "osk.h"
 #include "imgui_impl_sdl3.h"
+#include "pad_nav.h"  // (C++: ImGuiKey, outside the extern "C" block below)
 
 extern "C" {
 #include "input_bind.h"
@@ -181,6 +182,7 @@ static bool g_menu_small;  // sub pages: buttons in the small font
 // A game page's Play on the start screen (e.g. a Randomizer tab): start the game with that profile
 static std::string g_play_seed;
 static bool g_play_seed_req, g_play_pending;
+static bool g_play_after_prep;  // PLAY pressed while shaders are prepared: start when done
 extern "C" void launcher_play_profile(const char *seed) {
     g_play_seed = seed ? seed : "";
     g_play_seed_req = true;
@@ -346,8 +348,9 @@ static bool launcher_pad_event(const SDL_Event &e) {
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
-        ImGuiKey k = launcher_pad_key(e.gbutton.button);
-        if (k != ImGuiKey_None) io.AddKeyEvent(k, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+        bool down = e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+        ImGuiKey k = ui_pad_key(e.gbutton.which, e.gbutton.button, down);  // (confirm / back: pad_nav.h)
+        if (k != ImGuiKey_None) io.AddKeyEvent(k, down);
         return true;
     }
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
@@ -431,7 +434,10 @@ extern "C" void launcher_run(void) {
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 
     std::string status = files_status();
-    if (status.empty()) load_background();
+    if (status.empty()) {
+        load_background();
+        nxui_shader_prep_start();  // (later starts: quick, the system's shader caches are warm)
+    }
     std::vector<std::string> seeds = list_seeds();
     std::vector<std::string> choices = {"Vanilla"};
     choices.insert(choices.end(), seeds.begin(), seeds.end());
@@ -460,7 +466,9 @@ extern "C" void launcher_run(void) {
 
     static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
     const char *ap = getenv("NXRT_LAUNCHER_AUTOPLAY");
-    if (ap && status.empty() && !(runs && !strcmp(ap, "once"))) play = true;  // (test: PLAY at once)
+    if (ap && status.empty() && !(runs && !strcmp(ap, "once"))) {  // (test: PLAY at once)
+        if (nxui_shader_prep_busy()) g_play_after_prep = true; else play = true;
+    }
     runs++;
     if (const char *t = getenv("NXRT_LAUNCHER_EXTRACT")) {  // (test) <folder>: set the game files up, log, exit
         if (g_files.test_extract) g_files.test_extract(t);
@@ -484,6 +492,7 @@ extern "C" void launcher_run(void) {
     }
     while (!play) {
         menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
+        if (status.empty()) nxui_shader_prep_start();  // (once; after the files are set up it runs here)
         // the profile PLAY would start, kept current (the game's pages may depend on it)
         profile_choose(choice ? choices[choice] : "");
         if (g_files.files_deleted && g_files.files_deleted()) {  // (Settings > Prelaunch deleted them)
@@ -646,14 +655,18 @@ extern "C" void launcher_run(void) {
                 if (pressed) {
                     if (g_first.pending && g_first.pending()) ImGui::OpenPopup("##firstplay");
                     else if (!g_ui_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
+                    else if (nxui_shader_prep_busy()) g_play_after_prep = true;
                     else play = true;
                 }
                 if (g_tip_test) ImGui::OpenPopup(g_first.pending && g_first.pending() ? "##firstplay" : "##menutip"), g_tip_test = false;
                 if (g_first.draw && g_first.draw(s)) {
-                    if (g_ui_settings.menu_tip_seen) play = true;
-                    else ImGui::OpenPopup("##menutip");
+                    if (g_ui_settings.menu_tip_seen) {
+                        if (nxui_shader_prep_busy()) g_play_after_prep = true; else play = true;
+                    } else ImGui::OpenPopup("##menutip");
                 }
-                if (menu_tip(s)) play = true;
+                if (menu_tip(s)) {
+                    if (nxui_shader_prep_busy()) g_play_after_prep = true; else play = true;
+                }
                 if (hov && status.empty()) {
                     if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft))
                         choice = (choice + (int)choices.size() - 1) % (int)choices.size();
@@ -683,6 +696,25 @@ extern "C" void launcher_run(void) {
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("EXIT", true)) exit(0);
                 g_menu_gap = 0.35f;
+                double od_gb = -1;
+                if (g_files.onedrive_warn && g_files.onedrive_warn(&od_gb)) {  // (the warning: upper right, over the still)
+                    ImGui::SetCursorPos(ImVec2(fmaxf(ds.x - 460 * s, 0.0f), 150 * s));
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.86f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
+                    if (ImGui::BeginChild("##onedrive", ImVec2(420 * s, 0), ImGuiChildFlags_AlwaysUseWindowPadding |
+                                          ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NavFlattened)) {
+                        ImGui::PushTextWrapPos(0);
+                        ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  This folder is synced by OneDrive");
+                        if (od_gb < 0) ImGui::TextDisabled("Measuring the game files...");
+                        else ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1),
+                                                "All game files (about %.0f GB) will be uploaded to your OneDrive.", fmax(1.0, od_gb));
+                        ImGui::PopTextWrapPos();
+                        if (ImGui::Button("Keep here") && g_files.onedrive_keep) g_files.onedrive_keep();
+                    }
+                    ImGui::EndChild();
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor();
+                }
             } else if (page == SETTINGS) {
                 // the in-game menu's tabs (runtime/ui/menu.mm), in a window like the in-game one; tabs that need a
                 // loaded game say so
@@ -812,11 +844,25 @@ extern "C" void launcher_run(void) {
             osk_draw(g_font_menu, s * 0.7f);  // (a text field activated with the controller)
             typed_before = ui_text_busy();
 
+            if (nxui_shader_prep_busy()) {  // Preparing shaders: its own bar over the page, and Skip
+                ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                ImGui::SetNextWindowBgAlpha(0.92f);
+                if (ImGui::Begin("##prepshaders", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                                          ImGuiWindowFlags_NoSavedSettings)) {
+                    ImGui::Text("Preparing shaders...");
+                    ImGui::ProgressBar(nxui_shader_prep_progress(), ImVec2(460 * s, 0));
+                    ImGui::TextDisabled(g_play_after_prep ? "The game starts when it's done." : "Later starts prepare them in the background.");
+                    if (ImGui::Button("Skip")) nxui_shader_prep_skip();
+                }
+                ImGui::End();
+            }
+
             ImGui::Render();
             backend()->render(frame_);
             bool shot = shot_at && ++frame == shot_at;
             backend()->frame_end(frame_, shot ? getenv("NXRT_SHOT_PATH") ? getenv("NXRT_SHOT_PATH") : "build/launcher.png" : NULL);
             if (shot) exit(0);
+            if (g_play_after_prep && !nxui_shader_prep_busy()) g_play_after_prep = false, play = true;
         }
     }
     // play: remember the choice, hand the window to the game
