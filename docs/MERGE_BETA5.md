@@ -12,7 +12,8 @@ screen; **it is not finished, and none of it is released**. `master` and `v0.1.0
 | Game builder + build cache (`gamebuild.c`, `build_cache.*`, C++ in the runtime build) | merged |
 | Library id names the game build: `GAMELIB_ID-<main build id>` (`gen.py`, `nxrt.mk`, `gamelib.*`) | merged |
 | kernel / loader / dispatch / services | partial (beta_5's additions where they didn't need a redesign) |
-| NVN (Metal + Vulkan renderers, shader translator) | **not merged** |
+| NVN renderers (Metal + Vulkan) | **not merged** — beta_5 removed the draw-hook interface; needs re-introduction |
+| NVN shader translator (`maxwell/translate.c` + `shader.h`) | merged (our Vulkan alpha-test/dual-source additions kept) |
 | UI features (startup shader prep, OneDrive, pad_nav wiring, overlay caching) | **not merged** |
 
 ## Test checklist (on a dump you own — use scratch folders)
@@ -41,6 +42,14 @@ screen; **it is not finished, and none of it is released**. `master` and `v0.1.0
    (`xxd -s 0x40 -l 8 exefs/main`), not `unknown` and not another dump's id.
 
 Report: what step failed, the tail of the terminal log, and whether `romfs.bin` was created.
+
+## Ports that build against this branch
+
+- `games/las` — builds.
+- `games/eow` — builds.
+- `games/sky` — **does not link**: its `texpatch` calls `romfs_find_file()`, which the RomFS redesign removed (beta_5
+  serves files from the folder and has no image fd to hand out). Either the port reads the host file directly, or the
+  library grows a compatibility helper.
 
 ## Known gaps that will show up in a play test
 
