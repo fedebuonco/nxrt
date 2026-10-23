@@ -347,8 +347,9 @@ static bool launcher_pad_event(const SDL_Event &e) {
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
-        ImGuiKey k = ui_pad_key(e.gbutton.which, e.gbutton.button, true);  // (confirm / back: pad_nav.h)
-        if (k != ImGuiKey_None) io.AddKeyEvent(k, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+        bool down = e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+        ImGuiKey k = ui_pad_key(e.gbutton.which, e.gbutton.button, down);  // (confirm / back: pad_nav.h)
+        if (k != ImGuiKey_None) io.AddKeyEvent(k, down);
         return true;
     }
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: {

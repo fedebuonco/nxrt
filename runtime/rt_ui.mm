@@ -14,6 +14,7 @@
 #include <atomic>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "option_rows.h"
 
 extern "C" {
@@ -378,7 +379,7 @@ static bool package_setup(const std::string &package, const std::string &keys) {
         dest = keep_dir + "/" + nx_game.info.title + " game";
     }
     use_game_dir(dest, true);
-    rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's)
+rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's)
     mkdir(g_root.c_str(), 0755);
     if (!writable(g_root)) { set_failure(FAIL_WRITE); return false; }
     LOG("[launcher] game folder: %s (from the package %s)\n", g_root.c_str(), package.c_str());
@@ -457,7 +458,7 @@ static void *extract_thread(void *) {
                 set_failure(FAIL_NOT_FOUND);
                 goto done;
             }
-            rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
+rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
             mkdir(g_root.c_str(), 0755);
             g_total = 2 * rbytes;
             set_job("Copying the game files...");
@@ -468,7 +469,7 @@ static void *extract_thread(void *) {
             }
             g_phase_base = rbytes, g_done = rbytes;
         } else {
-            rt_remove_game_files(g_root.c_str());  // (what an earlier setup built here: the player's files stay)
+rt_remove_game_files(g_root.c_str());  // (what an earlier setup built here: the player's files stay)
             g_total = rbytes;
         }
         // (no data image: runtime/services/fs.c serves the RomFS from the folder, so the game's data isn't kept twice)
