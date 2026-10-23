@@ -1,5 +1,9 @@
 # Merging LAS beta_5 into nxrt
 
+**Superseded:** this branch's work is merged to `master` (2026-10-23, `v0.2.0`), together with beta_5's renderer and
+the shared gap work. The current state and what is left are in [BETA5_GAP.md](BETA5_GAP.md); the port plan is
+[PLAN_BETA5_PARITY.md](PLAN_BETA5_PARITY.md). This page records what `beta5-merge` itself brought.
+
 This branch (`beta5-merge`) brings LASRecomp `beta_5`'s runtime work into the library. It builds and runs the start
 screen; **it is not finished, and none of it is released**. `master` and `v0.1.0` are untouched.
 

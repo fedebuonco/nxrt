@@ -1,8 +1,12 @@
 # Handoff: bringing LAS beta_5's runtime into nxrt
 
-**Frozen 2026-10-23, tag `nvn-three-games-2026-10-23`: LAS, EoW and Sky all boot and play on `nvn-renderer-wip`.**
-The sections below record how it got there and what is still open (Vulkan on a machine that runs it, Sky's bindless
-shader, beta_5's recolour / Vulkan chunked heap, the release tag after the owner's three-port run).
+**Frozen 2026-10-23 and merged to `master` (tag `v0.2.0`): LAS, EoW and Sky all boot and play.** The shared runtime
+now covers beta_5's shared part (96.5% by lines, every shared file), with beta_5's start-screen shader preparation,
+overlay caching, the mechanisms' Controls rows, the OneDrive warning and the kernel trace/dump ported on top.
+Still open: **Vulkan** (needs a machine where it builds: 38 LAS-only symbol references to decouple, tint v2, the
+chunked heap), Sky's pipeline blend-target failure (one fragment shader, ~240-360 draws a frame skipped), EoW's one
+compute shader and its first-visit compile stalls. The gap is [BETA5_GAP.md](BETA5_GAP.md); the port plan is
+[PLAN_BETA5_PARITY.md](PLAN_BETA5_PARITY.md).
 
 For the next session. Read this before touching `runtime/nvn/`.
 
@@ -16,8 +20,8 @@ LASRecomp's `beta_5` has ~26,000 lines of runtime work nxrt lacks. We are portin
 LAS onto nxrt — so that every game built on nxrt gets it. Three ports drive the work: `games/las`, `games/eow`,
 `games/sky` (not committed; they hold the owner's game files and their own patches).
 
-Branches: **`beta5-merge`** (pushed; the merge of the rest of beta_5) and **`nvn-renderer-wip`** (beta_5's
-renderer, with `beta5-merge` merged into it). `master` and `v0.1.0` are untouched.
+Branches: **`beta5-merge`** (the merge of the rest of beta_5) and **`nvn-renderer-wip`** (beta_5's renderer, with
+`beta5-merge` merged into it); both are merged into **`master`** now (`v0.2.0`).
 
 ## State of the branch
 
