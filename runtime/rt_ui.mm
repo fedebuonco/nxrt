@@ -14,6 +14,7 @@
 #include <atomic>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "option_rows.h"
 
 extern "C" {
@@ -378,7 +379,7 @@ static bool package_setup(const std::string &package, const std::string &keys) {
         dest = keep_dir + "/" + nx_game.info.title + " game";
     }
     use_game_dir(dest, true);
-    rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's)
+rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's)
     mkdir(g_root.c_str(), 0755);
     if (!writable(g_root)) { set_failure(FAIL_WRITE); return false; }
     LOG("[launcher] game folder: %s (from the package %s)\n", g_root.c_str(), package.c_str());
@@ -457,7 +458,7 @@ static void *extract_thread(void *) {
                 set_failure(FAIL_NOT_FOUND);
                 goto done;
             }
-            rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
+rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
             mkdir(g_root.c_str(), 0755);
             g_total = 2 * rbytes;
             set_job("Copying the game files...");
@@ -468,7 +469,7 @@ static void *extract_thread(void *) {
             }
             g_phase_base = rbytes, g_done = rbytes;
         } else {
-            rt_remove_game_files(g_root.c_str());  // (what an earlier setup built here: the player's files stay)
+rt_remove_game_files(g_root.c_str());  // (what an earlier setup built here: the player's files stay)
             g_total = rbytes;
         }
         // (no data image: runtime/services/fs.c serves the RomFS from the folder, so the game's data isn't kept twice)
@@ -676,7 +677,8 @@ static void prelaunch_tab(float sc) {
 #endif
     ImGui::SameLine();
     static bool shot_del = getenv("NXRT_LAUNCHER_SHOT") && strstr(getenv("NXRT_LAUNCHER_SHOT"), ":askdelete");
-    if (ImGui::Button("Delete game files") || shot_del) ImGui::OpenPopup("##delfiles"), shot_del = false;  // (test: :askdelete)
+    static int del_opened = -1;  // the frame the popup opened (ImGui can activate a default-focused button on that frame)
+    if (ImGui::Button("Delete game files") || shot_del) ImGui::OpenPopup("##delfiles"), del_opened = ImGui::GetFrameCount(), shot_del = false;  // (test: :askdelete)
     if (ImGui::BeginPopupModal("##delfiles", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
         ImGui::PushFont((ImFont *)nxui_start_font(1));
         ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Are you sure?");
@@ -690,7 +692,10 @@ static void prelaunch_tab(float sc) {
             ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "Dev checkout: this is %s", where.c_str());
         }
         ImGui::Spacing();
-        if (ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
+        // a press on the frame the popup opened is not the player's: ImGui focuses this button and can activate it
+        // while the popup is still being opened (it deleted on its own, every start, before this guard)
+        bool armed = del_opened >= 0 && ImGui::GetFrameCount() > del_opened + 1;
+        if (armed && ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
             bool ok = rt_remove_game_files(g_root.c_str());  // (runtime/paths.c: only what the extraction made)
             set_job(ok ? "Game files deleted." : "Could not delete the game files (not in the app's data folder?).", !ok);
             g_files_deleted = true, gb = -1;

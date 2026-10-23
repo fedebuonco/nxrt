@@ -1,5 +1,5 @@
-// macOS / Linux session log (included by macos.c and linux.c): lasrecomp.log in the data folder is always the latest
-// run; a new start moves the previous one aside as lasrecomp-backup-<YYYYMMDD-HHMMSS>-<pid>.log (its last write, the
+// macOS / Linux session log (included by macos.c and linux.c): <the app's name>.log in the data folder is always
+// the latest run; a new start moves the previous one aside as <app>-backup-<YYYYMMDD-HHMMSS>-<pid>.log (its last write, the
 // pid from its first line, 0 if unknown) and keeps the five newest of those, as on Windows. Moving instead of
 // truncating also means a copy still running or quitting keeps writing to its own (moved) file. Processes started by
 // this one (the start screen re-executing itself for the game) get LASRECOMP_LOG_APPEND and append to the same log.
@@ -74,7 +74,17 @@ static void session_log_prune(const char *dir) {
 
 // stdout / stderr -> <dir>/lasrecomp.log (path_out: its path, emptied on failure).
 static void session_log_open(const char *dir, char *path_out, size_t n) {
-    snprintf(path_out, n, "%s/lasrecomp.log", dir);
+    // the log is named after the app (lasrecomp.log, eowrecomp.log, ...): several recompilations share a data folder
+    // layout but never the same executable
+    char exe[256] = "nxrt";
+    uint32_t len = sizeof exe;
+    if (_NSGetExecutablePath(exe, &len) == 0) {
+        char *b = strrchr(exe, '/');
+        if (b) memmove(exe, b + 1, strlen(b + 1) + 1);
+        char *dot = strrchr(exe, '.');
+        if (dot && strlen(dot) < 5) *dot = 0;
+    }
+    snprintf(path_out, n, "%s/%s.log", dir, exe);
     bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
     if (!append) {
         session_log_backup(dir, "lasrecomp.prev.log");  // (the earlier macOS scheme's one backup)

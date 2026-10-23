@@ -12,6 +12,7 @@
 #include "imgui.h"
 #include "option_rows.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
+#include "pad_nav.h"  // (C++: ImGuiKey, outside the extern "C" block below)
 #include "osk.h"
 extern "C" {
 #include "input_bind.h"
@@ -265,7 +266,7 @@ bool menu_handle_event(const SDL_Event *e) {
             return true;
         }
         if (!capturing()) return false;
-        ImGuiKey k = key_from_pad(e->gbutton.button);
+        ImGuiKey k = ui_pad_key(e->gbutton.which, e->gbutton.button, down);  // (confirm / back: pad_nav.h)
         if (k != ImGuiKey_None) { QEvent q = {}; q.kind = QEvent::KEY; q.key = k; q.down = down; push(q); }
         return true;
     }

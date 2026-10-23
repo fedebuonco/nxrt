@@ -1,6 +1,11 @@
 // The game-code builder's cache: receipts validate completed objects; an OS lock keeps builders apart.
 // Generated source and logs survive interruption, but are removed after successful publication.
 #include "build_cache.h"
+#include "nxgame.h"
+extern "C" {
+int nx_module_count(void);
+const char *nx_module_name(int i);
+}
 #include "cache_sha256.h"
 #include <cstdio>
 #include <filesystem>
@@ -115,9 +120,15 @@ bool valid_stem(const std::string &s) {
     return !s.empty() && s.size() < 64 &&
            s.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") == std::string::npos;
 }
+// The game's modules (nx_game.info.modules): main and sdk for most, plus sub-SDKs for some
+static bool known_module(const char *m) {
+    for (int i = 0; i < nx_module_count(); i++)
+        if (!strcmp(m, nx_module_name(i))) return true;
+    return false;
+}
+
 std::string generation(BuildCache *c, const char *module, int chunks) {
-    need((!strcmp(module, "main") || !strcmp(module, "sdk")) && chunks > 0 && chunks <= 10000,
-         "Invalid generated module.");
+    need(known_module(module) && chunks > 0 && chunks <= 10000, "Invalid generated module.");
     std::ostringstream out;
     out << "LASGEN1\n" << chunks << '\n';
     for (int i = 0; i <= chunks; ++i) {
@@ -152,9 +163,7 @@ std::unique_ptr<BuildCache> acquire(const char *game_dir) {
     plain_tree(c->root);
     return c;
 }
-bool library_name(const std::string &s) {
-    return s == "lasgame.dll" || s == "lasgame.so" || s == "lasgame.dylib";
-}
+bool library_name(const std::string &s) { return s == nx_gamelib_name(); }  // (<id>game.<ext>, runtime/main.c)
 void recover(BuildCache *c) {
     // The library and its ID cannot be replaced together. A remaining journal means restore the old pair
     // before a retry or cleanup can discard the backups; repeatable recovery also survives another exit.
@@ -249,8 +258,10 @@ extern "C" bool build_cache_prepare_generation(BuildCache *c, const char *spec, 
         std::string identity = "LASGENKEY1\n" + key.finish() + "\n";
         auto record = c->root / "generation-identity";
         if (!fs::exists(record) || read(record, 128) != identity) {
-            for (const char *name : {"main.generation", "sdk.generation", "main", "sdk"})
-                fs::remove_all(c->root / name);
+            for (int i = 0; i < nx_module_count(); i++) {  // every module's receipts and generated sources
+                fs::remove_all(c->root / (std::string(nx_module_name(i)) + ".generation"));
+                fs::remove_all(c->root / nx_module_name(i));
+            }
             write(record, identity);
         }
         return true;
@@ -286,7 +297,7 @@ extern "C" bool build_cache_present(const char *game_dir) {
 }
 extern "C" bool build_cache_generation(BuildCache *c, const char *module, int *chunks) {
     try {
-        need(!strcmp(module, "main") || !strcmp(module, "sdk"), "Invalid module name.");
+        need(known_module(module), "Invalid module name.");
         auto record = read(c->root / (std::string(module) + ".generation"));
         std::istringstream in(record);
         std::string magic;

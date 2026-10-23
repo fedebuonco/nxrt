@@ -73,6 +73,7 @@ uint32_t kernel_new_handle(KObject *o);
 void kernel_signal(KObject *o);  // caller holds g_klock
 KEvent *kernel_create_event_pair(uint32_t *writable, uint32_t *readable);
 KThread *kernel_current_thread(void);
+uint64_t kernel_current_thread_id(void);  // 0 on a host thread
 // (diagnostics) the "[hang]" dump (kernel.c): every guest thread and what it waits on, the kernel trace
 void kernel_dump_threads(const char *prefix);
 // The renderer's part of the hang dump (runtime/nvn/rqueue.c), called from the hang watch thread every second:
