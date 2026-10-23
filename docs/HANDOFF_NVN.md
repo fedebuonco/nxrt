@@ -12,16 +12,20 @@ LASRecomp's `beta_5` has ~26,000 lines of runtime work nxrt lacks. We are portin
 LAS onto nxrt — so that every game built on nxrt gets it. Three ports drive the work: `games/las`, `games/eow`,
 `games/sky` (not committed; they hold the owner's game files and their own patches).
 
-Branch: **`beta5-merge`** (pushed). `master` and `v0.1.0` are untouched.
+Branches: **`beta5-merge`** (pushed; the merge of the rest of beta_5) and **`nvn-renderer-wip`** (beta_5's
+renderer, with `beta5-merge` merged into it). `master` and `v0.1.0` are untouched.
 
 ## State of the branch
 
 ```
-beta5-merge @ 58e7b16   clean, pushed
-  LAS  plays at 60 fps
-  EoW  plays at 60 fps (after the first ~20 s of shader compilation)
-  Sky  builds, boots, ~32 frames, then stalls (see "Sky's stall" below)
+nvn-renderer-wip @ 76abe95   beta5-merge merged in; beta_5's renderer runs
+  LAS  boots and plays at 60 fps on beta_5's renderer (Metal); title, file select and intro verified
+  EoW  not yet run on this branch
+  Sky  boots; the library-applet wait is fixed, it now dies inside nn::applet (see "Sky's stall")
 ```
+
+`beta5-merge` itself is as the handoff left it: LAS and EoW at 60 fps on nxrt's renderer, Sky stalling at ~32
+frames.
 
 Merged from beta_5, verified on real files:
 
@@ -83,40 +87,65 @@ Importing the files as-is deletes the interface every game depends on.
   (`draw_tint` covers them), `warp_frame`/`save_editor_frame` dropped.
 - `settings_resolve_defaults`, `screen_filter`/`fullscreen`/`bg_input` added.
 
-It **builds and links**, then hangs before the first frame. That hang is the entry point for the next session.
+**Resolved: the branch was 15 commits behind, and the start screen had no Metal layer.** Two separate hangs:
 
-### Likely cause of the hang
+1. `nvn-renderer-wip` predated `hle/libc.c`, the package RomFS, the module-list fixes and the kernel revert. A game
+   library built against it could not even load (`_hle_bcmp` unresolved). Merged `beta5-merge` into it.
+2. beta_5's `ui_window_init` dropped `nxui_metal_setup(...)`, so the start screen's backend had a nil layer:
+   `frame_begin` returned NULL every frame and the launcher spun in `SDL_Delay(16)`. Restored.
 
-The renderer is built around beta_5's render queue (`rqueue.h`: `rq_on()`, `rq_current_item()`, `rq_frame()`,
-`rq_upload(...)`). That thread is started from beta_5's backend init, which nxrt's `main.c` does not call, so the
-renderer waits on a queue nobody drains. `NXRT_PACE=0` does not change it (pacing is not the cause).
+The render queue was never the problem: `rq_on()` starts the render thread lazily (`pthread_once`), and
+`backend_init()` is called from `nvnDeviceInitialize`. With the merge in, LAS boots and holds 60 fps on beta_5's
+renderer; the title, file select and intro all render correctly.
 
-### Plan, in order
+### Translator decision
 
-1. **Headers first.** `maxwell/shader.h` (`ShaderKey`, `ShaderInfo` incl. `ssbo_read`, `alpha_func`, `dual_source`),
-   `nvn.h`, `renderer.h`. The translator alone fails without them — proven twice.
-2. **Fix the render-queue handshake** on `nvn-renderer-wip`: find where beta_5 starts `rqueue`, call it from nxrt's
-   backend init, match the item lifecycle. Verify: a frame is presented.
-3. **Metal first, Vulkan second.** Verify each with a real game and a screenshot, not just a build.
+`nvn-renderer-wip` keeps **beta_5's translator** (`maxwell/translate.c` + `shader.h`): the imported renderer is
+built around its `ShaderInfo` (MSL sampler table, `ssbo_read`, tint layout), and mixing it with nxrt's translator
+is untested. The cost: nxrt's later translator fixes (HSETP2 immediate forms, structured dispatch loops, the
+chunked-gmem Vulkan work) are not in it. Porting them forward is a separate, visible task.
+
+### What the interface still needed
+
+The import claimed the hooks were back; `draw_tint`, `instance_tint` and `instances_tinted` were **not called**
+(the tint buffer was zero-filled, the per-instance runs dropped). Restored from `beta5-merge`'s renderer, with
+`NXRT_LOG_HOOKS=1` logging the first call of each so "no hooks" cannot pass silently. The window title is
+`nx_game.info.title` again in both backends.
+
+### Next, in order
+
+1. **EoW on this branch** (Metal): boot, play, screenshot; it is the gate for the translator differences.
+2. **LAS in a dungeon**: pots/items (draw_tint, instance_tint) and the Hint Sheet icon (`tex_replace`), against
+   beta5-merge's renderer.
+3. **Vulkan**: the same interface audit in `vulkan/exec.c` + `record.c`, on a machine where it runs.
 4. Then the rest of beta_5's `kernel.c` (the merge deadlocks EoW — see `e481c2a`; port it with the EoW boot as the
-   gate), `tex_hash` (fast texture hashing), `shader_prep`/`seen` (startup shader warm-up), `pace`, `slowframe`.
+   gate), `tex_hash`, `shader_prep`/`seen`, `pace`, `slowframe`.
 5. Framerate is *not* a reason for this work any more: LAS and EoW already run at a locked 60 fps on nxrt's renderer
    on an M3. The reasons are Vulkan, beta_5's renderer features, and fewer runtime shader compiles.
 
-## Sky's stall (open, unrelated to the renderer)
+## Sky's stall (moved, not fixed)
 
-Sky builds, boots, runs ~32 frames, then stops presenting. Findings, in order of discovery (the first two were wrong):
+It is **not** `WaitProcessWideKey` and not `ArbitrateLock`. The 0x1C threads in the profile are ordinary condition
+variable waits (the dump shows `wait=2`, mutex word 0). The thread that stops the game is in
+`nn::hid::ShowControllerStrapGuide` → `ShowControllerSupportCore` → `nn::applet::CreateLibraryApplet`, waiting on the
+library-applet launchable event. The runtime handed the game that event (`ISelfController` command 9) **unsignaled**,
+so it waited forever after the first ~31 frames.
 
-- not an event never signalled — `vi` signals its vsync event every frame from `vsync_thread`;
-- not `ArbitrateLock` (that was EoW, fixed by reverting the merged kernel);
-- **it is `WaitProcessWideKey` (svc 0x1C)**: the profile at the stall shows three threads parked there ~100% of the
-  window, while the presenter reports `[metal] nextDrawable blocked` and the watchdog counts no presented frame.
+That event is now signaled (`runtime/services/am.c`), and Sky gets past it — then the guest code inside
+`CreateLibraryApplet` dereferences NULL *before any IPC reaches `am`*: the SDK's applet manager has no creator for the
+library applet to be made from. Next: implement `ILibraryAppletCreator` / `ILibraryAppletAccessor` enough that the
+applet completes at once (the strap guide, the controller-support dialog, `swkbd`'s applet path), or find the
+initialization the SDK expects before `CreateLibraryApplet`.
 
-Next edit: `runtime/kernel.c`, `svc_wait_process_wide_key` / `svc_signal_process_wide_key` — the waiter is registered
-and never woken. Reproduce with:
+Two renderer crashes on the way there were real and are fixed: an uninitialized present `crop` (MetalFX set up for
+16384×16384, then a zero-size texture) and a clear kind read from an argument the recorder never set for float clears
+(Sky's was 15). `SetRenderTargets` and `clear_lib` also index 8-entry arrays with an unclamped guest value.
+
+Reproduce (the app is built into `build-wip` so the `beta5-merge` build stays usable):
 
 ```zsh
-cd games/sky && NXRT_PROF_SVC=1 NXRT_DATA_ROOT=/tmp/skydata timeout 75 ./build/skyrecomp
+cd games/sky && NXRT_SETTINGS=/tmp/skydata/skyrecomp.ini NXRT_DATA_ROOT=/tmp/skydata \
+  NXRT_WINDOW=960x540 NXRT_HANG_DUMP=10 timeout 60 ./build-wip/skyrecomp --play
 ```
 
 ## Environment and how to verify
@@ -129,9 +158,10 @@ cd games/las && export SDKROOT=$(xcrun --show-sdk-path) && make -j10 CLANG=/usr/
 cd examples/game-template
 NXRT_DATA_ROOT=/tmp/x NXRT_LAUNCHER_SHOT=25 NXRT_SHOT_PATH=/tmp/x.png ./build/templaterecomp
 
-# a port against its real files, without touching the owner's data folder
-printf 'game_dir = <game folder>\ngame_in_place = 1\n' > /tmp/d/port.ini
-NXRT_DATA_ROOT=/tmp/d ./build/<port>recomp
+# a port against its real files, without touching the owner's data folder: the settings file is
+# <port>.ini in the data root (not "port.ini"), and the app reads it through NXRT_SETTINGS
+printf 'game_dir = <game folder>\ngame_in_place = 1\n' > /tmp/d/larecomp.ini
+NXRT_SETTINGS=/tmp/d/larecomp.ini NXRT_DATA_ROOT=/tmp/d ./build/<port>recomp --play   # --play skips the start screen
 
 # A/B switches that already exist
 NXRT_ROMFS_BIN=1     # serve from romfs.bin instead of the folder (data-path A/B)
