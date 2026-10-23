@@ -8,6 +8,7 @@
 #include "gamelib.h"
 #include "hle.h"
 #include "nxgame.h"
+#include "kernel.h"
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
 static FnTable tables[NX_MAX_MODULES];
@@ -257,6 +258,13 @@ void rt_fatal_trace(void) {
         for (int i = 0; i < 31; i += 4)
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,
                     c->x[i + 1], i + 2, c->x[i + 2], i + 3, c->x[i + 3]);
+        uint64_t fp = c->x[29];  // guest frame chain (the SDK and the recompiled code keep frame pointers)
+        for (int i = 0; i < 16 && fp >= STACK_BASE && fp + 16 <= STACK_BASE + STACK_SIZE; i++) {
+            uint64_t prev = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8);
+            fprintf(stderr, "  guest frame %d: lr=%016llx\n", i, (unsigned long long)lr);
+            if (prev <= fp) break;
+            fp = prev;
+        }
     }
     plat_fatal_notice();
     // our crash handler also catches SIGABRT: without this abort() re-entered it forever (a 5 GB log)

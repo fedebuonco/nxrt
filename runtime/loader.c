@@ -105,14 +105,24 @@ Module *loader_module(const char *name) {
     return NULL;
 }
 
+// Horizon's rtld looks symbols up in this order: main, the subsdk*s, sdk. That is also the interposition order:
+// a game that exports operator new/delete (Unity does) preempts the SDK's copies for every module's references.
+static int sym_class(const char *name) {
+    if (!strcmp(name, "main")) return 0;
+    if (!strncmp(name, "subsdk", 6)) return 1;
+    return 2;
+}
+
 uint64_t loader_find_symbol(const char *name) {
-    for (int mi = 0; mi < g_nmodules; mi++) {
-        Module *m = &g_modules[mi];
-        for (uint64_t i = 1; i < m->nsyms; i++) {
-            Elf64Sym *s = sym(m, i);
-            if (s->shndx && !strcmp(symname(m, s), name)) return m->base + s->value;
+    for (int pass = 0; pass < 3; pass++)
+        for (int mi = 0; mi < g_nmodules; mi++) {
+            Module *m = &g_modules[mi];
+            if (sym_class(m->name) != pass) continue;
+            for (uint64_t i = 1; i < m->nsyms; i++) {
+                Elf64Sym *s = sym(m, i);
+                if (s->shndx && !strcmp(symname(m, s), name)) return m->base + s->value;
+            }
         }
-    }
     return 0;
 }
 
@@ -138,7 +148,10 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {
 static uint64_t resolve(Module *m, uint32_t symidx) {
     Elf64Sym *s = sym(m, symidx);
     const char *name = symname(m, s);
-    if (s->shndx) return m->base + s->value;
+    if (s->shndx) {  // defined here: an earlier module's export of the same name preempts it (rtld's order)
+        uint64_t pre = loader_find_symbol(name);
+        return pre ? pre : m->base + s->value;
+    }
     HostFn impl = hle_lookup_impl(name);
     if (impl) return hle_register(name, impl);  // host implementation wins over the guest SDK's
     uint64_t a = loader_find_symbol(name);
@@ -167,6 +180,7 @@ static void relocate(Module *m) {
             case R_ABS64:
             case R_GLOB_DAT:
             case R_JUMP_SLOT: {
+                if (type == R_ABS64 && si == 0) { *where = (uint64_t)r[i].addend; break; }  // (absolute, no symbol)
                 uint64_t s = resolve(m, si);
                 *where = s ? s + r[i].addend : 0;
                 if (s >= HLE_BASE && s < HLE_BASE + HLE_SIZE) unresolved++;

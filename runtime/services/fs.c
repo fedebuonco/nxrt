@@ -1192,3 +1192,31 @@ ssize_t romfs_file_read(int i, void *dst, size_t n, uint64_t off) {
     if (n > f->size - off) n = (size_t)(f->size - off);
     return base_pread(dst, n, f->off + off);
 }
+
+// nn::fs::ReadFile(out, handle, offset, buffer, size[, option]): log the arguments (NXRT_LOG_FS) and run the SDK's
+// implementation. Unity reads its data through this, and a bad buffer shows up here first.
+static void call_guest(Cpu *c, const char *sym) {
+    uint64_t lr = c->x[30];
+    guest_call(c, loader_find_symbol(sym));
+    c->x[30] = lr;
+}
+HLE_FUNC("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", fs_read_file_log) {
+    if (ENV("NXRT_LOG_FS"))
+        LOG("[fs] ReadFile(out=%#llx handle=%#llx off=%lld buf=%#llx size=%#llx lr=%#llx)\n", (unsigned long long)c->x[0],
+            (unsigned long long)c->x[1], (long long)c->x[2], (unsigned long long)c->x[3],
+            (unsigned long long)c->x[4], (unsigned long long)c->x[30]);
+    if (c->x[3] && c->x[3] < GUEST_LO) {  // a buffer that is not a guest address: read into scratch, do not fault
+        static int warned;
+        if (!warned++) LOG("[fs] ReadFile with an invalid buffer %#llx (size %#llx) -> scratch\n",
+                           (unsigned long long)c->x[3], (unsigned long long)c->x[4]);
+        c->x[3] = (uint64_t)hle_alloc(c->x[4] + 0x1000);
+    }
+    call_guest(c, "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm");
+}
+HLE_FUNC("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE", fs_read_file_opt_log) {
+    if (ENV("NXRT_LOG_FS"))
+        LOG("[fs] ReadFile(out=%#llx handle=%#llx off=%lld buf=%#llx size=%#llx option=%#llx)\n",
+            (unsigned long long)c->x[0], (unsigned long long)c->x[1], (long long)c->x[2],
+            (unsigned long long)c->x[3], (unsigned long long)c->x[4], (unsigned long long)c->x[5]);
+    call_guest(c, "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE");
+}

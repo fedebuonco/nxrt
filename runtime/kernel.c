@@ -609,7 +609,23 @@ static _Atomic uint64_t svc_wait_ns[32][0x80], svc_calls[32][0x80];
 static int prof_svc = -1;
 
 static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc);
+// svcSetThreadActivity(1): this thread is suspended. Stop at the next syscall (a safe point with a consistent guest
+// state) until the suspender clears the activity; 5 ms slices so a reboot's unwind cannot be missed.
+static void thread_safe_point(void) {
+    KThread *t = t_cur;
+    if (!t || !t->activity || g_rt_unwind) return;
+    struct timespec ts;
+    pthread_mutex_lock(&g_klock);
+    while (t->activity && !g_rt_unwind) {
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 5000000;
+        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&t->cond, &g_klock, &ts);
+    }
+    pthread_mutex_unlock(&g_klock);
+}
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
+    thread_safe_point();
     rt_unwind_point();
     svc_entry(c, imm, pc);
     rt_unwind_point();
@@ -841,7 +857,17 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 3: v = ALIAS_SIZE; break;
         case 4: v = HEAP_BASE; break;
         case 5: v = HEAP_MAX; break;
-        case 6: case 21: v = 0xCD500000ull; break;  // application memory (3.2 GB, as on hardware)
+        case 6: case 21: {  // application memory (3.2 GB, as on hardware); NXRT_MEM_TOTAL overrides for testing
+            static uint64_t total;
+            static int total_init;
+            if (!total_init) {
+                total_init = 1;
+                const char *e = getenv("NXRT_MEM_TOTAL");
+                total = e ? strtoull(e, NULL, 0) : 0xCD500000ull;
+            }
+            v = total;
+            break;
+        }
         case 7: case 22: v = heap_size + 0x4000000; break;
         case 8: v = 0; break;
         case 9: v = 0; break;
@@ -885,6 +911,40 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         region_remove(x[0]);
         x[0] = R_OK;
         break;
+    case 0x32: {  // SetThreadActivity(handle, activity): 1 = suspend (Unity's GC / SuspendThread)
+        KObject *o = handle_get((uint32_t)x[0]);
+        if (!o || o->type != KOBJ_THREAD) { x[0] = R_INVALID_HANDLE; break; }
+        KThread *t = (KThread *)o;
+        int activity = (int)x[1];
+        if (activity == 0 || activity == 1) {
+            pthread_mutex_lock(&g_klock);
+            t->activity = activity;
+            if (!activity) pthread_cond_broadcast(&t->cond);
+            pthread_mutex_unlock(&g_klock);
+        }
+        x[0] = R_OK;
+        break;
+    }
+    case 0x33: {  // GetThreadContext3(out, handle): the thread is suspended; hand its registers to the caller (GC roots)
+        KObject *o = handle_get((uint32_t)x[1]);
+        if (!o || o->type != KOBJ_THREAD) { x[0] = R_INVALID_HANDLE; break; }
+        KThread *t = (KThread *)o;
+        uint8_t *p = (uint8_t *)(uintptr_t)x[0];
+        memset(p, 0, 0x320);
+        for (int i = 0; i < 29; i++) memcpy(p + i * 8, &t->cpu.x[i], 8);
+        memcpy(p + 0xE8, &t->cpu.x[29], 8);   // fp
+        memcpy(p + 0xF0, &t->cpu.x[30], 8);   // lr
+        memcpy(p + 0xF8, &t->cpu.sp, 8);
+        memcpy(p + 0x100, &t->cpu.pc, 8);
+        uint32_t psr = (uint32_t)(t->cpu.nzcv << 28);
+        memcpy(p + 0x108, &psr, 4);
+        memcpy(p + 0x110, t->cpu.v, 32 * 16);
+        uint32_t fpcr = (uint32_t)t->cpu.fpcr, fpsr = (uint32_t)t->cpu.fpsr;
+        memcpy(p + 0x310, &fpcr, 4);
+        memcpy(p + 0x314, &fpsr, 4);
+        x[0] = R_OK;
+        break;
+    }
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;
     case 0x35: x[0] = svc_signal_to_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int32_t)x[3]); break;
     case 0x45: {  // CreateEvent -> w1 writable, w2 readable
