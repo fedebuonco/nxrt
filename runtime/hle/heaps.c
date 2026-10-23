@@ -137,10 +137,11 @@ HLE_FUNC("_ZN2nn4lmem21AllocateFromFrameHeapEPNS0_6detail8HeapHeadEmi", heap_all
 
 // nn::mem::StandardAllocator::Initialize(void *addr, size_t size[, bool])
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvm", heap_std_init) {
-    uint64_t lr = c->x[30], size = c->x[2];
-    CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvm");
+    uint64_t lr = c->x[30], size = c->x[2], addr = c->x[1];
     if (ENV("NXRT_LOG_HEAPS"))
-        LOG("[heaps] standard allocator %#llx bytes from lr %llx\n", (unsigned long long)size, (unsigned long long)lr);
+        LOG("[heaps] standard allocator %#llx bytes at %#llx from lr %llx\n", (unsigned long long)size,
+            (unsigned long long)addr, (unsigned long long)lr);
+    CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvm");
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvmb", heap_std_init_b) {

@@ -28,7 +28,6 @@
 #include "platform.h"
 #include "posix_log.h"
 
-void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -333,7 +332,7 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
 // (what happened in plain words: runtime/crash_explain.c)
 void plat_fatal_notice(void) {
     char text[1600];
-    rt_crash_explain(text, sizeof text, g_log_path);
+    plat_crash_explain_text(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, nx_app.title ? nx_app.title : "Recomp", text, NULL);

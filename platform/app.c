@@ -16,6 +16,15 @@ static PlatFaultReport g_report;
 static PlatSymbolizer g_symbolizer;
 
 void plat_set_fault_handlers(PlatFaultWatch watch, PlatFaultReport report) { g_watch = watch, g_report = report; }
+
+static PlatCrashExplain g_explain;
+void plat_set_crash_explain(PlatCrashExplain fn) { g_explain = fn; }
+void plat_crash_explain_text(char *out, size_t n, const char *log_path) {
+    if (g_explain) { g_explain(out, n, log_path); return; }
+    snprintf(out, n, "%s stopped because of an error.\n\nThis is a bug in the app, not a problem with your game files. "
+                     "The log file has the details%s%s.", nx_app.title ? nx_app.title : "The app",
+             log_path && *log_path ? ": " : "", log_path && *log_path ? log_path : "");
+}
 void plat_set_symbolizer(PlatSymbolizer fn) { g_symbolizer = fn; }
 
 bool plat_fault_watch(uint64_t fault_addr, uint64_t host_pc) { return g_watch && g_watch(fault_addr, host_pc); }

@@ -11,7 +11,6 @@
 
 #include "../platform.h"
 
-void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 
 // ---- guest address space
 // The window is reserved up front and committed per region (plat_commit from the loader / kernel). Anything
@@ -492,7 +491,7 @@ static void require_cpu(void) {
 void plat_fatal_notice(void) {
     publish_log();
     char text[1600];
-    rt_crash_explain(text, sizeof text, g_log_path);
+    plat_crash_explain_text(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
     MessageBoxA(NULL, text, nx_app.title ? nx_app.title : "Recomp", MB_ICONERROR | MB_OK);

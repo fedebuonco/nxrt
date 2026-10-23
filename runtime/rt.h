@@ -26,6 +26,7 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 #define FATAL(...) (rt_fatal_msg(__VA_ARGS__), rt_fatal_trace())  // (runtime/crash_explain.c keeps the line)
 void rt_fatal_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));  // (runtime/crash_explain.c)
 void rt_crash_fault(const char *what, uint64_t fa, uint64_t pc);  // (runtime/crash_explain.c)
+void rt_crash_explain(char *out, size_t n, const char *log_path);  // the plain-words crash text, for the platform
 extern int rt_romfs_files;  // the game's own RomFS files (runtime/services/fs.c; -1: not read yet)
 // A RomFS file by path, and a read of the RomFS image, for readers outside the FS service (the movie service plays a
 // movie where it is: a folder, romfs.bin and the game package all serve the same image).

@@ -43,6 +43,10 @@ static NxUiGameFiles g_files;
 static NxUiProfiles g_profiles;
 static NxUiFirstPlay g_first;
 static NxUiStartInfo g_info;
+static bool prep_busy(void) { return g_info.prep_busy && g_info.prep_busy(); }
+static float prep_progress(void) { return g_info.prep_progress ? g_info.prep_progress() : 0.f; }
+static void prep_start(void) { if (g_info.prep_start) g_info.prep_start(); }
+static void prep_skip(void) { if (g_info.prep_skip) g_info.prep_skip(); }
 void nxui_set_game_files(const NxUiGameFiles *g) { g_files = *g; }
 void nxui_set_profiles(const NxUiProfiles *p) { g_profiles = *p; }
 void nxui_set_first_play(const NxUiFirstPlay *q) { g_first = *q; }
@@ -436,7 +440,7 @@ extern "C" void launcher_run(void) {
     std::string status = files_status();
     if (status.empty()) {
         load_background();
-        nxui_shader_prep_start();  // (later starts: quick, the system's shader caches are warm)
+        prep_start();  // (later starts: quick, the system's shader caches are warm)
     }
     std::vector<std::string> seeds = list_seeds();
     std::vector<std::string> choices = {"Vanilla"};
@@ -467,7 +471,7 @@ extern "C" void launcher_run(void) {
     static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
     const char *ap = getenv("NXRT_LAUNCHER_AUTOPLAY");
     if (ap && status.empty() && !(runs && !strcmp(ap, "once"))) {  // (test: PLAY at once)
-        if (nxui_shader_prep_busy()) g_play_after_prep = true; else play = true;
+        if (prep_busy()) g_play_after_prep = true; else play = true;
     }
     runs++;
     if (const char *t = getenv("NXRT_LAUNCHER_EXTRACT")) {  // (test) <folder>: set the game files up, log, exit
@@ -492,7 +496,7 @@ extern "C" void launcher_run(void) {
     }
     while (!play) {
         menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
-        if (status.empty()) nxui_shader_prep_start();  // (once; after the files are set up it runs here)
+        if (status.empty()) prep_start();  // (once; after the files are set up it runs here)
         // the profile PLAY would start, kept current (the game's pages may depend on it)
         profile_choose(choice ? choices[choice] : "");
         if (g_files.files_deleted && g_files.files_deleted()) {  // (Settings > Prelaunch deleted them)
@@ -655,17 +659,17 @@ extern "C" void launcher_run(void) {
                 if (pressed) {
                     if (g_first.pending && g_first.pending()) ImGui::OpenPopup("##firstplay");
                     else if (!g_ui_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
-                    else if (nxui_shader_prep_busy()) g_play_after_prep = true;
+                    else if (prep_busy()) g_play_after_prep = true;
                     else play = true;
                 }
                 if (g_tip_test) ImGui::OpenPopup(g_first.pending && g_first.pending() ? "##firstplay" : "##menutip"), g_tip_test = false;
                 if (g_first.draw && g_first.draw(s)) {
                     if (g_ui_settings.menu_tip_seen) {
-                        if (nxui_shader_prep_busy()) g_play_after_prep = true; else play = true;
+                        if (prep_busy()) g_play_after_prep = true; else play = true;
                     } else ImGui::OpenPopup("##menutip");
                 }
                 if (menu_tip(s)) {
-                    if (nxui_shader_prep_busy()) g_play_after_prep = true; else play = true;
+                    if (prep_busy()) g_play_after_prep = true; else play = true;
                 }
                 if (hov && status.empty()) {
                     if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft))
@@ -844,15 +848,15 @@ extern "C" void launcher_run(void) {
             osk_draw(g_font_menu, s * 0.7f);  // (a text field activated with the controller)
             typed_before = ui_text_busy();
 
-            if (nxui_shader_prep_busy()) {  // Preparing shaders: its own bar over the page, and Skip
+            if (prep_busy()) {  // Preparing shaders: its own bar over the page, and Skip
                 ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
                 ImGui::SetNextWindowBgAlpha(0.92f);
                 if (ImGui::Begin("##prepshaders", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                                           ImGuiWindowFlags_NoSavedSettings)) {
                     ImGui::Text("Preparing shaders...");
-                    ImGui::ProgressBar(nxui_shader_prep_progress(), ImVec2(460 * s, 0));
+                    ImGui::ProgressBar(prep_progress(), ImVec2(460 * s, 0));
                     ImGui::TextDisabled(g_play_after_prep ? "The game starts when it's done." : "Later starts prepare them in the background.");
-                    if (ImGui::Button("Skip")) nxui_shader_prep_skip();
+                    if (ImGui::Button("Skip")) prep_skip();
                 }
                 ImGui::End();
             }
@@ -862,7 +866,7 @@ extern "C" void launcher_run(void) {
             bool shot = shot_at && ++frame == shot_at;
             backend()->frame_end(frame_, shot ? getenv("NXRT_SHOT_PATH") ? getenv("NXRT_SHOT_PATH") : "build/launcher.png" : NULL);
             if (shot) exit(0);
-            if (g_play_after_prep && !nxui_shader_prep_busy()) g_play_after_prep = false, play = true;
+            if (g_play_after_prep && !prep_busy()) g_play_after_prep = false, play = true;
         }
     }
     // play: remember the choice, hand the window to the game

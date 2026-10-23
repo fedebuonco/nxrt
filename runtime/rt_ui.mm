@@ -1081,6 +1081,7 @@ extern "C" void rt_ui_register(void) {
     nxui_set_profiles(&p);
     NxUiFirstPlay q = {aspect_pending, aspect_prompt, aspect_reset};
     nxui_set_first_play(&q);
-    NxUiStartInfo si = {nx_game.info.headline, nx_game.info.releases_api, nx_game.info.release_page};
+    NxUiStartInfo si = {nx_game.info.headline, nx_game.info.releases_api, nx_game.info.release_page,
+                        nxui_shader_prep_busy, nxui_shader_prep_progress, nxui_shader_prep_start, nxui_shader_prep_skip};
     nxui_set_start_info(&si);
 }

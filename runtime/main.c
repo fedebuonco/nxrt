@@ -84,7 +84,14 @@ static void module_init(Cpu *c, Module *m) {
 // Early (x2): the SDK's own constructors. Late (x3, once its heap is up): the other modules'. By default every module
 // but main runs early; games whose other modules need the SDK's heap (nx_game hooks late_module_init) run them late,
 // main last (it uses the others).
+static void vamm_init(Cpu *c) {  // rtld's job: create the virtual-address memory manager before the game allocates from it
+    if (!getenv("NXRT_VAMM_INIT")) return;
+    uint64_t f = loader_find_symbol("_ZN2nn2os30InitializeVirtualAddressMemoryEv");
+    if (f) { LOG("vamm: InitializeVirtualAddressMemory %llx\n", (unsigned long long)f); guest_call(c, f); }
+    else LOG("vamm: InitializeVirtualAddressMemory not found\n");
+}
 static void rtld_init_sdk(Cpu *c) {
+    vamm_init(c);
     if (getenv("NXRT_SDK_INIT_LATE")) return;  // test: the sdk's constructors run in x3, after _init_libc1
     if (NX_HOOK(late_module_init)) {
         Module *sdk = loader_module("sdk");
@@ -312,6 +319,7 @@ static void layers_init(void) {
     NxAppInfo app = {g->id, g->exe, g->title, g->bundle_id, g->data_dir, g->ini, g->version};
     nx_app_init(&app);
     plat_set_fault_handlers(rt_fault_watch, rt_fault_report);
+    plat_set_crash_explain(rt_crash_explain);  // (the platform shows the plain-words message; the runtime can explain)
     plat_set_symbolizer(rt_host_fn_name);
     char lib_id[80];
     snprintf(lib_id, sizeof lib_id, "%s.id", nx_gamelib_name());

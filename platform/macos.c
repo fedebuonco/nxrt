@@ -27,7 +27,6 @@
 #include "platform.h"
 #include "posix_log.h"
 
-void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 
 static mach_timebase_info_data_t tb;
 
@@ -176,7 +175,7 @@ bool plat_module_name(uint64_t pc, char *out, size_t n) {
 // terminal shows the log otherwise). CFUserNotification: safe from any thread, no run loop needed.
 void plat_fatal_notice(void) {
     char text[1600];
-    rt_crash_explain(text, sizeof text, g_log_path);
+    plat_crash_explain_text(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
     CFStringRef msg = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);

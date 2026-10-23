@@ -120,6 +120,11 @@ void plat_crash_handler_install(void);  // per thread where the OS needs it (alt
 typedef bool (*PlatFaultWatch)(uint64_t fault_addr, uint64_t host_pc);
 typedef void (*PlatFaultReport)(const char *what, uint64_t fault_addr, uint64_t host_pc, uint64_t host_lr);
 void plat_set_fault_handlers(PlatFaultWatch watch, PlatFaultReport report);
+// The plain-words crash text (what went wrong, for the message box). A host sets it (runtime/crash_explain.c);
+// without one the platform says only that the app stopped and where the log is.
+typedef void (*PlatCrashExplain)(char *out, size_t n, const char *log_path);
+void plat_set_crash_explain(PlatCrashExplain fn);
+void plat_crash_explain_text(char *out, size_t n, const char *log_path);  // (the set one, or the generic text)
 bool plat_fault_watch(uint64_t fault_addr, uint64_t host_pc);
 void plat_fault_report(const char *what, uint64_t fault_addr, uint64_t host_pc, uint64_t host_lr) __attribute__((noreturn));
 // Names for host addresses the OS can't name (backtraces): the host's (runtime/dispatch.c rt_host_fn_name)

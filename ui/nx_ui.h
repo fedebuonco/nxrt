@@ -138,6 +138,12 @@ typedef struct NxUiStartInfo {
     const char *headline;      // the big title ("LAS Recompiled")
     const char *releases_api;  // GitHub API URL of the release list for the update check (NULL: none)
     const char *release_page;  // release page URL, the tag appended
+    // Shader preparation (nx-runtime's shader_prep): the start screen shows its bar, PLAY waits for it. All NULL: the
+    // host has no preparation step.
+    bool (*prep_busy)(void);
+    float (*prep_progress)(void);
+    void (*prep_start)(void);   // begin (in the background, once)
+    void (*prep_skip)(void);
 } NxUiStartInfo;
 void nxui_set_start_info(const NxUiStartInfo *s);
 

@@ -850,7 +850,18 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 13: v = GUEST_HI - GUEST_LO; break;
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
-        case 16: case 17: v = 0; break;
+        case 16: {  // SystemResourceSize: nonzero is what enables nn::os's VAMM (virtual address memory)
+            static uint64_t srs;
+            static int srs_init;
+            if (!srs_init) {
+                srs_init = 1;
+                const char *e = getenv("NXRT_SYSTEM_RESOURCE");
+                srs = e ? strtoull(e, NULL, 0) : 0;
+            }
+            v = srs;
+            break;
+        }
+        case 17: v = 0; break;
         case 18: v = nx_game.info.title_id; break;
         case 20: v = 0; break;
         // (Switchbrew SVC GetInfo: types newer SDKs may ask for)
