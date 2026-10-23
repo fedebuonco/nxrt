@@ -1,15 +1,7 @@
-// Interface between the NVN executor (renderer.m) and the Metal plumbing (metal.m).
+// Interface between the NVN executor and the host renderer (Vulkan on this branch).
 #pragma once
-#ifdef __OBJC__
-#import <Metal/Metal.h>
-void renderer_init(id<MTLDevice> dev);
-id<MTLCommandQueue> renderer_queue(void);
-id<MTLTexture> renderer_texture(NvnTexture *t, id<MTLBlitCommandEncoder> blit, bool for_render);
-MTLPixelFormat renderer_pixel_format(uint32_t nvn_format);
-bool renderer_format_alpha_one(uint32_t nvn_format);
-extern id<MTLBuffer> g_guest_buffer;
-extern uint64_t g_guest_buffer_base;
-#endif
+#include <SDL3/SDL_events.h>
+
 bool renderer_is_gpu_owned(NvnTexture *t);
 void renderer_flush(void);  // finish all recorded GPU work
 void renderer_shutdown(void);  // save the pipeline archive before an _exit() that skips atexit

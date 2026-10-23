@@ -1,4 +1,4 @@
-// Frame pacing, for the backend's present (metal.m): each presented frame calls
+// Frame pacing, shared by the Vulkan presents (vulkan/device.c): each presented frame calls
 // pace_frame() on the presenting thread, and the backends pass the game's timing counters through pace_end_counter().
 #include <stdbool.h>
 #include <stdint.h>

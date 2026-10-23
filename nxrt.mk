@@ -1,37 +1,41 @@
-# nxrt build rules, included by a game's Makefile (games/<id>/Makefile) after it sets:
+# nxrt build rules (Steam Deck / Linux), included by a game's Makefile (games/<id>/Makefile) after it sets:
 #   NXRT      path to this folder (e.g. ../../nxrt)
-#   GAME_ID   short name: the game code library is $(B)/$(GAME_ID)game.<dylib|so|dll>
+#   GAME_ID   short name: the game code library is $(B)/$(GAME_ID)game.so
 #   GAME_EXE  the executable's name
 #   GAME_SRC  the game's own runtime sources (.c, .mm), with its `const NxGame nx_game` (runtime/nxgame.h)
 #   GAME_INC  (optional) extra -I flags for them
 #   GAME_TOOLS (optional, default tools) the game's tools folder: its patches.py goes into gen.py (--game)
 #   GAME_MODULES (optional) its code modules as name:base ..., as nx_game.info.modules (default main + sdk)
-# macOS on Apple Silicon: Homebrew clang/SDL3/FFmpeg, the Metal renderer (NXRT_BACKEND, nx.mk).
-
+#
+# Target: Steam Deck / SteamOS, x86-64 Linux, Vulkan. The macOS/Metal and Windows backends are not part of this branch.
 GAME_TOOLS ?= tools
 GAME_MODULES ?= main:0x7000000000 sdk:0x7004000000
 NX_MODULES_X := $(foreach m,$(GAME_MODULES),X($(firstword $(subst :, ,$(m)))))
 RT       := $(NXRT)/runtime
 
-# the generated C (`make gen`)
+# ARCH (x86_64 / aarch64, default this machine's) picks the target. The generated code differs per arch (AArch64
+# hosts run the guest's FP/SIMD as inline asm, others use the portable C of simd.h), so a cross build has its own
+# generated-<arch>/ and build/<arch>/; SYSROOT is the target's root filesystem (headers, libs).
 GEN      ?= generated
+HOSTARCH := $(patsubst arm64,aarch64,$(shell uname -m))
+ARCH     ?= $(HOSTARCH)
+ifneq ($(ARCH),$(HOSTARCH))
+CROSS    := --target=$(ARCH)-linux-gnu $(if $(SYSROOT),--sysroot=$(SYSROOT))
+GEN      := generated-$(ARCH)
+B        ?= build/$(ARCH)
+endif
+GENSIMD  := --simd $(if $(filter aarch64,$(ARCH)),asm,c)
 
-# B: build dir. MACOS_MIN: oldest macOS to run on (default: this one). DEPS: prefix with SDL3 / FFmpeg instead of
-# Homebrew's. CLANG: the compiler (macOS: Apple's /usr/bin/clang finds the SDK by itself; Homebrew's may need SDKROOT).
+# B: build dir. DEPS: prefix with SDL3 / FFmpeg instead of the system packages. CLANG: the compiler.
 B         ?= build
-MACOS_MIN ?=
 DEPS      ?=
 CLANG     ?= clang
-MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
-CC       := $(CLANG) $(MINFLAG)
-CXX      := $(CLANG)++ $(MINFLAG)
-GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -I$(RT)
-ifneq ($(FNPROF),)
-GENFLAGS += -DNXRT_FNPROF
-endif
+CC        := $(CLANG) $(CROSS)
+CXX       := $(CLANG)++ $(CROSS)
+GENFLAGS  := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -I$(RT)
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
-# the app itself holds none of it
+# the app itself holds none of it.
 GEN_SRC  := $(foreach m,$(GAME_MODULES),$(wildcard $(GEN)/$(firstword $(subst :, ,$(m)))/*.c))
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/gamelib_entry.o
 include $(NXRT)/nx.mk  # the layers under the runtime (nx-platform ... nx-ui)
@@ -47,19 +51,24 @@ GAME_MM  := $(filter %.mm,$(GAME_SRC))
 GAME_OBJ := $(patsubst %.c,$(B)/game/%.o,$(GAME_C)) $(patsubst %.mm,$(B)/game/%.o,$(GAME_MM))
 GAME_HDRS := $(wildcard $(dir $(GAME_SRC))*.h)
 
-SDL      := $(or $(DEPS),/opt/homebrew/opt/sdl3)
-FFMPEG   := $(or $(DEPS),/opt/homebrew/opt/ffmpeg)
 EXE      := $(B)/$(GAME_EXE)
-DEPINC   := -I$(SDL)/include -I$(FFMPEG)/include
-LDFLAGS  := -L$(SDL)/lib -lSDL3 -Wl,-rpath,$(SDL)/lib -L$(FFMPEG)/lib -lavformat -lavcodec -lavutil -lswscale -Wl,-rpath,$(FFMPEG)/lib \
-            -framework CoreFoundation -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore -framework AppKit -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
-# the Metal renderer (runtime/nvn/renderer.h is the seam)
-BACKEND_SRC := $(wildcard $(RT)/nvn/*.m)
-BACKEND_OBJ := $(patsubst $(RT)/%.m,$(B)/rt/%.o,$(BACKEND_SRC))
-UIFLAGS  := -fobjc-arc
-GAMELIB  := $(B)/$(GAME_ID)game.dylib
-GAMELIB_LDFLAGS := -dynamiclib -undefined dynamic_lookup  # (the runtime functions it calls: the app's own)
-GAMELIB_SHARED := -shared -Wl,-undefined,dynamic_lookup  # (the same, for the start screen's build: zig cc)
+DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
+ifeq ($(ARCH),x86_64)
+GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
+endif
+GENFLAGS += $(GENARCH) -fPIC
+OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the same size)
+SHADERC  ?= -lshaderc  # (Debian / Ubuntu's libshaderc.so; a shaderc built from source: -lshaderc_shared)
+# -rdynamic: crash backtraces name host functions (runtime/platform/linux.c)
+LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+            -lvulkan $(SHADERC) -lpthread -ldl -lm
+BACKEND_SRC := $(wildcard $(RT)/nvn/vulkan/*.c) $(wildcard $(RT)/nvn/vulkan/*.cpp)
+BACKEND_OBJ := $(patsubst $(RT)/%.cpp,$(B)/rt/%.o,$(patsubst $(RT)/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
+IMGUI_OBJ = $(NX_IMGUI_OBJ) $(B)/imgui/imgui_impl_vulkan.o
+UIFLAGS  := -x c++  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
+GAMELIB  := $(B)/$(GAME_ID)game.so
+GAMELIB_LDFLAGS := -shared -fuse-ld=lld  # (the runtime functions it calls: the app's own, -rdynamic)
+GAMELIB_SHARED := -shared
 
 # GAMELIB_ID: what the game code library is built from (the generator, the game's patches, the headers it is compiled
 # against, the flags). A library with another id is rebuilt by the start screen, never loaded.
@@ -143,10 +152,6 @@ $(B)/rt/%.o: $(RT)/%.cpp $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(B)/rt/%.o: $(RT)/%.m $(RT_HDRS)
-	@mkdir -p $(dir $@)
-	$(CC) $(RTFLAGS) -fobjc-arc -c $< -o $@
-
 $(B)/rt/%.o: $(RT)/%.mm $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(UIFLAGS) -c $< -o $@
@@ -175,8 +180,8 @@ $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	mv -f $@.tmp $@
 	echo $(GAMELIB_FULL_ID) > $@.id
 
-# Python: tools/venv in the game's folder
-PY := $(wildcard $(GAME_TOOLS)/venv/bin/python)
+# Python: tools/venv in the game's folder.
+PY := $(firstword $(wildcard $(GAME_TOOLS)/venv/bin/python))
 
 # The generator's Python environment, in the game's folder (tools/venv: not committed). `make venv` once per game;
 # `make gen` and the app's own build need it.
@@ -184,19 +189,11 @@ PY := $(wildcard $(GAME_TOOLS)/venv/bin/python)
 # "._distutils-precedence.pth" as a .pth and stops at its first byte: those files are removed around each step.
 VENV_CLEAN = find "$(GAME_TOOLS)/venv" -name '._*' -type f -delete 2>/dev/null || true
 venv:
-	@if [ ! -x "$(GAME_TOOLS)/venv/bin/python" ] || ! "$(GAME_TOOLS)/venv/bin/python" -c '' 2>/dev/null; then \
-	    $(VENV_CLEAN); \
-	    if ! "$(GAME_TOOLS)/venv/bin/python" -c '' 2>/dev/null; then \
-	        echo "Creating $(GAME_TOOLS)/venv"; \
-	        rm -rf "$(GAME_TOOLS)/venv"; \
-	        python3 -m venv --without-pip "$(GAME_TOOLS)/venv"; \
-	        $(VENV_CLEAN); \
-	        "$(GAME_TOOLS)/venv/bin/python" -m ensurepip >/dev/null; \
-	    fi; \
+	@if [ ! -x "$(GAME_TOOLS)/venv/bin/python" ]; then \
+	    echo "Creating $(GAME_TOOLS)/venv"; \
+	    python3 -m venv "$(GAME_TOOLS)/venv"; \
 	fi
-	@$(VENV_CLEAN)
 	@"$(GAME_TOOLS)/venv/bin/python" -m pip install -q --upgrade capstone lz4 unicorn
-	@$(VENV_CLEAN)
 	@echo "$(GAME_TOOLS)/venv: capstone, lz4, unicorn ready"
 
 # every module of the game (GAME_MODULES) from your own extracted/exefs

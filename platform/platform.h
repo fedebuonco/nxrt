@@ -1,6 +1,5 @@
 // Host OS layer: everything the runtime needs that differs between macOS and Windows.
-// nx-platform (the lowest layer): platform/macos.c (the one platform there is; this header is where another would plug
-// in), app.c.
+// nx-platform (the lowest layer): platform/linux.c and app.c.
 #pragma once
 #include <pthread.h>
 #include <stdbool.h>

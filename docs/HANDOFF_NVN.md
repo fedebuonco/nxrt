@@ -1,3 +1,6 @@
+> **Steam Deck branch.** This document predates the macOS/Metal and Windows removal. Paths and commands
+> mentioning them are historical; the target is Linux/Vulkan on Steam Deck.
+
 # Handoff: bringing LAS beta_5's runtime into nxrt
 
 > **Project-level handoff: [HANDOFF.md](HANDOFF.md)** — architecture, the three ports, how to build/run, and the

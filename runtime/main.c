@@ -26,7 +26,7 @@ uint32_t nx_code_variant(uint64_t addr) { return NX_HOOK(code_variant) ? NX_HOOK
 
 const char *nx_gamelib_name(void) {
     static char name[64];
-    if (!name[0]) snprintf(name, sizeof name, "%sgame.dylib", nx_game.info.id);
+    if (!name[0]) snprintf(name, sizeof name, "%sgame.so", nx_game.info.id);
     return name;
 }
 
@@ -200,8 +200,7 @@ void reboot_test_frame(uint64_t frame) {
     rt_request_reboot(RT_REBOOT_GAME);
 }
 
-extern const ResetFn __start_resets[] __asm__("section$start$__DATA$__rt_reset");
-extern const ResetFn __stop_resets[] __asm__("section$end$__DATA$__rt_reset");
+extern const ResetFn __start_resets[], __stop_resets[];  // (ELF: defined by the linker)
 
 void backend_reset(void);             // renderer: GPU idle, game textures and address-keyed caches dropped
 void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (re-wrap the heap)
@@ -332,8 +331,8 @@ static void layers_init(void) {
     nx_save_set_profile_dir(NX_HOOK(content_dir));
     if (NX_HOOK(save_read)) nx_save_on_read(NX_HOOK(save_read));
     if (NX_HOOK(save_written)) nx_save_on_write(NX_HOOK(save_written));
-    extern const NxUiBackend g_ui_backend_metal;
-    nxui_set_backend(&g_ui_backend_metal);
+    extern const NxUiBackend g_ui_backend_vulkan;  // TODO(steam-deck): the Vulkan NxUiBackend is not implemented yet
+    nxui_set_backend(&g_ui_backend_vulkan);
 }
 
 int main(int argc, char **argv) {
