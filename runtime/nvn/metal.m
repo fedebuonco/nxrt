@@ -921,7 +921,9 @@ static id<MTLTexture> metalfx_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> in
         LOG("[metalfx] spatial scaler %s\n", supported ? "available" : "not supported on this GPU");
     }
     if (!supported) return nil;
+    if (!in.width || !in.height) return nil;  // (a present while the window has no size)
     NSUInteger ow = (NSUInteger)lround(ow_d), oh = (NSUInteger)lround(oh_d);
+    if (!ow || !oh) return nil;
     if (ow <= in.width * fx + 1 && oh <= in.height * fy + 1) return nil;  // not an upscale: plain sampling is right
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
@@ -1284,7 +1286,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
 
-        float crop[4];  // uv origin and size
+        float crop[4] = {0, 0, 1, 1};  // uv origin and size (the game may show part of the image: present_crop)
         if (NX_HOOK(present_crop)) NX_HOOK(present_crop)(frame, shape, crop, &vx, &vy, &vw, &vh);
         if (NX_HOOK(present_shape)) NX_HOOK(present_shape)((float)shape);
         output_scale_log((unsigned long long)frame, dw, dh, &os);  // (diagnostics: [scale] on a change)
@@ -1496,7 +1498,7 @@ void ui_window_init(void) {
     // NXRT_HIDDEN=1: never shown (automated test runs render off screen without taking the user's focus)
     SDL_WindowFlags wflags = SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (getenv("NXRT_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
-    window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
+    window = SDL_CreateWindow(nx_game.info.title, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows

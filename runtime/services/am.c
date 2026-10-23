@@ -83,7 +83,10 @@ static void self_controller(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 0: LOG("[am] application requested exit\n"); exit(0);
-    case 9: case 62: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    // GetLibraryAppletLaunchableEvent: signaled, as the applet can always be launched here (unsignaled, the game
+    // waited on it forever before opening a library applet - Sky's "attach the straps" guide - and never drew again).
+    case 9: resp->copy_handles[resp->ncopy++] = new_signaled_event(); break;
+    case 62: resp->copy_handles[resp->ncopy++] = new_event(); break;
     case 40: OUT(uint64_t, 0) = 1; resp_size(resp, 8); break;  // CreateManagedDisplayLayer
     case 69: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
     default: UNHANDLED("ISelfController");

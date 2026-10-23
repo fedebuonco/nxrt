@@ -844,6 +844,11 @@ static const char *clear_src =
 
 static id<MTLLibrary> clear_lib(int index) {
     static id<MTLLibrary> libs[8];
+    if (index < 0 || index > 7) {  // (a target index past the 8 NVN has: the shader's INDEX only names its destination)
+        static int logged;
+        if (!logged) logged = 1, LOG("[metal] clear target index %d (clamped to 0)\n", index);
+        index = 0;
+    }
     if (!libs[index]) {
         NSString *src = [@(clear_src) stringByReplacingOccurrencesOfString:@"INDEX" withString:[NSString stringWithFormat:@"%d", index]];
         NSError *err;
@@ -928,6 +933,11 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     id<MTLLibrary> lib = clear_lib(index < 0 ? 0 : index);
     pd.vertexFunction = [lib newFunctionWithName:@"vs"];
     static NSString *const fs[] = {@"fs_f", @"fs_i", @"fs_u"};
+    if (kind < 0 || kind > 2) {  // (a clear whose colour kind the recorder didn't set: float)
+        static int logged_kind;
+        if (!logged_kind) logged_kind = 1, LOG("[metal] clear kind %d idx %d (using float)\n", kind, index);
+        kind = 0;
+    }
     pd.fragmentFunction = [lib newFunctionWithName:index >= 0 ? fs[kind] : @"fs_none"];
     attachment_formats(pd);
     for (int i = 0; i < 8; i++) pd.colorAttachments[i].writeMask = MTLColorWriteMaskNone;
@@ -2902,8 +2912,13 @@ static void draw(CmdRec *r, bool indexed) {
                 }
         }
     }
-    if (pr->fi->uses_tint) {  // per-draw highlight tint (golden unchecked pots, runtime/hle/pot_glow.c)
-        float tint[RECOLOUR_TINT_FLOATS] = {0};
+    if (pr->fi->uses_tint) {  // per-draw tint (the game's: highlights, recoloured items)
+        float tint[8] = {0};
+        if (NX_HOOK(draw_tint)) {
+            static bool noted;
+            if (!noted && getenv("NXRT_LOG_HOOKS")) noted = true, LOG("[hooks] draw_tint called\n");
+            NX_HOOK(draw_tint)(&g_draw, tint);
+        }
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
     }
     for (int s = 0; s < 12; s++) {
@@ -2914,21 +2929,39 @@ static void draw(CmdRec *r, bool indexed) {
     }
     if (used_streams & (1u << 31)) { static const float zero[4] = {0, 0, 0, 1}; [enc setVertexBytes:zero length:16 atIndex:30]; }
 
-    // Instanced draws with item spots among their instances (bushsanity: bushes are drawn in batches, each instance's
-    // model matrix in vertex storage buffer 0, indexed by instance id): drawn as runs of instances, gold runs tinted.
+    // Instanced draws with some instances tinted by the game (each instance's model matrix in vertex storage buffer 0,
+    // indexed by instance id): drawn as runs of instances, each run with its tint.
     // (Metal's instance_id includes the base instance, so a run [b + k, b + k + n) draws exactly those instances.)
-    // Only for a vertex shader that reads storage buffer 0: the binding stays from the last draw that set it, so any
-    // other instanced draw (particle effects: leaves, dust, sparkles) took a bush batch's matrices for its own
-    // instances and was tinted wherever that batch had an unchecked bush at the same index - and a batch of a single
-    // bush was never looked at.
     uint32_t inst_all = indexed ? (uint32_t)r->x[6] : (uint32_t)r->x[4], base_all = indexed ? (uint32_t)r->x[5] : (uint32_t)r->x[3];
     if (!inst_all) inst_all = 1;
     enum { MAX_RUNS = 64 };
     uint32_t run_at[MAX_RUNS], run_n[MAX_RUNS];
     bool run_gold[MAX_RUNS];
+    float run_tint[MAX_RUNS][8];
     int nruns = 0;
-    if (!nruns) { run_at[0] = 0; run_n[0] = inst_all; nruns = 1; run_gold[0] = false; }
+    if (pr->fi->uses_tint && inst_all > 1 && st.sbuf[0][0].addr && NX_HOOK(instance_tint)) {
+        uint64_t recs = st.sbuf[0][0].size / 64;
+        if ((!NX_HOOK(instances_tinted) || NX_HOOK(instances_tinted)()) && (uint64_t)base_all + inst_all <= recs) {
+            const float *m = (const float *)(uintptr_t)st.sbuf[0][0].addr;
+            static bool noted_inst;
+            if (!noted_inst && getenv("NXRT_LOG_HOOKS")) noted_inst = true, LOG("[hooks] instance_tint called\n");
+            for (uint32_t k = 0; k < inst_all; k++) {
+                float t[8] = {0};
+                bool g = NX_HOOK(instance_tint)(m + (size_t)(base_all + k) * 16, t);
+                if (nruns && run_gold[nruns - 1] == g) { run_n[nruns - 1]++; continue; }
+                if (nruns == MAX_RUNS) { nruns = 0; break; }  // (too fragmented: draw as is)
+                run_at[nruns] = k; run_n[nruns] = 1; run_gold[nruns] = g; memcpy(run_tint[nruns], t, sizeof t); nruns++;
+            }
+            if (nruns == 1 && !run_gold[0]) nruns = 0;
+        }
+    }
+    if (!nruns) { run_at[0] = 0, run_n[0] = inst_all, nruns = 1, run_gold[0] = false; }
     for (int ri = 0; ri < nruns; ri++) {
+    if (nruns > 1 || run_gold[0]) {  // (the first run's tint was set above: only overridden when it differs)
+        float tint[8] = {0};
+        if (run_gold[ri]) memcpy(tint, run_tint[ri], sizeof tint);
+        [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
+    }
     // draw
     bool native;
     uint32_t mode = (uint32_t)r->x[0];
@@ -3348,7 +3381,13 @@ static void exec_list(uint64_t handle, int depth) {
                            NvnTextureView dview; uint8_t has_dview; } *rt = x;
             RtState old = st.rt;
             memset(&st.rt, 0, sizeof st.rt);
-            st.rt.ncolor = (int)r->x[0];
+            int ncolor = (int)r->x[0];
+            if (ncolor < 0 || ncolor > 8) {  // (NVN has 8 colour targets; anything else is a recording error)
+                static int logged;
+                if (!logged) logged = 1, LOG("[metal] SetRenderTargets names %d colour targets (clamped)\n", ncolor);
+                ncolor = ncolor < 0 ? 0 : 8;
+            }
+            st.rt.ncolor = ncolor;
             for (int i = 0; i < st.rt.ncolor; i++) {
                 st.rt.color[i] = (NvnTexture *)(uintptr_t)rt->tex[i];
                 st.rt.cview[i] = rt->views[i];

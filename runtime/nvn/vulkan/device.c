@@ -11,6 +11,7 @@
 #include "../../paths.h"
 #include "../../rt.h"  // (HEAP_MAX: lazy_heap_predicted)
 #include "../../settings.h"
+#include "../../nxgame.h"
 #include "../../ui/menu.h"
 #include "../rqueue.h"
 #include "vk.h"
@@ -1140,7 +1141,7 @@ void ui_window_init(void) {
                                             getenv("NXRT_HOST_INPUT") || getenv("NXRT_BIND_TEST"));
         if (scripted) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     }
-    window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
+    window = SDL_CreateWindow(nx_game.info.title, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
