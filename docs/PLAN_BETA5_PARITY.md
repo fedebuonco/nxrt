@@ -25,7 +25,15 @@ LAS port brings the content. Nothing LAS-specific goes into `runtime/`.
 - **M5 done**: HID vibration 201/202/206 → SDL rumble; `input_led_set/poll/stop` for ports.
 - **M6 done**: `romfs_read_filter(path, off, buf, n)` on the IStorage(romfs) read path.
 
-LAS, EoW and Sky build and boot after every mechanism. Next: P1 (LAS recolour/cosmetics on M1).
+LAS, EoW and Sky build and boot after every mechanism.
+
+**P1 in progress** (the LAS port, `games/las/runtime`): beta_5's palette (`cosmetic_colour`) and recolour core
+(`nvn/recolour.c`, adapted to read the game's files through the runtime RomFS rather than host paths) are in, with
+the hair/shield option (`nvn/recolour_link.c`) wired through `texpatch_identify` (ids from
+`TEXPATCH_RECOLOUR_BASE`) and `draw_tint`. Verified: `hair = Pink` in the ini turns Link's hair pink live, 60 fps,
+the three textures recognised (`MI_hair_alb`, `MI_shieldA_alb/B`). Still P1: the other options
+(seasons/enemies/tunic), the remaining colour rows (skin, leaves, grass, sand), Random/Custom in the tab, seed
+cosmetics, and retiring the old upload-time tunic/heart path. The port went from 9,506 to 10,011 lines.
 
 ## Inventory (beta_5 files not in `games/las`, 27 files / ~6.8k lines)
 

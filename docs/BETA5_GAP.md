@@ -28,7 +28,7 @@ deliberately not taken yet. Vulkan is beta_5's code verbatim but has never been 
 | `runtime/` + `platform/ settings/ input/ save/ ui/` | 44,584 | 124 |
 | — in files beta_5 also has | 41,025 | 101 |
 | — nxrt-only (nx-ui, nxpkg, mods, settings split, docs) | 3,559 | 23 |
-| `games/las/runtime/` (the port) | 9,506 | 38 |
+| `games/las/runtime/` (the port) | 10,011 | 41 |
 
 So **96% of the shared lines are in place, and every shared file exists**; the 3.6k nxrt-only lines are the
 refactors that made the runtime game-agnostic (nx-ui/launcher split, package RomFS, mods, settings layer). Area by
