@@ -94,6 +94,10 @@ typedef struct NxUiGameFiles {
     void (*setup_rows)(float scale, bool busy);  // more option rows on the Game Files page, before Set up (e.g. where)
     void (*prelaunch)(float scale);         // Settings' first tab on the start screen ("Prelaunch")
     bool (*files_deleted)(void);            // (Prelaunch deleted them: true once)
+    // OneDrive (Windows): the data root is inside a synced folder. The runtime decides once (the setting's "Keep
+    // here"), the start screen draws the warning. Returns 1 to warn and *gb = the estimate (< 0: still measuring).
+    int (*onedrive_warn)(double *gb);
+    void (*onedrive_keep)(void);
     const char *source_desc;                // the folder row's explanation (which game, which version)
     const char *setup_desc;                 // the Set up row's explanation
     const char *ready_note;                 // under "Game files ready." ("Nintendo Switch · v1.0.0")

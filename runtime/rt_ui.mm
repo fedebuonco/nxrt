@@ -41,6 +41,33 @@ double output_scale_dynamic_factor(void);
 
 static std::string prep_romfs(void);  // (the start screen's shader preparation: defined below, used by the setup thread)
 
+// OneDrive: is the data root inside a synced folder (Windows)? Decided once, remembered in the settings; the size is
+// measured in the background.
+static std::atomic<double> g_od_gb{-1};
+static int g_od_state = -1;
+static void *od_size_thread(void *) {
+    double gb = (double)rt_tree_size(rt_data_root()) / 1e9;
+    if (gb < 0.5) gb = 6.7;  // (nothing set up yet: game files and the built code)
+    g_od_gb = gb;
+    return NULL;
+}
+static int od_warn(double *gb) {
+    if (g_od_state < 0) {
+        g_od_state = !g_settings.onedrive_kept && (getenv("NXRT_TEST_ONEDRIVE") || plat_onedrive_synced(rt_data_root()));
+        if (g_od_state) {
+            pthread_t th;
+            if (pthread_create(&th, NULL, od_size_thread, NULL) == 0) pthread_detach(th);
+        }
+    }
+    *gb = g_od_gb;
+    return g_od_state;
+}
+static void od_keep(void) {
+    g_settings.onedrive_kept = true;
+    settings_save();
+    fprintf(stderr, "[launcher] OneDrive warning: kept here\n");
+}
+
 // ------------------------------------------------------------------ pages: Video, Audio
 static bool tab_display(float) {
     float scale = ImGui::GetFontSize() / 34;
@@ -1045,6 +1072,7 @@ extern "C" void rt_ui_register(void) {
     g.recompiling = files_recompiling, g.job = files_job, g.set_job = files_set_job, g.pick = files_pick;
     g.picked = files_picked, g.start = files_start, g.size_gb = files_size_gb, g.remove = files_remove;
     g.background = load_background, g.prelaunch = prelaunch_tab, g.files_deleted = files_deleted;
+    g.onedrive_warn = od_warn, g.onedrive_keep = od_keep;
     g.setup_rows = setup_rows;
     g.source_desc = g_src_desc.c_str(), g.setup_desc = g_setup_desc.c_str(), g.ready_note = ready.c_str();
     g.test_fail = set_failure, g.test_extract = files_test_extract;

@@ -160,6 +160,7 @@ static bool rt_key(const char *key, const char *val) {
     else if (!strcmp(key, "game_dir")) snprintf(g_settings.game_dir, sizeof g_settings.game_dir, "%s", val);
     else if (!strcmp(key, "game_in_place")) g_settings.game_in_place = atoi(val) != 0;
     else if (!strcmp(key, "aspect_asked")) g_settings.aspect_asked = atoi(val) != 0, g_aspect_key = true;
+    else if (!strcmp(key, "onedrive_kept")) g_settings.onedrive_kept = atoi(val) != 0;
     else if (!strcmp(key, "livesplit")) g_settings.livesplit = atoi(val) != 0;
     else if (!strcmp(key, "livesplit_host")) snprintf(g_settings.livesplit_host, sizeof g_settings.livesplit_host, "%s", val);
     else if (!strcmp(key, "livesplit_port")) g_settings.livesplit_port = atoi(val);
@@ -192,7 +193,7 @@ static void rt_write(FILE *f) {
     fprintf(f, "language = %s\n", g_language_codes[g_settings.language > LANG_AUTO && g_settings.language < N_LANGUAGES
                                                      ? g_settings.language : LANG_AUTO]);
     if (g_settings.game_dir[0]) fprintf(f, "game_dir = %s\ngame_in_place = %d\n", g_settings.game_dir, g_settings.game_in_place);
-    fprintf(f, "aspect_asked = %d\n", g_settings.aspect_asked);
+    fprintf(f, "aspect_asked = %d\nonedrive_kept = %d\n", g_settings.aspect_asked, g_settings.onedrive_kept);
     fprintf(f, "livesplit = %d\nlivesplit_host = %s\nlivesplit_port = %d\n", g_settings.livesplit,
             g_settings.livesplit_host, g_settings.livesplit_port);
 }

@@ -696,6 +696,25 @@ extern "C" void launcher_run(void) {
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("EXIT", true)) exit(0);
                 g_menu_gap = 0.35f;
+                double od_gb = -1;
+                if (g_files.onedrive_warn && g_files.onedrive_warn(&od_gb)) {  // (the warning: upper right, over the still)
+                    ImGui::SetCursorPos(ImVec2(fmaxf(ds.x - 460 * s, 0.0f), 150 * s));
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.86f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
+                    if (ImGui::BeginChild("##onedrive", ImVec2(420 * s, 0), ImGuiChildFlags_AlwaysUseWindowPadding |
+                                          ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NavFlattened)) {
+                        ImGui::PushTextWrapPos(0);
+                        ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  This folder is synced by OneDrive");
+                        if (od_gb < 0) ImGui::TextDisabled("Measuring the game files...");
+                        else ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1),
+                                                "All game files (about %.0f GB) will be uploaded to your OneDrive.", fmax(1.0, od_gb));
+                        ImGui::PopTextWrapPos();
+                        if (ImGui::Button("Keep here") && g_files.onedrive_keep) g_files.onedrive_keep();
+                    }
+                    ImGui::EndChild();
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor();
+                }
             } else if (page == SETTINGS) {
                 // the in-game menu's tabs (runtime/ui/menu.mm), in a window like the in-game one; tabs that need a
                 // loaded game say so
