@@ -1512,6 +1512,7 @@ void ui_window_init(void) {
     // clocks drift). NXRT_DISPLAY_SYNC=0: off (tests).
     layer.displaySyncEnabled = !getenv("NXRT_DISPLAY_SYNC") || atoi(getenv("NXRT_DISPLAY_SYNC")) != 0;
     layer.framebufferOnly = getenv("NXRT_WINDOW_SHOT") ? NO : YES;
+    nxui_metal_setup(window, (__bridge void *)layer, (__bridge void *)dev);  // (the start screen draws into this window)
 }
 
 SDL_Window *ui_window(void) { return window; }
