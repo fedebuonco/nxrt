@@ -21,8 +21,8 @@ renderer, with `beta5-merge` merged into it). `master` and `v0.1.0` are untouche
 nvn-renderer-wip @ 76abe95   beta5-merge merged in; beta_5's renderer runs
   LAS  boots and plays at 60 fps on beta_5's renderer (Metal); title, file select, intro and village/field
        gameplay verified (houses, smoke, cut grass, NPCs all correct); draw_tint confirmed called
-  EoW  boots at 60 fps; its first frame is byte-identical to the beta5-merge build's (black: this dump has no
-       rd000_Title.webm). Gameplay verification still needs a controller in hand.
+  EoW  plays at 60 fps: its title movie (read straight from the package RomFS), then the opening dungeon with
+       the world, HUD and prompts; 0 skipped draws. One compute shader still fails to translate.
   Sky  boots; the library-applet wait is fixed, it now dies inside nn::applet (see "Sky's stall")
 ```
 
@@ -100,25 +100,29 @@ The render queue was never the problem: `rq_on()` starts the render thread lazil
 `backend_init()` is called from `nvnDeviceInitialize`. With the merge in, LAS boots and holds 60 fps on beta_5's
 renderer; the title, file select and intro all render correctly.
 
-### Translator decision
+### Translator: one translator, and why it is beta5-merge's line
 
-`nvn-renderer-wip` keeps **beta_5's translator** (`maxwell/translate.c` + `shader.h`): the imported renderer is
-built around its `ShaderInfo` (MSL sampler table, `ssbo_read`, tint layout), and mixing it with nxrt's translator
-is untested.
+**Decision reversed by evidence.** beta_5's translator cannot run EoW: its world shaders use BREV, FLO.SH and
+HSETP2 immediates, which beta_5's translator does not implement. It failed them (`FS translate failed: bfe brev`,
+`unknown instruction 50d9…`) and skipped the draws, leaving EoW's HUD over a black world. `beta5-merge`'s
+translator was built for exactly that game.
 
-What `beta5-merge`'s translator has that this one does not (see `git diff nvn-renderer-wip beta5-merge --
-runtime/nvn/maxwell/translate.c`, ~25 hunks):
+So `nvn-renderer-wip` now uses **`beta5-merge`'s translator**, with beta_5's one game-visible addition ported on top:
+the Metal sampler map for fragment shaders with more than 16 textures (issue #215, the Ukuku cave-floor shader:
+samplers as an array, a table naming each texture's slot; `renderer.m` already had the renderer side). `shader.h`
+keeps the superset (`alpha_func`/`dual_source`, the Metal sampler constants, `ssbo_read` for the Vulkan backend).
 
-- **HSETP2 / HSET2 immediate forms** (`op & 0xfe80 == 0x7e00 / 0x7c00`), with the comparison moved to bits 49-52
-  and H_AND / BF to 53 — checked on EoW's `7e0683bc0f071507`. Without it those instructions are mistranslated.
-- **Structured control flow** (`fwd`, `fwd_tail`): blocks in pc order, loops as `for (;;)`, which the pc state
-  machine needs for irreducible shaders. This touches every branch instruction, so it is not a small patch.
-- `alpha_func` / `dual_source` in `ShaderKey` (Vulkan alpha test, dual-source blending) and the tint as
-  `vec4 ltint[2]` instead of beta_5's `ltint[4]` recolour layout.
+Evidence: LAS 0 translate failures at 59.9 fps, EoW's world renders with 0 skipped draws. One EoW compute shader
+still fails (`eb20138600f70018`), and Sky is untested since this swap.
 
-Two honest options: port the structured-flow and HSETP2 work forward hunk by hunk, or switch to nxrt's translator
-and teach beta_5's renderer its conventions (the >16-texture sampler table is the main one). The EoW play session
-decides whether either is needed now; LAS does not use those instructions.
+What beta_5's translator still has that this one does not, if we want it for every port:
+
+- **Cosmetics recolour** (`emit_recolour_window`, `ltint[4]`, HSV windows). Currently unreachable: `draw_tint` hands
+  the renderer 8 floats (two vec4) and the recolour needs all four. Porting it means widening the hook to 16 floats
+  and restoring `recolour.c`'s caller.
+- **Vulkan chunked heap** (`maxwell_gmem_chunk_shift`/`lazy`: windows or buffer references instead of one buffer for
+  the whole heap; the AMD/Intel path). The Vulkan backend still reads the controls, but this translator binds the
+  whole heap as one buffer. Vulkan-only, testable only where Vulkan runs.
 
 ### What the interface still needed
 
@@ -129,8 +133,8 @@ The import claimed the hooks were back; `draw_tint`, `instance_tint` and `instan
 
 ### Next, in order
 
-1. **EoW in game** (Metal): its boot frame is byte-identical to beta5-merge's (black, no title movie in this dump)
-   and it holds 60 fps; what is left is a play session to the first 3D scene, the gate for the translator differences.
+1. **EoW in game** (Metal): done past the first 3D scene (opening dungeon, 60 fps). What is left is a longer play
+   session (combat, menus, save/load) and the one untranslated compute shader (`eb20138600f70018`).
 2. **LAS in a dungeon**: pots/items (draw_tint, instance_tint) and the Hint Sheet icon (`tex_replace`), against
    beta5-merge's renderer. `draw_tint` is confirmed called in the field; the item/pot visuals are not yet compared.
 3. **Vulkan**: the same interface audit in `vulkan/exec.c` + `record.c`, on a machine where it runs.
