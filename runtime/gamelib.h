@@ -27,12 +27,18 @@
 #define GAMELIB_ABI 2
 #define GAMELIB_FULL_ID_SIZE 96
 
-// The id a library built for this game folder has. nxrt keeps GAMELIB_ID alone (a hash of the tools, headers and flags,
-// independent of where nxrt lives); LAS beta_5's "-<game build id>" suffix is not adopted here.
+// The id a library for the game files in game_dir has (GAMELIB_ID-<build ID>); false when exefs/main is unreadable.
 static inline bool gamelib_full_id(const char *game_dir, char *out, size_t size) {
-    (void)game_dir;
-    if (size < sizeof GAMELIB_ID) return false;
-    snprintf(out, size, "%s", GAMELIB_ID);
+    char path[1100];
+    unsigned char hdr[0x60];
+    snprintf(path, sizeof path, "%s/exefs/main", game_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr && !memcmp(hdr, "NSO0", 4);
+    fclose(f);
+    if (!ok) return false;
+    int n = snprintf(out, size, "%s-", GAMELIB_ID);
+    for (int i = 0; i < 8 && n + 2 < (int)size; i++) n += snprintf(out + n, size - n, "%02X", hdr[0x40 + i]);
     return true;
 }
 
