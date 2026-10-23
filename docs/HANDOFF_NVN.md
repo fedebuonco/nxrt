@@ -104,8 +104,21 @@ renderer; the title, file select and intro all render correctly.
 
 `nvn-renderer-wip` keeps **beta_5's translator** (`maxwell/translate.c` + `shader.h`): the imported renderer is
 built around its `ShaderInfo` (MSL sampler table, `ssbo_read`, tint layout), and mixing it with nxrt's translator
-is untested. The cost: nxrt's later translator fixes (HSETP2 immediate forms, structured dispatch loops, the
-chunked-gmem Vulkan work) are not in it. Porting them forward is a separate, visible task.
+is untested.
+
+What `beta5-merge`'s translator has that this one does not (see `git diff nvn-renderer-wip beta5-merge --
+runtime/nvn/maxwell/translate.c`, ~25 hunks):
+
+- **HSETP2 / HSET2 immediate forms** (`op & 0xfe80 == 0x7e00 / 0x7c00`), with the comparison moved to bits 49-52
+  and H_AND / BF to 53 — checked on EoW's `7e0683bc0f071507`. Without it those instructions are mistranslated.
+- **Structured control flow** (`fwd`, `fwd_tail`): blocks in pc order, loops as `for (;;)`, which the pc state
+  machine needs for irreducible shaders. This touches every branch instruction, so it is not a small patch.
+- `alpha_func` / `dual_source` in `ShaderKey` (Vulkan alpha test, dual-source blending) and the tint as
+  `vec4 ltint[2]` instead of beta_5's `ltint[4]` recolour layout.
+
+Two honest options: port the structured-flow and HSETP2 work forward hunk by hunk, or switch to nxrt's translator
+and teach beta_5's renderer its conventions (the >16-texture sampler table is the main one). The EoW play session
+decides whether either is needed now; LAS does not use those instructions.
 
 ### What the interface still needed
 
