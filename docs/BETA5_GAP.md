@@ -64,6 +64,22 @@ Ignoring cosmetics (recolours + cosmetic seed: 281 lines), the missing set is **
 These do not affect the three games booting/playing; they are LAS's extra features. They belong in the LAS port,
 not in nxrt.
 
+### In nxrt (shared): the general-purpose leftovers
+
+Everything else beta_5 has that nxrt lacks is LAS game code. The shared list is short:
+
+| shared item | state | size |
+|---|---|---|
+| **Vulkan backend** | beta_5's code, never compiled here: **38 references to LAS-only symbols** (`pot_tint`, `recolour_tint_draw`, `texpatch_*`, `escape_bottle_tint`, `pets_*`), no `RECOLOUR_TINT_FLOATS`, no tint v2, no chunked heap | ~150 lines of decoupling + the chunking, then a Vulkan machine |
+| **Startup shader preparation** | `shader_prep_run` + progress bar + Skip on the start screen; the code is imported, but only reachable through the `NXRT_SHADER_PREP` test at device init | ~35 lines of launcher wiring |
+| **Overlay caching** | beta_5 renders the HUD overlays into a cached texture (`g_ov_cache`, menu.mm); missing here — overlays are re-rendered every frame | ~70 lines |
+| **Controls rows for the new mechanisms** | rumble on/off + intensity, LED on/off, LiveSplit on/host/port: the mechanisms and ini keys exist, the rows do not | ~50 lines |
+| **OneDrive warning** | Windows start screen, when the data root is in a synced folder | ~70 lines |
+| **`opt_colour` row** | the colour-picker row type in `option_rows` | ~20 lines (cosmetics only) |
+| **Kernel diagnostics** | beta_5's `KTRACE`/wait trace; the scheduling half stays out (deadlocked EoW) | ~460 lines, optional |
+
+So the shared work left is **roughly 650 lines plus Vulkan**, against 3.4k lines of LAS game features.
+
 ### In nxrt (shared), deliberately not taken
 
 - **Translator recolour** (`emit_recolour_window`, `ltint[4]`): **now in** (M1 — the 16-float tint hook and the
