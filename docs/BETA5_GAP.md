@@ -53,17 +53,19 @@ the **Controls rows** for the mechanisms (Rumble on/off + strength, Controller l
 |---|---|---:|
 | **Vulkan backend** | still beta_5's code, never compiled here: **38 references to LAS-only symbols** (`pot_tint`, `recolour_tint_draw`, `texpatch_*`, `escape_bottle_tint`, `pets_*`), no `RECOLOUR_TINT_FLOATS`, no tint v2, no chunked heap. Needs a machine where Vulkan builds — see "The one unknown" | ~150 lines of decoupling + the chunking |
 | **`opt_colour` row** | skipped by decision: it is cosmetics-only, and beta_5's version depends on the game's palette types (`CosColour`), so a shared one would need a different API first | ~20 lines |
-| **Kernel diagnostics** | beta_5's `KTRACE`/wait trace; optional developer tooling, not needed by any game | ~460 lines |
+| ~~Kernel diagnostics~~ | **done**: the kernel trace ring (`NXRT_KTRACE=0` off: the last 256 condition-variable / mutex kernel calls, with the words before and after) and the hang watch now also catches the main thread stuck in one kernel wait (`wait_since`, startup hangs), plus `NXRT_HANG_DUMP_TEST=1` to print the dump on demand | — |
 
-So the only shared work left that matures the library is **Vulkan**; the kernel diagnostics are optional.
+So the only shared work left is **Vulkan**; the diagnostics are done (the scheduling half of beta_5's kernel stays out
+deliberately — it deadlocked EoW).
 
 ## Two things that look like gaps but are not
 
 - **Files smaller than beta_5's are mostly splits**: `launcher.mm` (832 here + `rt_ui.mm`), `settings.c` (62 +
   `rt_settings.c`), `input.c` (566 + `bindings.c`), `controls_ui.mm` (114 + the binding rows). Line counts per name
   understate nxrt's code there.
-- **Deliberately not taken**: beta_5's kernel scheduling changes (deadlock on EoW) and, for now, the Vulkan chunked
-  heap. The translator recolour that was on this list is **in** now (16-float tint + recolour branch).
+- **Deliberately not taken**: beta_5's kernel scheduling changes (deadlock on EoW: the waitlist fairness, the
+  cancel/condvar semantics and the atomic arbiter updates) and, for now, the Vulkan chunked heap. The translator
+  recolour and the kernel trace/dump are **in** now.
 
 ## The one unknown
 
