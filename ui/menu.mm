@@ -77,6 +77,7 @@ static bool ui_key(const char *key, const char *val) {
     if (!strcmp(key, "fullscreen")) g_ui_settings.fullscreen = atoi(val) != 0;
     else if (!strcmp(key, "show_fps")) g_ui_settings.show_fps = atoi(val) != 0;
     else if (!strcmp(key, "menu_tip_seen")) g_ui_settings.menu_tip_seen = atoi(val) != 0, g_tip_key = true;
+    else if (!strcmp(key, "menu_confirm")) g_ui_settings.menu_confirm = atoi(val) == NXUI_CONFIRM_CONTROLLER ? NXUI_CONFIRM_CONTROLLER : NXUI_CONFIRM_GAME;
     else return false;
     return true;
 }
@@ -87,6 +88,7 @@ static void ui_write(FILE *f) {
     fprintf(f, "fullscreen = %d\n", g_ui_settings.fullscreen);
     fprintf(f, "show_fps = %d\n", g_ui_settings.show_fps);
     fprintf(f, "menu_tip_seen = %d\n", g_ui_settings.menu_tip_seen);
+    fprintf(f, "menu_confirm = %d\n", g_ui_settings.menu_confirm);
 }
 static bool tab_saves(float scale);
 void nxui_init(void) {

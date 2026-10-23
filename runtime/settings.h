@@ -50,3 +50,4 @@ void rt_settings_register(void);  // the runtime's and the game's sections (main
 const char *settings_language(void);
 // That code's name for the menu ("Spanish")
 const char *settings_language_name(void);
+extern bool g_gpu_integrated;  // an integrated GPU (output scales differently at 1x)

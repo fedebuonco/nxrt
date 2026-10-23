@@ -20,7 +20,7 @@
 #include <strings.h>
 
 #include "../hle.h"
-#include "../paths.h"
+#include "paths.h"
 
 typedef struct { uint64_t addr, size; } Font;
 // SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExt, 3 ChineseTraditional, 4 Korean, 5 NintendoExt

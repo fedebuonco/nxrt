@@ -789,3 +789,19 @@ void rt_window_icon(SDL_Window *w) {
     SDL_Surface *s = SDL_LoadPNG(p);
     if (s) SDL_SetWindowIcon(w, s), SDL_DestroySurface(s);
 }
+
+// ---- the game folder: <data root>/extracted, or where the player chose to keep the game (e.g. a portable drive)
+// (nxrt's: the host registers the game code library's name and chooses the folder; beta_5's paths.c did not carry it.)
+static char g_game_dir[1100] = "extracted";
+static bool g_owns_source = true;
+static char g_extra[8][80];
+static int g_nextra;
+void rt_game_files_add(const char *name) {
+    if (g_nextra < 8) snprintf(g_extra[g_nextra++], sizeof g_extra[0], "%s", name);
+}
+void rt_game_dir_set(const char *dir, bool owns_source) {
+    snprintf(g_game_dir, sizeof g_game_dir, "%s", dir && *dir ? dir : "extracted");
+    g_owns_source = owns_source;
+}
+const char *rt_game_dir(void) { return g_game_dir; }
+bool rt_game_dir_owns_source(void) { return g_owns_source; }

@@ -6,7 +6,6 @@
 #include <sys/stat.h>
 
 #include "shaders.h"
-#include "../screen_filter.h"
 
 void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
     shaderc_compiler_t c = shaderc_compiler_initialize();
@@ -249,39 +248,9 @@ static const char *builtin_src(const char *name, int *stage) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
                "layout(set = 0, binding = 0) uniform sampler2D t;\n"
-               "layout(push_constant) uniform F { layout(offset = 32) vec4 pf; };\n"  // (the screen filter)
                "layout(location = 0) in vec2 uv;\n"
                "layout(location = 0) out vec4 o;\n"
-               "void main() {\n"
-               "  vec3 c = texture(t, uv).rgb;\n"
-               SCREEN_FILTER_SRC("vec3")
-               "  o = vec4(c, 1.0);\n"
-               "}\n";
-    }
-    // ---- decoded video, NV12 -> RGBA (exec.c vk_convert_nv12): limited range BT.601, as swscale did (the movies
-    // declare no matrix). Fullscreen triangle; Vulkan NDC y points down, so uv = p.
-    if (!strcmp(name, "nv12.vert")) {
-        *stage = STAGE_VERTEX;
-        return "#version 450\n"
-               "layout(location = 0) out vec2 uv;\n"
-               "void main() {\n"
-               "  vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n"
-               "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
-               "  uv = p;\n"
-               "}\n";
-    }
-    if (!strcmp(name, "nv12.frag")) {
-        *stage = STAGE_FRAGMENT;
-        return "#version 450\n"
-               "layout(set = 0, binding = 0) uniform sampler2D ty;\n"
-               "layout(set = 0, binding = 1) uniform sampler2D tuv;\n"
-               "layout(location = 0) in vec2 uv;\n"
-               "layout(location = 0) out vec4 o;\n"
-               "void main() {\n"
-               "  float y = (texture(ty, uv).r - 16.0 / 255.0) * (255.0 / 219.0);\n"
-               "  vec2 c = (texture(tuv, uv).rg - 128.0 / 255.0) * (255.0 / 224.0);\n"
-               "  o = vec4(clamp(vec3(y + 1.402 * c.y, y - 0.344136 * c.x - 0.714136 * c.y, y + 1.772 * c.x), 0.0, 1.0), 1.0);\n"
-               "}\n";
+               "void main() { o = vec4(texture(t, uv).rgb, 1.0); }\n";
     }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
     // Each draws a fullscreen triangle into an image the size of its output; push constants: two vec4.

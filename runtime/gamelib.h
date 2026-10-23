@@ -3,6 +3,7 @@
 // Nothing from the game ships with the app.
 #pragma once
 #include <stdbool.h>
+#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,6 +25,16 @@
 #define GAMELIB_ID "dev"
 #endif
 #define GAMELIB_ABI 2
+#define GAMELIB_FULL_ID_SIZE 96
+
+// The id a library built for this game folder has. nxrt keeps GAMELIB_ID alone (a hash of the tools, headers and flags,
+// independent of where nxrt lives); LAS beta_5's "-<game build id>" suffix is not adopted here.
+static inline bool gamelib_full_id(const char *game_dir, char *out, size_t size) {
+    (void)game_dir;
+    if (size < sizeof GAMELIB_ID) return false;
+    snprintf(out, size, "%s", GAMELIB_ID);
+    return true;
+}
 
 typedef struct {
     const char *name;       // the module (nx_game.info.modules)

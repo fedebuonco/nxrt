@@ -275,3 +275,7 @@ static int rm_entry(const char *path, const struct stat *sb, int flag, struct FT
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
 bool plat_onedrive_synced(const char *dir) { (void)dir; return false; }
+
+void plat_thread_core(int role) { (void)role; }
+
+void plat_thread_name(const char *name) { pthread_setname_np(name); }

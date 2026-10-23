@@ -37,7 +37,9 @@ typedef struct NxUiSettings {
     bool fullscreen;
     bool show_fps;       // a frame rate counter in the corner
     bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
+    int menu_confirm;    // which button confirms in the menus: NXUI_CONFIRM_GAME (A, the game's layout) or the controller convention
 } NxUiSettings;
+enum { NXUI_CONFIRM_GAME = 0, NXUI_CONFIRM_CONTROLLER = 1 };
 extern NxUiSettings g_ui_settings;
 void nxui_set_fullscreen(bool on);  // (F11 / Alt+Enter too) applied by menu_apply_window_requests
 

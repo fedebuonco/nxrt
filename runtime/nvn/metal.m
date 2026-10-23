@@ -1,7 +1,9 @@
 #include <sys/mman.h>
 #include "paths.h"
 #include "settings.h"
-#include "ui/menu.h"
+#include "menu.h"
+#include "nx_ui.h"
+#include "nx_ui_metal.h"
 // Metal renderer for the NVN layer: window, textures, command execution, presentation.
 #include <sys/stat.h>
 #import <AppKit/AppKit.h>
@@ -14,13 +16,8 @@
 #include <stdatomic.h>
 
 #include "nvn.h"
-#include "rqueue.h"
-#include "../game_addresses.h"
 #include "renderer.h"
-#include "pace.h"
-#include "texpatch.h"
-#include "tex_hash.h"
-#include "screen_filter.h"
+#include "../nxgame.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandQueue> queue;
@@ -99,13 +96,9 @@ static MtlFormat mtl_format(uint32_t f) {
     case 0x49: return (MtlFormat){MTLPixelFormatBC4_RUnorm};
     case 0x4A: return (MtlFormat){MTLPixelFormatBC4_RSnorm};
     case 0x4B: return (MtlFormat){MTLPixelFormatBC5_RGUnorm};
-    // 0x4C = signed RGTC2 (interior normal maps break if decoded unsigned). LARECOMP_BC5_UNORM=1 decodes it
+    // 0x4C = signed RGTC2 (interior normal maps break if decoded unsigned). NXRT_BC5_UNORM=1 decodes it
     // unsigned: that removes the overworld grass hatch/moire (see notes/PLAN.md) but wrecks interiors.
-    case 0x4C: {
-        static int unorm = -1;  // (per texture lookup: getenv scans the environment)
-        if (unorm < 0) unorm = getenv("LARECOMP_BC5_UNORM") != NULL;
-        return (MtlFormat){unorm ? MTLPixelFormatBC5_RGUnorm : MTLPixelFormatBC5_RGSnorm};
-    }
+    case 0x4C: return (MtlFormat){getenv("NXRT_BC5_UNORM") ? MTLPixelFormatBC5_RGUnorm : MTLPixelFormatBC5_RGSnorm};
     case 0x4D: return (MtlFormat){MTLPixelFormatBC7_RGBAUnorm};
     case 0x4E: return (MtlFormat){MTLPixelFormatBC7_RGBAUnorm_sRGB};
     case 0x4F: return (MtlFormat){MTLPixelFormatBC6H_RGBFloat};
@@ -166,16 +159,14 @@ typedef struct {
     uint64_t data_hash, sample_hash;
     uint64_t checked_frame, full_frame;
     bool scalable;       // screen-shaped render target: allocated at the output resolution
-    float ax, ay;        // allocation scale (the Metal texture's size); sx, sy below: the scale its contents were drawn at
     bool presented;      // has been shown by backend_present (a swapchain image)
     uint64_t touched_frame;  // last frame it was written (cleared at the first write of a frame when reshaped)
     uint32_t level_gen;      // g_level_gen when last used as a render target
-    uint64_t frame_cleared;  // LARECOMP_FRAME_CLEAR: frame it was last cleared at first use
+    uint64_t frame_cleared;  // NXRT_FRAME_CLEAR: frame it was last cleared at first use
     float sx, sy;        // allocation scale relative to the guest's size
     int reg;             // slot in g_reg (live textures, for the "largest textures" dump) + 1
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
-    bool format_views;   // allocated with MTLTextureUsagePixelFormatView (NvnTexture.format_views)
 } TexBackend;
 
 // Live textures (diagnostics: the overworld slowdown at 32:9 - the same textures used 870 MB and 4x the GPU time
@@ -203,8 +194,8 @@ static void dump_largest_textures(const char *why) {
         TexBackend *b = g_reg[i] ? (TexBackend *)g_reg[i]->backend : NULL;
         if (!b || !b->tex) continue;
         uint64_t a = b->tex.allocatedSize;
-        if (n == 16 && a <= sz[15]) continue;  // (full: smaller than the 16th. The check came after the 16th entry
-        int k = n < 16 ? n++ : 15;             //  was counted, against an unset sz[15] - an unset idx[15]: #102)
+        int k = n < 16 ? n++ : 15;
+        if (k == 15 && n == 16 && a <= sz[15]) continue;
         while (k > 0 && sz[k - 1] < a) { sz[k] = sz[k - 1]; idx[k] = idx[k - 1]; k--; }
         sz[k] = a; idx[k] = i;
     }
@@ -219,23 +210,16 @@ static void dump_largest_textures(const char *why) {
 }
 
 static uint64_t frames, total_frames;
-uint64_t renderer_present_count(void) { return total_frames; }  // (the game thread's frame: the HLE hooks')
-// The frame whose work is being translated (rqueue.h rq_frame): "once per frame" state of the translation. Without the
-// render thread, total_frames.
-uint64_t renderer_exec_frame(void) { return rq_current_item() ? rq_frame() : total_frames; }
+uint64_t renderer_present_count(void) { return total_frames; }
 
 // Output resolution: render targets the game sizes for the 1920x1080 screen are allocated at
 // (sx, sy) times their guest size. Shaders and the renderer keep working in guest ("logical") units.
-static float g_rs_x = 1, g_rs_y = 1;   // the render scale: what the frame is drawn at
-static float g_al_x = 1, g_al_y = 1;   // the allocation scale: the size of scalable textures (Dynamic: the frame uses a part)
+static float g_rs_x = 1, g_rs_y = 1;
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs_x; *sy = g_rs_y; }
 void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
-void renderer_set_alloc_scale(float ax, float ay) { g_al_x = ax; g_al_y = ay; }
 
 static bool tex_scalable(const NvnTexture *t) {
-    static int off = -1;  // (per texture lookup: cached)
-    if (off < 0) off = getenv("LARECOMP_NO_SCALE") != NULL;
-    if (off) return false;
+    if (getenv("NXRT_NO_SCALE")) return false;
     if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
     return a > 1.74f && a < 1.81f;  // 16:9 (1920x1080 and its fractions, 704x396, 60x33...)
@@ -247,51 +231,50 @@ bool renderer_texture_first_write(NvnTexture *t) {
     extern bool g_debug_frame;
     if (g_debug_frame && b && b->presented)
         LOG("[fw] tex %p %ux%u f%#x sx %.2f sy %.2f touched %llu now %llu\n", (void *)t, t->width, t->height, t->format,
-            b->sx, b->sy, (unsigned long long)b->touched_frame, (unsigned long long)renderer_exec_frame() + 1);
-    if (!b || !b->presented || (b->sx == b->sy) || b->touched_frame == renderer_exec_frame() + 1) return false;
-    b->touched_frame = renderer_exec_frame() + 1;
+            b->sx, b->sy, (unsigned long long)b->touched_frame, (unsigned long long)total_frames + 1);
+    if (!b || !b->presented || (b->sx == b->sy) || b->touched_frame == total_frames + 1) return false;
+    b->touched_frame = total_frames + 1;
     return true;
 }
 
 // A new level gets fresh render-target memory on the Switch (black); ours keep the previous level's pixels, which
 // show wherever a level never draws (the phone booth's surroundings). Render targets are cleared at their first
-// use after a level change (LARECOMP_KEEP_TARGETS=1 disables).
+// use after a level change (NXRT_KEEP_TARGETS=1 disables).
 static uint32_t g_level_gen = 1;
 static void level_change_check(void) {
-    extern const char *game_level_name(void);
     static char last[64];
-    const char *lv = game_level_name();
+    const char *lv = NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "";
     if (strncmp(lv, last, sizeof last - 1) != 0) {
         strlcpy(last, lv, sizeof last);
-        // only levels that never draw their surroundings: clearing everywhere also wipes targets other rooms
-        // carry over (a house lost a band of its walls)
-        if (!strncmp(lv, "TelephoneBox", 12) || getenv("LARECOMP_CLEAR_ALL_LEVELS")) g_level_gen++;
+        // only scenes that never draw their surroundings (the game says which): clearing everywhere also wipes
+        // targets other rooms carry over
+        if ((NX_HOOK(scene_fresh_targets) && NX_HOOK(scene_fresh_targets)(lv)) || getenv("NXRT_CLEAR_ALL_LEVELS")) g_level_gen++;
     }
 }
-// Scene render targets are cleared to transparent black at their first use in each frame (LARECOMP_NO_FRAME_CLEAR=1
+// Scene render targets are cleared to transparent black at their first use in each frame (NXRT_NO_FRAME_CLEAR=1
 // disables): pixels a frame never draws (inside pits, around generated rooms) otherwise keep older frames' content
 // and smear (moving enemies over a pit left trails, the pit rim repeated downwards). Verified 2026-10-08 on
 // rando/DevGen3 Tail Cave 07D: clean dark pit, no trails; overworld / dungeon rooms otherwise unchanged.
 bool renderer_texture_frame_fresh(NvnTexture *t) {
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_NO_FRAME_CLEAR") == NULL;
+    if (on < 0) on = getenv("NXRT_NO_FRAME_CLEAR") == NULL;
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
-    if (!on || !b || !b->scalable || b->frame_cleared == renderer_exec_frame() + 1) return false;
-    b->frame_cleared = renderer_exec_frame() + 1;
+    if (!on || !b || !b->scalable || b->frame_cleared == total_frames + 1) return false;
+    b->frame_cleared = total_frames + 1;
     return true;
 }
 
 bool renderer_texture_level_fresh(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     static int keep = -1;
-    if (keep < 0) keep = getenv("LARECOMP_KEEP_TARGETS") != NULL;
+    if (keep < 0) keep = getenv("NXRT_KEEP_TARGETS") != NULL;
     if (!b || keep || b->level_gen == g_level_gen) return false;
     if (!b->scalable) { b->level_gen = g_level_gen; return false; }  // scene buffers only: UI textures the game draws once
                                                                        // and reuses (rupee counter) must keep their contents
     bool fresh = b->level_gen != 0;  // first use ever: nothing stale to hide
     b->level_gen = g_level_gen;
-    if (fresh && getenv("LARECOMP_LOG_LEVELCLEAR"))
-        LOG("[levelclear] gen %u frame %llu tex %p %ux%u fmt %#x addr %llx\n", g_level_gen, (unsigned long long)renderer_exec_frame(), (void *)t,
+    if (fresh && getenv("NXRT_LOG_LEVELCLEAR"))
+        LOG("[levelclear] gen %u frame %llu tex %p %ux%u fmt %#x addr %llx\n", g_level_gen, (unsigned long long)total_frames, (void *)t,
             t->width, t->height, t->format, (unsigned long long)t->addr);
     return fresh;
 }
@@ -328,7 +311,6 @@ static MTLTextureType mtl_tex_type(uint32_t target, uint32_t samples) {
 
 static void create_backend_texture(NvnTexture *t, TexBackend *b);
 static void release_backend_texture(NvnTexture *t, TexBackend *b);
-static void texture_allow_format_views(NvnTexture *t, TexBackend *b);
 int g_tex_live;              // (stats: Metal textures alive and their size)
 uint64_t g_tex_live_bytes;
 void renderer_texture_gone(void *nvn_tex, void *mtl_tex);  // renderer.m
@@ -336,16 +318,15 @@ void renderer_texture_gone(void *nvn_tex, void *mtl_tex);  // renderer.m
 static TexBackend *tex_backend(NvnTexture *t) {
     if (t->backend) {
         TexBackend *b = (TexBackend *)t->backend;
-        if (b->scalable && (b->ax != g_al_x || b->ay != g_al_y)) {  // output resolution changed: reallocate
+        if (b->scalable && (b->sx != g_rs_x || b->sy != g_rs_y)) {  // output resolution changed: reallocate
             release_backend_texture(t, b);
             create_backend_texture(t, b);
         }
-        if (t->format_views && !b->format_views) texture_allow_format_views(t, b);
         return b;
     }
     TexBackend *b = calloc(1, sizeof *b);
     b->scalable = tex_scalable(t);
-    if (t->width == 1920 && t->height == 1080 && getenv("LARECOMP_LOG_SCALABLE"))
+    if (t->width == 1920 && t->height == 1080 && getenv("NXRT_LOG_SCALABLE"))
         LOG("[scale] 1920x1080 tex %p f%#x flags %#x target %u samples %u levels %u -> scalable %d (%s)\n", (void *)t, t->format,
             t->flags, t->target, t->samples, t->levels, b->scalable, t->label);
     create_backend_texture(t, b);
@@ -360,66 +341,16 @@ int renderer_texpatch_of(NvnTexture *t) {
     return b && b->tp > 0 ? b->tp - 1 : -1;
 }
 
-// A scalable render target starts cleared in full (Vulkan: textures.c create_image). Dynamic resolution draws into its
-// top-left part only, and the game's blurs (bloom, depth of field) sample a few texels past that part's edges, where a
-// new texture holds whatever its memory held before - bit patterns that read as NaN / infinity in a float target
-// among them. Pulled into the bloom chain they spread and stayed: a pure green band down the right edge (red and blue
-// NaN), in some runs from the start and in most after a window resize, which reallocates every scalable target
-// (issue #205: switching fullscreen / windowed). Match display and the fixed resolutions draw the whole target, so
-// nothing past it is read. Its own command buffer, committed before the frame's that use the texture.
-// LARECOMP_NEW_TARGET_FILL=<r>,<g>,<b>,<a> (test): that colour instead (depth 1, stencil 0xff); nan,0,nan,0 shows
-// the band every time without this clear's zeros.
-static void clear_new_target(id<MTLTexture> tex) {
-    static int fill = -1;
-    static float fc[4];
-    if (fill < 0)
-        fill = getenv("LARECOMP_NEW_TARGET_FILL") &&
-               sscanf(getenv("LARECOMP_NEW_TARGET_FILL"), "%f,%f,%f,%f", &fc[0], &fc[1], &fc[2], &fc[3]) == 4;
-    MTLPixelFormat pf = tex.pixelFormat;
-    // (the depth / stencil formats mtl_format gives)
-    bool depth = pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float ||
-                 pf == MTLPixelFormatDepth32Float_Stencil8;
-    bool stencil = pf == MTLPixelFormatStencil8 || pf == MTLPixelFormatDepth32Float_Stencil8;
-    @autoreleasepool {
-        id<MTLCommandBuffer> cb = [queue commandBuffer];
-        for (NSUInteger lv = 0; lv < tex.mipmapLevelCount; lv++) {
-            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-            if (depth || stencil) {
-                if (depth) {
-                    rp.depthAttachment.texture = tex, rp.depthAttachment.level = lv;
-                    rp.depthAttachment.loadAction = MTLLoadActionClear, rp.depthAttachment.clearDepth = fill ? 1 : 0;
-                    rp.depthAttachment.storeAction = MTLStoreActionStore;
-                }
-                if (stencil) {
-                    rp.stencilAttachment.texture = tex, rp.stencilAttachment.level = lv;
-                    rp.stencilAttachment.loadAction = MTLLoadActionClear, rp.stencilAttachment.clearStencil = fill ? 0xff : 0;
-                    rp.stencilAttachment.storeAction = MTLStoreActionStore;
-                }
-            } else {
-                rp.colorAttachments[0].texture = tex, rp.colorAttachments[0].level = lv;
-                rp.colorAttachments[0].loadAction = MTLLoadActionClear;
-                rp.colorAttachments[0].clearColor = fill ? MTLClearColorMake(fc[0], fc[1], fc[2], fc[3])
-                                                         : MTLClearColorMake(0, 0, 0, 0);
-                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-            }
-            [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
-        }
-        [cb commit];
-    }
-}
-
 static void create_backend_texture(NvnTexture *t, TexBackend *b) {
     MtlFormat mf = mtl_format(t->format);
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     d.textureType = mtl_tex_type(t->target, t->samples);
     d.pixelFormat = mf.pf;
-    b->ax = b->scalable ? g_al_x : 1;
-    b->ay = b->scalable ? g_al_y : 1;
     b->sx = b->scalable ? g_rs_x : 1;
     b->sy = b->scalable ? g_rs_y : 1;
     uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
     if (b->scalable) {
-        tw = (uint32_t)lroundf(tw * b->ax); th = (uint32_t)lroundf(th * b->ay);
+        tw = (uint32_t)lroundf(tw * b->sx); th = (uint32_t)lroundf(th * b->sy);
         if (tw < 1) tw = 1;
         if (th < 1) th = 1;
     }
@@ -436,14 +367,11 @@ static void create_backend_texture(NvnTexture *t, TexBackend *b) {
         if (d.mipmapLevelCount > m) d.mipmapLevelCount = m;
     }
     if (t->samples > 1) { d.sampleCount = t->samples; d.mipmapLevelCount = 1; }
-    // No ShaderWrite (images are never bound on Metal) and PixelFormatView only for a texture the game views in another
-    // format (backend_texture_view_format): either flag keeps Apple GPUs from compressing the texture losslessly, which
-    // cost 6-11% of the GPU time at 5120x1440 (2026-10-18).
-    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | (t->format_views ? MTLTextureUsagePixelFormatView : 0);
-    b->format_views = t->format_views;
+    d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView | MTLTextureUsageRenderTarget |
+              MTLTextureUsageShaderWrite;
     d.storageMode = MTLStorageModePrivate;
-    // Depth stays uncompressed: compressed, the ambient occlusion around walls, trees and furniture disappeared (every
-    // lit scene, 2026-10-18), although depth sampled in isolation reads the same values either way.
+    // Shaders sample depth through ordinary texture2d bindings (Maxwell has no separate depth type);
+    // keep depth uncompressed so those reads see the stored values.
     if (renderer_format_is_depth(t->format)) d.allowGPUOptimizedContents = NO;
     if (mf.force_alpha_one)
         d.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen,
@@ -457,42 +385,9 @@ static void create_backend_texture(NvnTexture *t, TexBackend *b) {
     }
     tex.label = [NSString stringWithFormat:@"%s fmt%#x", t->label[0] ? t->label : "tex", t->format];
     b->tex = tex;
-    if (b->scalable) clear_new_target(tex);
     CFBridgingRetain(tex);
     g_tex_live++;
     g_tex_live_bytes += tex.allocatedSize;
-}
-
-bool renderer_view_needs_format_flag(MTLPixelFormat base, MTLPixelFormat view);  // renderer.m
-void backend_texture_view_format(NvnTexture *t, uint32_t format) {
-    if (!t->format_views && renderer_view_needs_format_flag(mtl_format(t->format).pf, mtl_format(format).pf))
-        t->format_views = true;  // (tex_backend: an allocation without the flag is replaced)
-}
-
-// A texture first viewed in another format after it was allocated without PixelFormatView (not seen in the game: the
-// views come with the pool registration, before the first use): reallocated with the flag. Guest-backed contents are
-// uploaded again; GPU-written ones are copied over in a command buffer of their own (it sees the work submitted so
-// far, not writes still being recorded).
-static void texture_allow_format_views(NvnTexture *t, TexBackend *b) {
-    static int nlog;
-    if (nlog++ < 10)
-        LOG("[metal] texture %ux%u fmt %#x: a view in another format after its first use, reallocated with format views\n",
-            t->width, t->height, t->format);
-    id<MTLTexture> old = b->tex;  // (a strong reference: alive for the copy)
-    release_backend_texture(t, b);
-    create_backend_texture(t, b);
-    b->uploaded = false;
-    if (b->gpu_owned && old.width == b->tex.width && old.height == b->tex.height && old.pixelFormat == b->tex.pixelFormat &&
-        old.mipmapLevelCount == b->tex.mipmapLevelCount && old.arrayLength == b->tex.arrayLength &&
-        old.sampleCount == b->tex.sampleCount) {
-        @autoreleasepool {
-            id<MTLCommandBuffer> cb = [queue commandBuffer];
-            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-            [blit copyFromTexture:old toTexture:b->tex];
-            [blit endEncoding];
-            [cb commit];
-        }
-    }
 }
 
 static void release_backend_texture(NvnTexture *t, TexBackend *b) {  // (also drops the renderer's views of it)
@@ -510,7 +405,7 @@ void backend_texture_destroyed(NvnTexture *t) {
     t->backend = NULL;
 }
 
-static uint64_t g_frame_counter;  // presents so far (the game thread)
+static uint64_t g_frame_counter;  // presents so far (texture change detection runs once per frame)
 static uint64_t full_hash_budget, full_hash_budget_frame;
 
 static uint64_t hash_full(const uint8_t *p, uint64_t n) {
@@ -537,7 +432,6 @@ static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
 // Upload all levels/layers from block-linear guest memory.
 static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncoder> blit) {
     if (!t->addr || t->target == 10) return;
-    const uint64_t g_frame_counter = renderer_exec_frame();  // (the frame being translated)
     if (b->uploaded && b->checked_frame == g_frame_counter) return;  // (fast exits before any layout math)
     if (b->uploaded && !b->dynamic && ((g_frame_counter + ((uintptr_t)b >> 6)) & 7)) return;
     const FormatInfo *fi = t->layout.fmt;
@@ -558,33 +452,23 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     if (full_hash_budget_frame != g_frame_counter) { full_hash_budget_frame = g_frame_counter; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
-    if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
+    if (always_full < 0) always_full = getenv("NXRT_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && g_frame_counter - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
-    bool identified_now = !b->tp;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
-    if (identified_now) b->tp = texpatch_marker(t);
-    bool restyle = b->tp > 0 && b->tp <= TEXPATCH_RECOLOUR_BASE && b->uploaded && b->tp_gen != texpatch_generation();
-    bool fast = tex_fast_hash();  // (runtime/nvn/tex_hash.h; LARECOMP_TEX_FASTHASH=0: the previous hashes)
+    if (!b->tp) b->tp = NX_HOOK(tex_identify) ? NX_HOOK(tex_identify)(t) + 1 : -1;  // (textures the game restyles)
+    bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != NX_HOOK(tex_generation)();
     if (!full && !restyle) {
-        uint64_t sh = fast ? tex_hash_sample(mem, total) : fnv_sample(mem, total);
+        uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
     }
-    extern void slow_note_full_hash(void), slow_note_upload(uint64_t bytes);  // (slowframe.h)
-    slow_note_full_hash();
-    uint64_t h = fast ? tex_hash_full(mem, total) : hash_full(mem, total);
+    uint64_t h = hash_full(mem, total);
     b->full_frame = g_frame_counter;
-    // (the sample is only compared while the texture isn't dynamic, and a dynamic one stays so: none for those)
-    if (!fast) b->sample_hash = fnv_sample(mem, total);
-    else if (!b->dynamic && !(b->uploaded && h != b->data_hash)) b->sample_hash = tex_hash_sample(mem, total);
+    b->sample_hash = fnv_sample(mem, total);
     if (b->uploaded && h == b->data_hash && !restyle) return;
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
-    // new contents (the game reused the memory for another image, or the data arrived after the first check): which
-    // known texture it is, if any, is decided again before this upload patches it
-    if (!identified_now && h != b->data_hash) b->tp = texpatch_marker(t);
-    if (b->tp > 0) b->tp_gen = texpatch_generation();
+    if (b->tp > 0) b->tp_gen = NX_HOOK(tex_generation)();
     b->data_hash = h;
     b->uploaded = true;
-    slow_note_upload(total);
     // callers without an encoder get a private upload command buffer, created only when needed
     id<MTLCommandBuffer> own_cb = nil;
     if (!blit) { own_cb = [queue commandBuffer]; blit = [own_cb blitCommandEncoder]; }
@@ -603,11 +487,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
             } else {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
-            if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, lin, l.w, l.h, row);
+            if (b->tp > 0 && layer == 0) NX_HOOK(tex_apply)(b->tp - 1, lv, lin, l.w, l.h, row);
             uint8_t *data = lin;
             uint32_t out_row = row;
-            static int bc5log;  // LARECOMP_LOG_BC5: endpoint bytes of BC5 (0x4B/0x4C) textures (unorm ~128 vs snorm ~0)
-            if ((t->format == 0x4B || t->format == 0x4C) && lv == 0 && bc5log < 12 && getenv("LARECOMP_LOG_BC5")) {
+            static int bc5log;  // NXRT_LOG_BC5: endpoint bytes of BC5 (0x4B/0x4C) textures (unorm ~128 vs snorm ~0)
+            if ((t->format == 0x4B || t->format == 0x4C) && lv == 0 && bc5log < 12 && getenv("NXRT_LOG_BC5")) {
                 bc5log++;
                 int hist[4] = {0};
                 for (uint64_t i = 0; i + 16 <= sz; i += 16) { hist[lin[i] >> 6]++; hist[lin[i + 8] >> 6]++; }
@@ -649,24 +533,13 @@ id<MTLTexture> renderer_texture(NvnTexture *t, id<MTLBlitCommandEncoder> blit, b
     return b->tex;
 }
 
-// A GPU write (render target, copy destination): the contents are at the current render scale from here on.
-void renderer_mark_gpu_owned(NvnTexture *t) {
-    TexBackend *b = tex_backend(t);
-    b->gpu_owned = true;
-    if (b->scalable) { b->sx = g_rs_x; b->sy = g_rs_y; }
-}
-// The part of a scalable texture its contents occupy (Dynamic: the render scale over the allocation scale; 1 otherwise).
-void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy) {
-    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
-    *fx = *fy = 1;
-    if (b && b->scalable && b->ax > 0 && b->ay > 0) { *fx = b->sx / b->ax; *fy = b->sy / b->ay; }
-}
+void renderer_mark_gpu_owned(NvnTexture *t) { tex_backend(t)->gpu_owned = true; }
 bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
 // Host-produced texel data (decoded video): upload straight into the Metal texture.
-static void upload_rgba_now(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
+void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
     TexBackend *b = tex_backend(t);
     b->gpu_owned = true;
     @autoreleasepool {
@@ -681,126 +554,6 @@ static void upload_rgba_now(NvnTexture *t, const void *rgba, uint32_t w, uint32_
     }
 }
 
-// Decoded video as NV12 (Y plane, then interleaved UV at uv_off; runtime/hle/movie.c), converted to RGBA on the GPU
-// into the game's texture: the CPU conversion (swscale) plus an RGBA upload four times the size of the planes cost
-// mid-range CPUs most of a frame at the movies' 60 fps. Limited range BT.601, as swscale did (the movies declare no
-// matrix). false: the texture's format isn't one this handles - the caller converts on the CPU.
-static bool nv12_raw_format(MTLPixelFormat pf, MTLPixelFormat *raw) {
-    if (pf == MTLPixelFormatRGBA8Unorm || pf == MTLPixelFormatRGBA8Unorm_sRGB) *raw = MTLPixelFormatRGBA8Unorm;
-    else if (pf == MTLPixelFormatBGRA8Unorm || pf == MTLPixelFormatBGRA8Unorm_sRGB) *raw = MTLPixelFormatBGRA8Unorm;
-    else return false;
-    return true;
-}
-
-// Movie frames (runtime/hle/movie.c, the game thread): queued behind the lists already submitted (rqueue.c), as a
-// copy; the decoder reuses its buffers.
-void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
-    if (!rq_on()) { upload_rgba_now(t, rgba, w, h, stride); return; }
-    size_t n = (size_t)stride * h;
-    void *copy = malloc(n);
-    memcpy(copy, rgba, n);
-    rq_upload(t, RQ_UPLOAD_RGBA, copy, w, h, stride, 0);
-}
-static bool upload_nv12_now(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off);
-bool renderer_upload_nv12(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
-    if (!rq_on()) return upload_nv12_now(t, nv12, w, h, stride, uv_off);
-    MTLPixelFormat raw;
-    if (!nv12_raw_format(mtl_format(t->format).pf, &raw)) return false;
-    size_t n = (size_t)stride * h * 3 / 2;  // (the planes: as the caller's buffer, stride * h * 3 / 2 bytes)
-    if (uv_off + (size_t)stride * h / 2 > n) n = uv_off + (size_t)stride * h / 2;
-    void *copy = malloc(n);
-    memcpy(copy, nv12, n);
-    rq_upload(t, RQ_UPLOAD_NV12, copy, w, h, stride, uv_off);
-    return true;
-}
-void backend_upload_now(NvnTexture *t, int kind, void *data, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
-    if (kind == RQ_UPLOAD_RGBA) upload_rgba_now(t, data, w, h, stride);
-    else upload_nv12_now(t, data, w, h, stride, uv_off);
-    free(data);
-}
-extern void *objc_autoreleasePoolPush(void);
-extern void objc_autoreleasePoolPop(void *);
-void *backend_pool_push(void) { return objc_autoreleasePoolPush(); }
-void backend_pool_pop(void *p) { objc_autoreleasePoolPop(p); }
-
-static bool upload_nv12_now(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
-    TexBackend *b = tex_backend(t);
-    MTLPixelFormat pf = b->tex.pixelFormat, raw;  // (the bytes as written, as the RGBA upload did: no sRGB encoding)
-    if (!nv12_raw_format(pf, &raw)) return false;
-    static id<MTLTexture> ty, tuv;
-    static id<MTLRenderPipelineState> pipes[2];
-    static id<MTLSamplerState> samp;
-    if (!samp) {
-        static const char *src =
-            "#include <metal_stdlib>\n"
-            "using namespace metal;\n"
-            "struct V { float4 pos [[position]]; float2 uv; };\n"
-            "vertex V vs(uint vid [[vertex_id]]) {\n"
-            "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
-            "  V o; o.pos = float4(p * 2.0 - 1.0, 0, 1); o.uv = float2(p.x, 1.0 - p.y); return o; }\n"
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> ty [[texture(0)]], texture2d<float> tuv [[texture(1)]],\n"
-            "                   sampler s [[sampler(0)]]) {\n"
-            "  float y = (ty.sample(s, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);\n"
-            "  float2 c = (tuv.sample(s, in.uv).rg - 128.0 / 255.0) * (255.0 / 224.0);\n"
-            "  return float4(saturate(float3(y + 1.402 * c.y, y - 0.344136 * c.x - 0.714136 * c.y, y + 1.772 * c.x)), 1.0); }\n";
-        NSError *err = nil;
-        id<MTLLibrary> lib = [dev newLibraryWithSource:@(src) options:nil error:&err];
-        if (!lib) { LOG("[movie] NV12 shader: %s\n", err.localizedDescription.UTF8String); return false; }
-        for (int i = 0; i < 2; i++) {
-            MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-            pd.vertexFunction = [lib newFunctionWithName:@"vs"];
-            pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
-            pd.colorAttachments[0].pixelFormat = i ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
-            pipes[i] = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
-            if (!pipes[i]) { LOG("[movie] NV12 pipeline: %s\n", err.localizedDescription.UTF8String); return false; }
-        }
-        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
-        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
-        sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
-        samp = [dev newSamplerStateWithDescriptor:sd];
-        LOG("[movie] video frames converted to RGBA on the GPU\n");
-    }
-    if (!ty || ty.width != w || ty.height != h) {  // (the planes, reused: one movie size at a time)
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:w
-                                                                                    height:h mipmapped:NO];
-        d.storageMode = MTLStorageModePrivate;
-        d.usage = MTLTextureUsageShaderRead;
-        ty = [dev newTextureWithDescriptor:d];
-        d.pixelFormat = MTLPixelFormatRG8Unorm;
-        d.width = w / 2;
-        d.height = h / 2;
-        tuv = [dev newTextureWithDescriptor:d];
-    }
-    b->gpu_owned = true;
-    @autoreleasepool {
-        id<MTLBuffer> staging = [dev newBufferWithBytes:nv12 length:(NSUInteger)uv_off + (NSUInteger)stride * (h / 2)
-                                                options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb = [queue commandBuffer];
-        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-        [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:stride sourceBytesPerImage:(NSUInteger)stride * h
-                  sourceSize:MTLSizeMake(w, h, 1) toTexture:ty destinationSlice:0 destinationLevel:0
-           destinationOrigin:MTLOriginMake(0, 0, 0)];
-        [blit copyFromBuffer:staging sourceOffset:uv_off sourceBytesPerRow:stride sourceBytesPerImage:(NSUInteger)stride * (h / 2)
-                  sourceSize:MTLSizeMake(w / 2, h / 2, 1) toTexture:tuv destinationSlice:0 destinationLevel:0
-           destinationOrigin:MTLOriginMake(0, 0, 0)];
-        [blit endEncoding];
-        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = pf == raw ? b->tex : [b->tex newTextureViewWithPixelFormat:raw];
-        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-        [enc setRenderPipelineState:pipes[raw == MTLPixelFormatBGRA8Unorm]];
-        [enc setViewport:(MTLViewport){0, 0, MIN(w, b->tex.width), MIN(h, b->tex.height), 0, 1}];
-        [enc setFragmentTexture:ty atIndex:0];
-        [enc setFragmentTexture:tuv atIndex:1];
-        [enc setFragmentSamplerState:samp atIndex:0];
-        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-        [enc endEncoding];
-        [cb commit];
-    }
-    return true;
-}
-
 // ================================================================== init / window
 static const char *present_src =
     "#include <metal_stdlib>\n"
@@ -810,11 +563,8 @@ static const char *present_src =
     "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
     "  V o; o.pos = float4(p * 2.0 - 1.0, 0, 1);\n"
     "  float2 uv = float2(p.x, pv[0].x > 0.5 ? p.y : 1.0 - p.y); o.uv = pv[1].xy + uv * pv[1].zw; return o; }\n"
-    "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]],\n"
-    "                   constant float4 &pf [[buffer(0)]]) {\n"
-    "  float3 c = t.sample(s, in.uv).rgb;\n"
-    SCREEN_FILTER_SRC("float3")  // (the screen filter: screen_filter.h)
-    "  return float4(c, 1.0); }\n";
+    "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "  return float4(t.sample(s, in.uv).rgb, 1.0); }\n";
 
 void backend_init(void) {
     while (!atomic_load(&ui_ready)) usleep(1000);
@@ -836,12 +586,6 @@ void backend_init(void) {
                                            options:MTLResourceStorageModeShared deallocator:nil];
     if (!g_guest_buffer) FATAL("cannot wrap guest heap in a Metal buffer (max %llu)\n", (uint64_t)dev.maxBufferLength);
     renderer_init(dev);
-    if (getenv("LARECOMP_ASPECT_TEST") && g_ga) {  // (g_ga: a game version selected - not on the start screen)  // experiment: widen the game's 16:9 aspect constant
-        float *k = (float *)(uintptr_t)GA(ASPECT_LITERAL);
-        mprotect((void *)((uintptr_t)k & ~0x3fffull), 0x4000, PROT_READ | PROT_WRITE);
-        LOG("[aspect] constant %f -> %f\n", *k, (float)atof(getenv("LARECOMP_ASPECT_TEST")));
-        *k = (float)atof(getenv("LARECOMP_ASPECT_TEST"));
-    }
     LOG("[metal] %s, heap buffer %llu MB\n", dev.name.UTF8String, (uint64_t)HEAP_MAX >> 20);
 }
 
@@ -854,7 +598,6 @@ static NvnTexture *g_last_presented;
 // about to be replaced (backend_guest_memory_reset wraps the new pages).
 void backend_reset(void) {
     if (!queue) return;  // the game never initialised NVN
-    rq_drain();  // (the render thread: everything queued ran; it idles while the game is down)
     extern void renderer_reset(void);
     extern void renderer_flush(void);
     renderer_flush();  // (everything submitted has completed)
@@ -875,8 +618,7 @@ void backend_guest_memory_reset(void) {
 
 // The window goes black while the game is down (instead of holding its last frame).
 void backend_clear_window(void) {
-    if (!layer || !dev || rq_stopping()) return;
-    rq_drain();
+    if (!layer || !dev) return;
     @autoreleasepool {
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         if (!drawable) return;
@@ -919,7 +661,7 @@ static id<MTLFXSpatialScaler> g_fx;
 static id<MTLTexture> g_fx_out;
 static NSUInteger g_fx_iw, g_fx_ih, g_fx_ow, g_fx_oh;
 static MTLPixelFormat g_fx_fmt;
-static id<MTLTexture> metalfx_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> in, float fx, float fy, double ow_d, double oh_d) {
+static id<MTLTexture> metalfx_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> in, double ow_d, double oh_d) {
     (void)cb;
     if (g_settings.upscaler != UPSCALE_METALFX) return nil;
     static int supported = -1;
@@ -929,7 +671,7 @@ static id<MTLTexture> metalfx_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> in
     }
     if (!supported) return nil;
     NSUInteger ow = (NSUInteger)lround(ow_d), oh = (NSUInteger)lround(oh_d);
-    if (ow <= in.width * fx + 1 && oh <= in.height * fy + 1) return nil;  // not an upscale: plain sampling is right
+    if (ow <= in.width + 1 && oh <= in.height + 1) return nil;  // not an upscale: plain sampling is right
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
     if (!g_fx || g_fx_iw != in.width || g_fx_ih != in.height || g_fx_ow != ow || g_fx_oh != oh || g_fx_fmt != in.pixelFormat) {
@@ -1033,12 +775,10 @@ static id<MTLTexture> smaa_target(id<MTLTexture> old, NSUInteger w, NSUInteger h
     return [dev newTextureWithDescriptor:td];
 }
 
-static NSUInteger smaa_area_w, smaa_area_h;  // the part of the image the passes cover (0: all of it)
 static void smaa_pass(id<MTLCommandBuffer> cb, id<MTLRenderPipelineState> p, id<MTLTexture> dst, bool clear,
                       id<MTLTexture> t0, id<MTLTexture> t1, id<MTLTexture> t2) {
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = dst;
-    if (smaa_area_w) rp.renderTargetWidth = smaa_area_w, rp.renderTargetHeight = smaa_area_h;
     rp.colorAttachments[0].loadAction = clear ? MTLLoadActionClear : MTLLoadActionDontCare;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -1051,8 +791,7 @@ static void smaa_pass(id<MTLCommandBuffer> cb, id<MTLRenderPipelineState> p, id<
     [e endEncoding];
 }
 
-// fx, fy: the part of `in` its contents occupy (Dynamic resolution: the top-left part)
-static id<MTLTexture> smaa_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in, float fx, float fy) {
+static id<MTLTexture> smaa_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in) {
     static bool failed;  // (shader / pipeline error: logged once, SMAA stays off)
     static NSUInteger lw, lh;
     static MTLPixelFormat lf;
@@ -1090,21 +829,16 @@ static id<MTLTexture> smaa_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in, fl
     edges = smaa_target(edges, in.width, in.height, MTLPixelFormatRGBA8Unorm);
     weights = smaa_target(weights, in.width, in.height, MTLPixelFormatRGBA8Unorm);
     out = smaa_target(out, in.width, in.height, in.pixelFormat);
-    // Dynamic resolution: only the contents' part, and 64 pixels past it (the edge searches reach 2 x 16 pixels, so
-    // the contents' pixels never read past it) - the window step's cost then scales with the factor like the game's
-    NSUInteger aw = MIN(in.width, (NSUInteger)ceilf(in.width * fx) + 64), ah = MIN(in.height, (NSUInteger)ceilf(in.height * fy) + 64);
-    smaa_area_w = aw < in.width || ah < in.height ? aw : 0, smaa_area_h = ah;
     smaa_pass(cb, pe, edges, true, in, nil, nil);
     smaa_pass(cb, pw, weights, true, edges, area, search);
     smaa_pass(cb, pb, out, false, in, weights, nil);
-    smaa_area_w = smaa_area_h = 0;
     return out;
 }
 
-static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in, float fx, float fy) {
+static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in) {
     g_fx.colorTexture = in;
-    g_fx.inputContentWidth = (NSUInteger)lround(in.width * fx);
-    g_fx.inputContentHeight = (NSUInteger)lround(in.height * fy);
+    g_fx.inputContentWidth = in.width;
+    g_fx.inputContentHeight = in.height;
     g_fx.outputTexture = g_fx_out;
     [g_fx encodeToCommandBuffer:cb];
     return g_fx_out;
@@ -1112,19 +846,12 @@ static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in,
 
 
 
-// The part of the next saved texture its contents occupy (renderer_save_game_texture: Dynamic resolution draws into
-// the top-left part of screen-sized textures; the rest holds older frames)
-static float g_save_part[2] = {1, 1};
-
 // Debug: dump an 8-bit-per-channel 2D texture's raw bytes (alpha kept, written as a separate grey PNG).
 void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path) {
     if (tex.pixelFormat != MTLPixelFormatRGBA8Unorm && tex.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
         tex.pixelFormat != MTLPixelFormatBGRA8Unorm)
         return;
     NSUInteger w = tex.width, h = tex.height;
-    if (g_save_part[0] < 1 || g_save_part[1] < 1) {  // (a game texture's contents: the top-left part, Dynamic resolution)
-        w = MAX((NSUInteger)lroundf(w * g_save_part[0]), 1); h = MAX((NSUInteger)lroundf(h * g_save_part[1]), 1);
-    }
     id<MTLBuffer> buf = [dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
@@ -1152,18 +879,13 @@ void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path) {
     LOG("[metal] saved alpha %s (%lux%lu, max %u)\n", path, (unsigned long)w, (unsigned long)h, amax);
 }
 static float g_shot_crop[4] = {0, 0, 1, 1};  // presented crop of the current frame (screenshots match it)
-static float g_shot_frac[2] = {1, 1};        // the part of the game image its contents occupy (Dynamic: shots take that part)
 static bool g_save_upright;  // (set around saves of the window image: test shots under any name)
 void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     NSUInteger w = tex.width, h = tex.height;
     float shot_crop[4] = {0, 0, 1, 1};
     if (strstr(path, "frame_")) {
         memcpy(shot_crop, g_shot_crop, sizeof shot_crop);
-        shot_crop[0] *= g_shot_frac[0]; shot_crop[1] *= g_shot_frac[1]; shot_crop[2] *= g_shot_frac[0]; shot_crop[3] *= g_shot_frac[1];
         w = (NSUInteger)(w * shot_crop[2]); h = (NSUInteger)(h * shot_crop[3]);
-    } else if (g_save_part[0] < 1 || g_save_part[1] < 1) {
-        shot_crop[2] = g_save_part[0]; shot_crop[3] = g_save_part[1];
-        w = MAX((NSUInteger)lroundf(w * shot_crop[2]), 1); h = MAX((NSUInteger)lroundf(h * shot_crop[3]), 1);
     }
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                  width:w height:h mipmapped:NO];
@@ -1190,9 +912,6 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     if (g_save_upright || strstr(path, "window")) flip = 0;  // the window image is already upright
     float pv[8] = {flip, 0, 0, 0, shot_crop[0], shot_crop[1], shot_crop[2], shot_crop[3]};
     [e setVertexBytes:pv length:sizeof pv atIndex:0];
-    float pf[4] = {0};
-    if (strstr(path, "frame_")) screen_filter_params(pf);  // (shots of the game image: as shown)
-    [e setFragmentBytes:pf length:sizeof pf atIndex:0];
     [e setFragmentTexture:raw_view(tex) atIndex:0];
     [e setFragmentSamplerState:present_sampler atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -1215,13 +934,6 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     free(px);
     LOG("[metal] saved %s (%lux%lu)\n", path, (unsigned long)w, (unsigned long)h);
 }
-// (debug dumps of the game's textures) only the part of t's texture its contents occupy; alpha: also the alpha PNG
-void renderer_save_game_texture(NvnTexture *t, id<MTLTexture> tex, const char *path, const char *alpha_path) {
-    renderer_texture_fraction(t, &g_save_part[0], &g_save_part[1]);
-    renderer_save_texture(tex, path);
-    if (alpha_path) renderer_save_texture_alpha(tex, alpha_path);
-    g_save_part[0] = g_save_part[1] = 1;
-}
 
 // ================================================================== present
 
@@ -1231,29 +943,20 @@ void backend_present(NvnTexture *t);
 // Present the last frame again (the game thread waits in a host dialog, e.g. the software keyboard): the overlay
 // keeps drawing and taking input.
 void backend_represent(void) {
-    if (!g_last_presented) { SDL_Delay(16); return; }
-    if (rq_on()) rq_present(g_last_presented, total_frames, false);
-    else backend_present_now(g_last_presented, total_frames);
+    if (g_last_presented) backend_present(g_last_presented);
+    else SDL_Delay(16);
 }
 
-// The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
-// frame: the number of this present (the game thread's frame when it was queued).
-void backend_present_now(NvnTexture *t, uint64_t frame) {
-    if (rq_stopping()) return;  // quitting: no drawable after the window closed (#40, as Vulkan)
+void backend_present(NvnTexture *t) {
+    g_last_presented = t;
     extern void renderer_submit(void);
-    extern void renderer_texture_will_read(NvnTexture *t);
-    renderer_texture_will_read(t);  // (a recorded clear of the image becomes its pass first)
     renderer_submit();  // same queue: the present pass runs after the frame's work
     TexBackend *b = t->backend;
     if (b) b->presented = true;
     @autoreleasepool {
         uint64_t nd0 = SDL_GetTicksNS();
-        rq_watch("nextDrawable", frame);
         id<CAMetalDrawable> drawable = [layer nextDrawable];
-        rq_watch(NULL, 0);
         uint64_t nd = SDL_GetTicksNS() - nd0;
-        extern __thread uint64_t g_blocked_ns;  // (kernel.c: waiting, not work - for the frame pacer, as Vulkan's acquire)
-        g_blocked_ns += nd;
         if (nd > 30000000) {
             static int warned;
             if (warned++ < 20) LOG("[metal] nextDrawable blocked %llums\n", (unsigned long long)(nd / 1000000));
@@ -1268,49 +971,36 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         // Next frame's render resolution follows the window: the 1920x1080 image scaled to fit.
         double dw = drawable.texture.width, dh = drawable.texture.height;
-        extern void widescreen_frame_end(uint64_t frame);
-        widescreen_frame_end(frame);
-        extern void widescreen_set_factor(float f);
-        extern bool widescreen_allowed(void);
+        if (NX_HOOK(present_frame_end)) NX_HOOK(present_frame_end)(total_frames);
         // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution")
-        // GPU busy time since the last frame (renderer.m renderer_gpu_busy: the union of the command buffers' spans): the
-        // game's command buffers and the window image's (LARECOMP_DYNRES_COUNT_PRESENT=0: the game's only, as before)
-        extern uint64_t g_gpu_total_ns, g_gpu_win_ns, g_gpu_sum_ns;
-        extern uint64_t renderer_gpu_busy(id<MTLCommandBuffer> done, bool win);
-        static uint64_t gpu_prev, win_prev, sum_prev;
-        static int count_present = -1;
-        if (count_present < 0) count_present = !getenv("LARECOMP_DYNRES_COUNT_PRESENT") || atoi(getenv("LARECOMP_DYNRES_COUNT_PRESENT"));
-        uint64_t gpu_now = __atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED), win_now = __atomic_load_n(&g_gpu_win_ns, __ATOMIC_RELAXED);
-        uint64_t sum_now = __atomic_load_n(&g_gpu_sum_ns, __ATOMIC_RELAXED);
-        double game_ms = gpu_prev ? (gpu_now - gpu_prev) / 1e6 : -1, win_ms = count_present ? (win_now - win_prev) / 1e6 : -1;
-        if (gpu_prev) output_scale_note_sum((sum_now - sum_prev) / 1e6);  // (the [dynres] line: the spans' plain sum too)
-        gpu_prev = gpu_now, win_prev = win_now, sum_prev = sum_now;
-        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {  // (the upscale / scaling draw and the menu)
-            renderer_gpu_busy(done, true);
-        }];
+        extern uint64_t g_gpu_total_ns;
+        static uint64_t gpu_prev;
+        uint64_t gpu_now = __atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED);
+        double gpu_ms = gpu_prev ? (gpu_now - gpu_prev) / 1e6 : -1;
+        gpu_prev = gpu_now;
         OutScale os;
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
+        output_scale(dw, dh, NX_HOOK(present_wide) && NX_HOOK(present_wide)(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
+        bool reshape = shape != 1.0;
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
-        extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
-        float crop[4];  // uv origin and size
-        widescreen_present_crop(frame, shape, crop, &vx, &vy, &vw, &vh);
-        widescreen_set_factor((float)shape);
-        output_scale_log((unsigned long long)frame, dw, dh, &os);  // (diagnostics: [scale] on a change)
-        extern void renderer_set_alloc_scale(float ax, float ay);
-        renderer_set_alloc_scale((float)os.ax, (float)os.ay);
+        float crop[4] = {0, 0, 1, 1};  // uv origin and size (the game may show part of the image: present_crop)
+        if (NX_HOOK(present_crop)) NX_HOOK(present_crop)(total_frames, shape, crop, &vx, &vy, &vw, &vh);
+        if (NX_HOOK(present_shape)) NX_HOOK(present_shape)((float)shape);
+        {   // (diagnostics) log output scale / drawable changes
+            static double psx, psy, pdw, pdh;
+            static int nlog;
+            if ((sx != psx || sy != psy || dw != pdw || dh != pdh) && nlog++ < 200)
+                LOG("[scale] frame %llu drawable %.0fx%.0f -> render scale %.3fx%.3f (reshape %d)\n",
+                    (unsigned long long)total_frames, dw, dh, sx, sy, reshape);
+            psx = sx, psy = sy, pdw = dw, pdh = dh;
+        }
         renderer_set_scale((float)sx, (float)sy);
         if (b && b->tex) {
             id<MTLTexture> src = raw_view(b->tex);
-            // Dynamic: the image occupies the top-left part of the texture (its contents' scale over the allocation's)
-            extern void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy);
-            float fx, fy;
-            renderer_texture_fraction(t, &fx, &fy);
-            g_shot_frac[0] = fx; g_shot_frac[1] = fy;
             // SMAA (Video tab "Anti-aliasing"): first, at the game image's size (MetalFX then upscales its result)
             if (g_settings.antialias == AA_SMAA) {
                 [enc endEncoding];
-                src = smaa_encode(cb, src, fx, fy);
+                src = smaa_encode(cb, src);
                 MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
                 rp2.colorAttachments[0].texture = drawable.texture;
                 rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -1321,10 +1011,10 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             // spatial upscaler brings it to the window's size first (the whole image, so the interior crop below
             // still applies); the present pass then samples it about 1:1. Its own pass: the drawable's pass is
             // ended and resumed (load) around it.
-            id<MTLTexture> up = metalfx_upscale(cb, src, fx, fy, vw / crop[2], vh / crop[3]);
+            id<MTLTexture> up = metalfx_upscale(cb, src, vw / crop[2], vh / crop[3]);
             if (up) {
                 [enc endEncoding];
-                up = metalfx_encode(cb, src, fx, fy);  // (the scaler maps the content part to its whole output)
+                up = metalfx_encode(cb, src);
                 MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
                 rp2.colorAttachments[0].texture = drawable.texture;
                 rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -1332,30 +1022,28 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 enc = [cb renderCommandEncoderWithDescriptor:rp2];
                 src = up;
             }
-            memcpy(g_shot_crop, crop, sizeof crop);  // (shots of the game image: the presented crop, of the content part)
-            if (!up) { crop[0] *= fx; crop[1] *= fy; crop[2] *= fx; crop[3] *= fy; }  // (sampled directly: the content part)
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
             [enc setViewport:(MTLViewport){vx, vy, vw, vh, 0, 1}];
             [enc setRenderPipelineState:present_pipe];
             float pv[8] = {flip, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
+            memcpy(g_shot_crop, crop, sizeof crop);
             [enc setVertexBytes:pv length:sizeof pv atIndex:0];
-            float pf[4];
-            screen_filter_params(pf);
-            [enc setFragmentBytes:pf length:sizeof pf atIndex:0];
             [enc setFragmentTexture:src atIndex:0];
             [enc setFragmentSamplerState:present_sampler atIndex:0];
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         }
         [enc endEncoding];
-        static long menu_at = -1;  // test hook: open the menu at this frame (LARECOMP_MENU_AT)
-        if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
-        if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
-        menu_render(dev, cb, drawable.texture);
-        static long win_shot = -1;  // LARECOMP_WINDOW_SHOT=<frame>: save the final window image (game + menu)
-        if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
+        static long menu_at = -1;  // test hook: open the menu at this frame (NXRT_MENU_AT)
+        if (menu_at < 0) menu_at = getenv("NXRT_MENU_AT") ? atol(getenv("NXRT_MENU_AT")) : 0;
+        if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
+        {   // the menu and overlays (nx-ui), over the game image
+            MtlUiFrame uf = {(__bridge void *)cb, (__bridge void *)drawable.texture, NULL};
+            menu_render(&uf, drawable.texture.width, drawable.texture.height);
+        }
+        static long win_shot = -1;  // NXRT_WINDOW_SHOT=<frame>: save the final window image (game + menu)
+        if (win_shot < 0) win_shot = getenv("NXRT_WINDOW_SHOT") ? atol(getenv("NXRT_WINDOW_SHOT")) : 0;
         id<MTLTexture> shot_tex = nil;
-        extern char g_window_shot_request[256];  // test hooks (runtime/hle/hookshot.c): save the next frame here
-        if ((win_shot && (long)frame + 1 == win_shot) || g_window_shot_request[0]) {
+        if ((win_shot && (long)total_frames + 1 == win_shot) || g_window_shot_request[0]) {
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:drawable.texture.pixelFormat
                                          width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
             td.usage = MTLTextureUsageShaderRead;
@@ -1364,77 +1052,62 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             [bl copyFromTexture:drawable.texture toTexture:shot_tex];
             [bl endEncoding];
         }
-        // The GPU clock and the game's 30 fps mode (macOS). The system runs the GPU at the lowest clock that meets the
-        // presentation deadline it can infer. A plain present carries none, so once a 5120x1440 frame misses 60 and
-        // the game takes its 30 fps mode (presents every 33 ms), the clock settles on its floor (338 MHz on an M3 Max,
-        // powermetrics 2026-10-18), where the same frame takes 20 ms instead of 7: the game's counters keep reading a
-        // slow frame and the 30 mode never ends, at 15 ms of GPU time per frame and 60% utilisation. Presenting with
-        // an explicit time one 60 Hz frame ahead gives the system the deadline the game actually has, in both modes:
-        // the clock follows it (mid-range at 60 fps, measured 0.4-0.6 ms on a 0.3-1.8 ms calibration pass), the frame
-        // fits again and the game returns to 60. presentDrawable:afterMinimumDuration: and showing the image a second
-        // time at 60 Hz in the 30 mode did not move the clock. LARECOMP_PRESENT_DEADLINE=0: a plain present (as before).
-        static int deadline = -1;
-        if (deadline < 0) {
-            deadline = !getenv("LARECOMP_PRESENT_DEADLINE") || atoi(getenv("LARECOMP_PRESENT_DEADLINE"));
-            LOG("[metal] presents %s\n", deadline ? "carry a one-frame deadline (GPU clock)" : "without a deadline");
-        }
-        if (deadline) [cb presentDrawable:drawable atTime:CACurrentMediaTime() + 1.0 / 60.0];
-        else [cb presentDrawable:drawable];
+        [cb presentDrawable:drawable];
         [cb commit];
         if (shot_tex) {
             [cb waitUntilCompleted];
-            // LARECOMP_SHOT_PATH: where (parallel test runs each write their own; default build/window.png)
+            // NXRT_SHOT_PATH: where (parallel test runs each write their own; default build/window.png)
             g_save_upright = true;
             if (g_window_shot_request[0]) {
                 renderer_save_texture(shot_tex, g_window_shot_request);
                 g_window_shot_request[0] = 0;
             } else {
-                renderer_save_texture(shot_tex, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/window.png");
-                if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+                renderer_save_texture(shot_tex, getenv("NXRT_SHOT_PATH") ? getenv("NXRT_SHOT_PATH") : "build/window.png");
+                if (getenv("NXRT_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
             }
             g_save_upright = false;
         }
     }
     frames++;
+    total_frames++;
+    g_frame_counter++;
+    extern void input_frame(uint64_t frame);
+    input_frame(total_frames);
+    static long slow_ms = -1;  // NXRT_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
+    if (slow_ms < 0) slow_ms = getenv("NXRT_SLOW_FRAME_MS") ? atol(getenv("NXRT_SLOW_FRAME_MS")) : 0;
+    if (slow_ms > 0 && total_frames > 2600) usleep((useconds_t)slow_ms * 1000);
+    extern void fnprof_frame(uint64_t frame);
+    fnprof_frame(total_frames);
+    if (NX_HOOK(present_tick)) NX_HOOK(present_tick)(total_frames);
+    extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (NXRT_REBOOT_AT)
+    reboot_test_frame(total_frames);
     static long shot_every = -1;
-    if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
-    if (b && b->tex) {  // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
-        static const char *next;
-        static int init;
-        if (!init) { init = 1; next = getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
-        while (next && *next) {
-            long at = strtol(next, (char **)&next, 10);
-            if ((long)frame < at) { while (next > getenv("LARECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
-            if ((long)frame == at) {
-                char path[256];
-                snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)frame);
-                save_png(b->tex, path);
-            }
-            if (*next == ',') next++;
-        }
-    }
-    static long shot_from = -1;  // LARECOMP_SCREENSHOT_FROM=<frame>: periodic shots start there (into build/frames/)
-    if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
-    if (shot_every && b && b->tex && frame % shot_every == 0 && (long)frame >= shot_from) {
+    if (shot_every < 0) { const char *e = getenv("NXRT_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
+    extern bool g_debug_frame;
+    static long debug_at = -1;
+    if (debug_at < 0) { const char *e = getenv("NXRT_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
+    level_change_check();
+    extern volatile int g_debug_frame_request;
+    if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
+    g_debug_frame = debug_at && total_frames == (uint64_t)debug_at;
+    if (g_debug_frame) LOG("===== debug frame %llu =====\n", total_frames);
+    static long shot_from = -1;  // NXRT_SCREENSHOT_FROM=<frame>: periodic shots start there (into build/frames/)
+    if (shot_from < 0) { const char *e = getenv("NXRT_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
+    if (shot_every && b && b->tex && total_frames % shot_every == 0 && (long)total_frames >= shot_from) {
         char path[256];
         if (shot_from) mkdir("build/frames", 0755);
-        snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png", frame);
+        snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png", total_frames);
         save_png(b->tex, path);
-        if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (getenv("NXRT_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
-    static double fps_iv = -1, prev_present, max_gap;  // LARECOMP_FPS_INTERVAL=<s>: fps line period (default 2)
-    if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
+    static double fps_iv = -1, prev_present, max_gap;  // NXRT_FPS_INTERVAL=<s>: fps line period (default 2)
+    if (fps_iv < 0) fps_iv = getenv("NXRT_FPS_INTERVAL") ? atof(getenv("NXRT_FPS_INTERVAL")) : 2.0;
     if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
-    static double hitch_ms = -1;  // LARECOMP_LOG_HITCH_MS=<ms>: every present gap over that (tests: hitches per run)
-    if (hitch_ms < 0) hitch_ms = getenv("LARECOMP_LOG_HITCH_MS") ? atof(getenv("LARECOMP_LOG_HITCH_MS")) : 0;
-    if (hitch_ms > 0 && prev_present > 0 && (now - prev_present) * 1000 > hitch_ms)
-        LOG("[hitch] t=%.2f frame %llu gap %.0f ms\n", now, (unsigned long long)frame, (now - prev_present) * 1000);
     prev_present = now;
     if (now - last_fps_time >= fps_iv) {
-        extern const char *game_level_name(void);
-        if (last_fps_time > 0) LOG("[metal] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)frame,
-                                   frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
+        if (last_fps_time > 0) LOG("[metal] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)total_frames,
+                                   frames / (now - last_fps_time), max_gap * 1000.0, NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "-", renderer_stats());
         {   // (diagnostics) frame rate low for two periods in a row: what's allocated (at most once a minute)
             static int slow;
             static double last_dump = -100;
@@ -1449,99 +1122,37 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     }
 }
 
-// The game thread's side of a present: the frame counters and the per-frame hooks (input, pacing, test hooks).
-static void present_hooks(void) {
-    total_frames++;
-    g_frame_counter++;
-    pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
-    extern void input_frame(uint64_t frame);
-    input_frame(total_frames);
-    static long slow_ms = -1;  // LARECOMP_SIM_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SIM_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SIM_SLOW_FRAME_MS")) : 0;
-    static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
-    if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
-    if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) usleep((useconds_t)slow_ms * 1000);
-    extern void fnprof_frame(uint64_t frame);
-    fnprof_frame(total_frames);
-    extern void warp_frame(uint64_t frame);
-    warp_frame(total_frames);
-    extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
-    reboot_test_frame(total_frames);
-    extern void save_editor_frame(uint64_t frame);
-    save_editor_frame(total_frames);
-    extern bool g_debug_frame;
-    static long debug_at = -1;
-    if (debug_at < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
-    level_change_check();
-    extern volatile int g_debug_frame_request;
-    if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
-    g_debug_frame = debug_at && total_frames == (uint64_t)debug_at;
-    if (g_debug_frame) LOG("===== debug frame %llu =====\n", total_frames);
-}
-
-void backend_present(NvnTexture *t) {
-    g_last_presented = t;
-    uint64_t frame = total_frames, t0 = plat_now_ns();
-    if (rq_on()) rq_present(t, frame, true);
-    else backend_present_now(t, frame);
-    uint64_t t1 = plat_now_ns();
-    g_present_ns += t1 - t0;  // (LARECOMP_LOG_PACE, pace.c)
-    present_hooks();
-    g_hooks_ns += plat_now_ns() - t1;
-}
-
 // ================================================================== UI thread
-// The window + Metal layer, created once: by the launcher (runtime/ui/launcher.mm, start screen before the game
+// The window + Metal layer, created once: before the start screen (nx-ui launcher.mm) shows
 // boots) or by ui_run; the game reuses the launcher's window.
 void ui_window_init(void) {
     if (window) return;
+    // (no SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS here: on macOS reading controllers in the background opens them
+    // as HID devices, for which the system asks for Input Monitoring - "receive keystrokes from any application")
     settings_load();
-    // controllers in the background: only when the player turned on "Allow background inputs" (Controls tab) - on
-    // macOS reading them in the background makes the system ask for Input Monitoring ("receive keystrokes from any
-    // application"), so it isn't the default
-    input_apply_background();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
-    input_load_user_mappings();
     int win_w = 1280, win_h = 720;
-    if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
-    // LARECOMP_HIDDEN=1: never shown (automated test runs render off screen without taking the user's focus)
+    if (getenv("NXRT_WINDOW")) sscanf(getenv("NXRT_WINDOW"), "%dx%d", &win_w, &win_h);
+    // NXRT_HIDDEN=1: never shown (automated test runs render off screen without taking the user's focus)
     SDL_WindowFlags wflags = SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-    if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
-    window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
+    if (getenv("NXRT_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
+    window = SDL_CreateWindow(nx_game.info.title, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
-    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    if (g_ui_settings.fullscreen && !getenv("NXRT_WINDOW") && !getenv("NXRT_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     SDL_MetalView view = SDL_Metal_CreateView(window);
     layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
     dev = MTLCreateSystemDefaultDevice();
-    settings_resolve_defaults(false);  // (Apple GPUs keep MetalFX as the default upscaler)
     layer.device = dev;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    // The display's vsync stays on: without it frames show as soon as they're done, which tears (seen on a 5120x1440
-    // display), for ~2-3 fps near the limit at most (the game paces itself to vi.c's emulated 60 Hz vsync, and the two
-    // clocks drift). LARECOMP_DISPLAY_SYNC=0: off (tests).
-    layer.displaySyncEnabled = !getenv("LARECOMP_DISPLAY_SYNC") || atoi(getenv("LARECOMP_DISPLAY_SYNC")) != 0;
-    layer.framebufferOnly = getenv("LARECOMP_WINDOW_SHOT") ? NO : YES;
+    layer.framebufferOnly = getenv("NXRT_WINDOW_SHOT") ? NO : YES;
+    nxui_metal_setup(window, (__bridge void *)layer, (__bridge void *)dev);  // (nx-ui draws into this window too)
 }
 
 SDL_Window *ui_window(void) { return window; }
 void *ui_metal_layer(void) { return (__bridge void *)layer; }
 void *ui_metal_device(void) { return (__bridge void *)dev; }
-
-// Quitting, before exit() (the window closed): the render thread stops between items (no nextDrawable / present
-// any more), then the GPU finishes what it was given - before exit()'s handlers and destructors run under it.
-void backend_quit(void) {
-    static atomic_flag once = ATOMIC_FLAG_INIT;
-    if (atomic_flag_test_and_set(&once)) return;
-    rq_stop();
-    if (!queue) return;
-    @autoreleasepool {
-        id<MTLCommandBuffer> cb = [queue commandBuffer];  // (one queue, in order: done when everything before it is)
-        [cb commit];
-        [cb waitUntilCompleted];
-    }
-}
 
 int ui_run(void) {
     // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
@@ -1554,19 +1165,19 @@ int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
-        if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
+        if (rt_reboot_requested()) { input_mouse_update(window, false); return rt_reboot_requested(); }
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
-            input_rumble_poll();
-            if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); input_led_stop(); LOG("window closed\n"); backend_quit(); exit(0); }
+            if (rt_reboot_requested()) break;
+            if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
-            input_cursor_event(&e);
-            if (menu_handle_event(&e)) continue;
+            bool consumed = menu_handle_event(&e);
+            input_mouse_update(window, true);
+            if (consumed) continue;
             input_handle_event(&e);
+            if (NX_HOOK(input_event)) NX_HOOK(input_event)(&e);  // (the game's: e.g. mouse clicks as actions)
         }
         menu_apply_window_requests(window);
-        input_rumble_poll();
-        input_led_poll();
         int w, h;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);

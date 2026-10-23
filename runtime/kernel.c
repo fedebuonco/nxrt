@@ -937,6 +937,8 @@ void kernel_stop_threads(void (*idle)(void)) {
 
 // (diagnostics) every guest thread and what it waits on, with the guest frame chain (x29 / x30 pairs on the guest
 // stack: the game function that waits). Doesn't wait for g_klock: a hang may hold it (then says so).
+static KThread *g_main_thread;  // (g_klock) the current boot's main thread, for the hang watch
+
 void kernel_dump_threads(const char *prefix) {
     bool locked = false;
     for (int i = 0; i < 100 && !(locked = pthread_mutex_trylock(&g_klock) == 0); i++) usleep(1000);
@@ -1148,11 +1150,6 @@ static void dump_threads_locked(void) {
     }
 }
 
-void kernel_dump_threads(void) {
-    pthread_mutex_lock(&g_klock);
-    dump_threads_locked();
-    pthread_mutex_unlock(&g_klock);
-}
 
 bool kernel_try_dump_threads(void) {
     if (pthread_mutex_trylock(&g_klock)) return false;

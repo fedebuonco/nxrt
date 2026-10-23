@@ -2,13 +2,25 @@
 #include "pad_nav.h"
 #include <atomic>
 #include "input_bind.h"
-#include "settings.h"
+#include "nx_settings.h"
+#include "nx_ui.h"
+#include <SDL3/SDL.h>
+
+// The pad's button family (0 Nintendo, 1 Xbox, 2 PlayStation): the UI layer's own, from SDL's type.
+int input_menu_family(SDL_JoystickID which) {
+    if (!which || !SDL_IsGamepad(which)) return 0;
+    switch (SDL_GetGamepadTypeForID(which)) {
+    case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: return 1;
+    case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: return 2;
+    default: return 0;
+    }
+}
 
 static std::atomic<SDL_JoystickID> g_last_pad{0};
 
 // Does the bottom button confirm for a pad of layout family `fam`? Game layout (the default): never - the right one
 // confirms, as in the game. Controller convention: Xbox / PlayStation / generic pads (#172).
-static bool south_confirms(int fam) { return g_settings.menu_confirm == MENU_CONFIRM_CONTROLLER && fam != 0; }
+static bool south_confirms(int fam) { return g_ui_settings.menu_confirm == NXUI_CONFIRM_CONTROLLER && fam != 0; }
 
 ImGuiKey ui_pad_key(SDL_JoystickID which, Uint8 button, bool down) {
     static ImGuiKey held[SDL_GAMEPAD_BUTTON_COUNT];  // (the layout can change while a button is held: its release)

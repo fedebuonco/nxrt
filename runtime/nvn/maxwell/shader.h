@@ -11,7 +11,7 @@
 //    maxwell_gmem_base. `readonly` unless the shader stores (needs vertexPipeline/fragmentStoresAndAtomics then);
 //    byte / short stores are atomicAnd + atomicOr on the containing word.
 //  - rscale table -> binding 18: `uniform RScale { vec4 rscale[65]; };` (std140, the MSL buffer 18 contents).
-//  - per-draw tint -> binding 19: `uniform Tint { vec4 ltint[4]; };` (fragment, when uses_tint).
+//  - per-draw tint -> binding 19: `uniform Tint { vec4 ltint[2]; };` (fragment, when uses_tint).
 //  - texture slot i (ShaderInfo.tex[i]) -> binding 32 + i, a combined image sampler: sampler1D/2D/3D/Cube/
 //    1DArray/2DArray/CubeArray, or its *Shadow variant when tex[i].shadow.
 //  - vertex inputs `layout(location=i) in vec4|ivec4|uvec4 a<i>;` (key->attr_kind); varyings: location i =
@@ -45,6 +45,8 @@ typedef struct {
                             // after flip_y: keys without it hash as before - shader caches stay valid.)
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
+    uint8_t alpha_func;     // Vulkan alpha test: 0/8 always, 1..7 NVN compare function; ref in rscale[65].y
+    bool dual_source;       // Vulkan: colour outputs 0/1 are the two sources of attachment 0
 } ShaderKey;
 
 typedef struct {
@@ -71,9 +73,7 @@ typedef struct {
                             // dispatch's storage buffers - when found, stores too (copied back after the dispatch).
                             // runtime/nvn/vulkan/exec.c
     bool uses_gmem_store;   // writes global memory (STG)
-    bool uses_tint;        // fragment: reads the per-draw tint (buffer 19, float4[4]) applied to color target 0
-    uint16_t ssbo_read;     // storage buffer slots whose binding (address) the shader reads from the driver constants
-                            // (c0 0x110 + 16 * i vertex, 0x510 + 16 * i fragment): the slots it actually uses
+    bool uses_tint;        // fragment: reads the per-draw tint (buffer 19, float4[2]) applied to color target 0
     bool uses_rscale;       // reads the resolution-scale table (fragment/compute buffer 18): float4 [0] = render
                             // target scale, [1 + i] = allocation scale of texture i
     uint32_t local_mem;     // bytes of local memory
@@ -83,48 +83,12 @@ typedef struct {
 
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
 #define GMEM_BUFFER_INDEX 17
-// (MSL) Metal's sampler slots a stage. A shader with more textures takes its samplers as an array of all the slots
-// and the slot of each texture from a table of uints at SMAP_BUFFER_INDEX (fragment, compute; [i] = texture i's slot).
-#define MSL_MAX_SAMPLERS 16
-#define SMAP_BUFFER_INDEX 22
 // (GLSL compute, Vulkan) the fast copy of a dispatch's storage buffers: its address table and its data
 #define GMAP_BUFFER_INDEX 20
 #define GFAST_BUFFER_INDEX 21
 #define GMAP_MAX 16  // ranges in the table (GMap { uvec4 gmap[GMAP_MAX + 1]; }: [i] = addr lo, addr hi, size, word offset;
                      // [GMAP_MAX].x = count)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
-// (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes in two cases:
-// - windows of one import where a storage buffer can't span the heap (issue #8) and lazy chunks aren't possible (or
-//   NXRT_VK_GMEM_LAZY=0): one binding per window (GMEM_CHUNK_BINDING + k in set GMEM_CHUNK_SET) and plain
-//   branches, each word picking its own window (a wide access over a window's end reads both);
-// - chunks imported as the game binds them (AMD APUs, Intel: vulkan/exec.c gmem_lazy; maxwell_gmem_lazy): the shader takes
-//   the chunk's device address and size from a table (GChunks, binding 0) and goes through a buffer reference after
-//   one bounds check per LDG / STG (an aligned 8 or 16 byte access never crosses a chunk). A chunk not imported has
-//   size 0: the access reads 0 / drops the store and counts in GMiss (binding 1), with the lowest word index hit.
-//   (A per-access switch over constant descriptors, tried first, took the NVIDIA driver ~40 s to compile for the
-//   chain chomps' compute shader with 87 access sites, and Intel ran it as a loop over the wave.)
-// 0: one buffer.
-extern uint32_t maxwell_gmem_chunk_shift;
-extern bool maxwell_gmem_lazy;
-// Lazy mode, fragment: a shader without discard / depth output / stores declares early fragment tests (its GMiss
-// atomics would turn them off); one with discard / depth output (no stores) counts no misses - the
-// runtime imports the bound storage buffers' chunks before the draw. true (NXRT_VK_GMEM_FS_MISS=1): every shader
-// counts, none declares early tests.
-extern bool maxwell_gmem_fs_miss;
-// Lazy mode, vertex / fragment: the chunks under the draw's storage buffers (where the heap reads are) come as push
-// constants, GDirect { uvec4 gd[GMEM_DIRECT_MAX]; } (x = first word, y = words, 0: unused, z, w = device address), and
-// as storage buffers GDir<k> at GMEM_DIRECT_BINDING + k of the chunk set: an access in one is a compare and a plain
-// storage buffer load (not a buffer reference: on Intel those miss the bindless surface path and the translator's
-// dispatch loop can't hoist them), no table read and no miss path (exec.c gmem_direct_pick). The table after them.
-#define GMEM_DIRECT_MAX 4
-#define GMEM_DIRECT_BINDING 2  // lazy: GDir<k> at 2 + k (k < GMEM_DIRECT_MAX; unused: a small zero buffer)
-#define GMEM_CHUNKS_MAX 256  // chunks at most (HEAP_MAX in 16 MB chunks is 208)
-#define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
-#define GMEM_CHUNK_BINDING 0  // windows: GMem<k> at binding k; lazy: the GChunks table
-#define GMEM_MISS_BINDING 1   // lazy: GMiss { uint n[GMEM_CHUNKS_MAX]; uint w[GMEM_CHUNKS_MAX]; } (accesses, lowest word hit)
-static inline int maxwell_gmem_chunks(void) {
-    return maxwell_gmem_chunk_shift ? (int)((maxwell_gmem_size + (1ull << maxwell_gmem_chunk_shift) - 1) >> maxwell_gmem_chunk_shift) : 1;
-}
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;
@@ -139,3 +103,5 @@ ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, c
 void maxwell_free(ShaderInfo *s);
 // Disassemble for debugging (writes text to f).
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file);
+
+extern uint32_t maxwell_loop_guard;  // translate.c

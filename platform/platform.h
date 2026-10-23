@@ -11,6 +11,17 @@
 #include "linux_compat.h"
 #endif
 
+// The calling thread is one of the frame's critical threads: on Windows, no power throttling (EcoQoS) for it and, on a
+// hybrid CPU, a preference for the performance cores. Elsewhere a no-op.
+enum { PLAT_PERF_GAME, PLAT_PERF_RENDER, PLAT_PERF_VSYNC };
+#ifdef _WIN32
+void plat_thread_perf_core(int role);
+#else
+static inline void plat_thread_perf_core(int role) { (void)role; }
+#endif
+void plat_thread_guest(int prio);      // a guest thread's host scheduling class from its Switch priority
+uint64_t plat_thread_cpu_ns(void);     // the calling thread's CPU time so far (user + system; diagnostics)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
