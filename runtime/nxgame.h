@@ -135,10 +135,13 @@ typedef struct NxGameHooks {
     bool (*draw_textures)(NxDraw *d);     // textures bound (tex_ids filled): last chance to change guest constants
     float (*draw_effect_stretch)(uint64_t fs_hash);  // a full-screen effect's horizontal stretch (1 = none)
     bool (*draw_mirror)(bool composite);  // mirror this draw (mirror mode): composite = the scene into the window
-    void (*draw_tint)(const NxDraw *d, float tint[8]);  // a draw whose shader takes a tint: rgba multiply, rgba add
+    // A draw whose shader takes a per-draw tint, as the shader sees it (ltint[4]): [0] rgb multiply + strength,
+    // [1] rgb add + luma exponent, [2]/[3] a second recolour window. strength ([0].w) < 0 = the HSV recolour
+    // (runtime/nvn/maxwell/translate.c emit_recolour); 0 = untouched.
+    void (*draw_tint)(const NxDraw *d, float ltint[16]);
     // instanced draws (ssbo0: a 4x4 model matrix per instance): instances tinted differently are drawn in runs
     bool (*instances_tinted)(void);                     // any instance may be tinted this frame
-    bool (*instance_tint)(const float *model, float tint[8]);  // true = this instance is tinted (tint filled)
+    bool (*instance_tint)(const float *model, float tint[16]);  // true = this instance is tinted (ltint[0..1] filled, rest 0)
     bool box_depth_draws;  // widescreen: depth-tested draws into the window image are boxed into 16:9 like the UI
     bool late_module_init;  // the modules but sdk start after the SDK's heap is up, main last (default: all but main first)
     // graphics: presenting (render thread)

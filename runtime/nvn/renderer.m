@@ -16,7 +16,7 @@
 #include "renderer.h"
 #include "nxgame.h"
 
-enum { RECOLOUR_TINT_FLOATS = 8 };  // the per-draw tint uniform (fragment buffer 19)
+enum { RECOLOUR_TINT_FLOATS = 16 };  // ltint[4]: the per-draw tint uniform (fragment buffer 19)
 #include "pace.h"
 #include "shader_prep.h"
 #include "slowframe.h"
@@ -2913,11 +2913,12 @@ static void draw(CmdRec *r, bool indexed) {
         }
     }
     if (pr->fi->uses_tint) {  // per-draw tint (the game's: highlights, recoloured items)
-        float tint[8] = {0};
+        float tint[RECOLOUR_TINT_FLOATS] = {0};
         if (NX_HOOK(draw_tint)) {
             static bool noted;
             if (!noted && getenv("NXRT_LOG_HOOKS")) noted = true, LOG("[hooks] draw_tint called\n");
             NX_HOOK(draw_tint)(&g_draw, tint);
+            if (getenv("NXRT_NO_RECOLOUR") && tint[3] < 0.0f) memset(tint, 0, sizeof tint);  // (A/B: no recolour)
         }
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
     }
@@ -2937,7 +2938,7 @@ static void draw(CmdRec *r, bool indexed) {
     enum { MAX_RUNS = 64 };
     uint32_t run_at[MAX_RUNS], run_n[MAX_RUNS];
     bool run_gold[MAX_RUNS];
-    float run_tint[MAX_RUNS][8];
+    float run_tint[MAX_RUNS][RECOLOUR_TINT_FLOATS];
     int nruns = 0;
     if (pr->fi->uses_tint && inst_all > 1 && st.sbuf[0][0].addr && NX_HOOK(instance_tint)) {
         uint64_t recs = st.sbuf[0][0].size / 64;
@@ -2946,7 +2947,7 @@ static void draw(CmdRec *r, bool indexed) {
             static bool noted_inst;
             if (!noted_inst && getenv("NXRT_LOG_HOOKS")) noted_inst = true, LOG("[hooks] instance_tint called\n");
             for (uint32_t k = 0; k < inst_all; k++) {
-                float t[8] = {0};
+                float t[RECOLOUR_TINT_FLOATS] = {0};
                 bool g = NX_HOOK(instance_tint)(m + (size_t)(base_all + k) * 16, t);
                 if (nruns && run_gold[nruns - 1] == g) { run_n[nruns - 1]++; continue; }
                 if (nruns == MAX_RUNS) { nruns = 0; break; }  // (too fragmented: draw as is)
@@ -2958,7 +2959,7 @@ static void draw(CmdRec *r, bool indexed) {
     if (!nruns) { run_at[0] = 0, run_n[0] = inst_all, nruns = 1, run_gold[0] = false; }
     for (int ri = 0; ri < nruns; ri++) {
     if (nruns > 1 || run_gold[0]) {  // (the first run's tint was set above: only overridden when it differs)
-        float tint[8] = {0};
+        float tint[RECOLOUR_TINT_FLOATS] = {0};
         if (run_gold[ri]) memcpy(tint, run_tint[ri], sizeof tint);
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
     }
