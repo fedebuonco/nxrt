@@ -1,6 +1,6 @@
 // Screen filter (Cosmetics tab "Screen filter"), live: applied in the present pass, after the upscaler, to the whole
 // game image - the game's own HUD included (the original's look), our overlay menus not. The image is gamma-encoded
-// there. Shared by the Metal (metal.m present_src) and Vulkan (vulkan/shaders.c present.frag) present shaders: `c` is
+// there. Shared by the Vulkan present shader (vulkan/shaders.c present.frag): `c` is
 // the colour (float3 / vec3), pf.x the mode.
 //   1 Game Boy: the original's four greens (#0F380F #306230 #8BAC0F #9BBC0F), chosen by luminance
 //   2 Game Boy Color: more saturated and a little brighter, 6 levels a channel (its 15-bit colours, posterised)

@@ -26,13 +26,7 @@ uint32_t nx_code_variant(uint64_t addr) { return NX_HOOK(code_variant) ? NX_HOOK
 
 const char *nx_gamelib_name(void) {
     static char name[64];
-#if defined(_WIN32)
-    if (!name[0]) snprintf(name, sizeof name, "%sgame.dll", nx_game.info.id);
-#elif defined(__APPLE__)
-    if (!name[0]) snprintf(name, sizeof name, "%sgame.dylib", nx_game.info.id);
-#else
     if (!name[0]) snprintf(name, sizeof name, "%sgame.so", nx_game.info.id);
-#endif
     return name;
 }
 
@@ -209,16 +203,7 @@ void reboot_test_frame(uint64_t frame) {
     rt_request_reboot(RT_REBOOT_GAME);
 }
 
-#ifdef __APPLE__
-extern const ResetFn __start_resets[] __asm__("section$start$__DATA$__rt_reset");
-extern const ResetFn __stop_resets[] __asm__("section$end$__DATA$__rt_reset");
-#elif defined(__linux__)
 extern const ResetFn __start_resets[], __stop_resets[];  // (ELF: defined by the linker)
-#else
-// PE/COFF: .rst$a < .rst$m (entries, hle.h) < .rst$z (the linker sorts by the text after '$')
-__attribute__((section(".rst$a"), used)) static const ResetFn __start_resets[1];
-__attribute__((section(".rst$z"), used)) static const ResetFn __stop_resets[1];
-#endif
 
 void backend_reset(void);             // renderer: GPU idle, game textures and address-keyed caches dropped
 void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (re-wrap the heap)
@@ -349,13 +334,8 @@ static void layers_init(void) {
     nx_save_set_profile_dir(NX_HOOK(content_dir));
     if (NX_HOOK(save_read)) nx_save_on_read(NX_HOOK(save_read));
     if (NX_HOOK(save_written)) nx_save_on_write(NX_HOOK(save_written));
-#ifdef __APPLE__
-    extern const NxUiBackend g_ui_backend_metal;
-    nxui_set_backend(&g_ui_backend_metal);
-#else
-    extern const NxUiBackend g_ui_backend_vulkan;
+    extern const NxUiBackend g_ui_backend_vulkan;  // TODO(steam-deck): the Vulkan NxUiBackend is not implemented yet
     nxui_set_backend(&g_ui_backend_vulkan);
-#endif
 }
 
 int main(int argc, char **argv) {

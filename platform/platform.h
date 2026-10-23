@@ -1,5 +1,5 @@
 // Host OS layer: everything the runtime needs that differs between macOS and Windows.
-// nx-platform (the lowest layer): platform/macos.c, linux.c, windows.c (nxrt.mk picks one), app.c.
+// nx-platform (the lowest layer): platform/linux.c and app.c.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>

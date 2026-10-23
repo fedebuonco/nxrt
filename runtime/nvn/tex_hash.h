@@ -1,4 +1,4 @@
-// Texture upload checks' hashes (vulkan/textures.c and metal.m upload_texture), written for this project.
+// Texture upload checks' hashes (vulkan/textures.c upload_texture), written for this project.
 // NXRT_TEX_FASTHASH=0: each backend's previous hashes instead (A/B tests).
 //
 // tex_hash_full: eight independent lanes, each a chain of bijective steps (xor the next word, multiply by an odd

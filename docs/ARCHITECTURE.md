@@ -18,26 +18,26 @@ apart. nxrt is that common part pulled out once, with the game-specific parts mo
 
 **What "native" means here.** The game's ARM64 code isn't emulated instruction by instruction. It's translated to C
 ahead of time, on the player's machine from their own copy of the game, and compiled into a native library
-(`<id>game.dylib` / `.so` / `.dll`). What nxrt emulates is the *Switch around the game*:
+(`<id>game.so`). What nxrt emulates is the *Switch around the game*:
 - the Horizon OS services the game calls (kernel, file system, audio, input, IPC: high-level emulation);
-- the NVN graphics API and its shaders, translated to Metal on macOS and Vulkan elsewhere.
+- the NVN graphics API and its shaders, translated to Vulkan.
 
 ## The layers
 
 | Layer | Folder | Role | Interface |
 |---|---|---|---|
-| nx-platform | [`platform/`](../platform) | macOS / Windows / Linux differences, the data folder, the game folder (e.g. on a portable drive), crash handling | `nx_app.h`, `paths.h`, `platform.h` |
+| nx-platform | [`platform/`](../platform) | Linux / SteamOS, the data folder, the game folder (e.g. on a portable drive), crash handling | `nx_app.h`, `paths.h`, `platform.h` |
 | nx-settings | [`settings/`](../settings) | One settings file; the runtime, the game, input and UI each register a section | `nx_settings.h` |
 | nx-input | [`input/`](../input) | Keyboard / controller / mouse → the Switch pad, rebinding, dead zones, button-prompt style | `nx_input.h` |
 | nx-save | [`save/`](../save) | Save folders, per-profile slots, backups, read/write listeners | `nx_save.h` |
 | nx-ui | [`ui/`](../ui) | Start screen, game-files setup UI, in-game menu (system tabs + the game's tab), on-screen keyboard | `nx_ui.h`, `menu.h` |
-| nx-runtime | [`runtime/`](../runtime), [`tools/`](../tools) | Recompiler, loader, dispatcher, kernel, IPC, HLE services, NVN → Metal/Vulkan, game-files setup, the game interface | `nxgame.h` |
+| nx-runtime | [`runtime/`](../runtime), [`tools/`](../tools) | Recompiler, loader, dispatcher, kernel, IPC, HLE services, NVN → Vulkan, game-files setup, the game interface | `nxgame.h` |
 
 Dependencies only point down: nx-platform ← nx-settings ← nx-input, nx-save ← nx-ui ← nx-runtime ← the game. The build
 enforces it: each layer compiles with only its own headers and the ones below it on the include path.
 
 **nx-runtime is optional.** A recomp with its own runtime can keep it and use only the five layers below. That gives it
-the same start screen, menu, controls, settings and saves ([`examples/ui-host`](../examples/ui-host)).
+the same start screen, menu, controls, settings and saves.
 
 ## Shared by every game
 
@@ -49,7 +49,7 @@ All of this lives at the root of this repository and is the same code for every 
   - loader, dispatcher, kernel, IPC;
   - every emulated service (fs, audio, hid, am, pl…);
   - movies and the software keyboard;
-  - the NVN renderer for Metal and Vulkan, with its shader translator.
+  - the NVN renderer for Vulkan, with its shader translator.
 - **The app:**
   - the start screen and game-files setup: extracted folders or `.nsp` / `.xci` read in place, where to keep the game,
     building the game code;
@@ -154,8 +154,8 @@ After the EoW merge, for example, LAS's library on the portable SSD had to be re
 
 | What | Where |
 |---|---|
-| The app's data: settings file, saves, save backups, mods, shader cache | macOS `~/Library/Application Support/<bundle_id>`, Linux `$XDG_DATA_HOME/<data_dir>`, Windows next to the exe |
+| The app's data: settings file, saves, save backups, mods, shader cache | Linux `$XDG_DATA_HOME/<data_dir>` |
 | The game folder | `extracted/` in the data folder, the player's own folder ("With my game files"), or `<chosen folder>/<title> game` |
-| Inside the game folder | `exefs/`, `romfs/` or `romfs.src` (the RomFS read from the package), `romfs.bin` (the data image), `<id>game.dylib` + `.id` |
+| Inside the game folder | `exefs/`, `romfs/` or `romfs.src` (the RomFS read from the package), `romfs.bin` (the data image), `<id>game.so` + `.id` |
 
 The "Delete game files" button only removes what the app built: the player's own files are never deleted.

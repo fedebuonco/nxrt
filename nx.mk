@@ -14,15 +14,8 @@ ifeq ($(.DEFAULT_GOAL),)
 .DEFAULT_GOAL := all  # (not this file's first rule: the includer's `all`)
 endif
 
-ifndef PLATFORM
-ifneq ($(filter MINGW% MSYS% CYGWIN% Windows_NT,$(shell uname -s) $(OS)),)
-PLATFORM := windows
-else ifeq ($(shell uname -s),Linux)
 PLATFORM := linux
-else
-PLATFORM := macos
-endif
-endif
+
 B     ?= build
 CLANG ?= clang
 ifeq ($(origin CC),default)
@@ -33,23 +26,15 @@ CXX := $(CLANG)++
 endif
 IMGUI ?= $(NXRT)/third_party/imgui
 
-ifeq ($(PLATFORM),macos)
-SDL ?= $(or $(DEPS),/opt/homebrew/opt/sdl3)
-NX_DEPINC  ?= -I$(SDL)/include
-NX_UIFLAGS ?= -fobjc-arc
-NX_LDFLAGS ?= -L$(SDL)/lib -lSDL3 -Wl,-rpath,$(SDL)/lib -framework Foundation -framework Metal -framework QuartzCore \
-              -framework AppKit -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
-else
 NX_DEPINC  ?= $(if $(DEPS),-I$(DEPS)/include)
 NX_UIFLAGS ?= -x c++ $(OSFLAGS)
 NX_LDFLAGS ?= $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lpthread
-endif
 
 NX_PLATFORM_SRC := $(NXRT)/platform/app.c $(NXRT)/platform/paths.c $(NXRT)/platform/$(PLATFORM).c
 NX_SETTINGS_SRC := $(NXRT)/settings/settings.c
 NX_INPUT_SRC    := $(NXRT)/input/input.c $(NXRT)/input/bindings.c
 NX_SAVE_SRC     := $(NXRT)/save/save.c
-NX_UI_SRC       := $(wildcard $(NXRT)/ui/*.mm) $(if $(filter macos,$(PLATFORM)),$(NXRT)/ui/backends/metal.mm)
+NX_UI_SRC       := $(wildcard $(NXRT)/ui/*.mm)
 INC_PLATFORM := -I$(NXRT)/platform
 INC_SETTINGS := $(INC_PLATFORM) -I$(NXRT)/settings
 INC_INPUT    := $(INC_SETTINGS) -I$(NXRT)/input
@@ -60,7 +45,7 @@ NX_HDRS      := $(wildcard $(NXRT)/platform/*.h $(NXRT)/settings/*.h $(NXRT)/inp
 NX_OBJ   := $(patsubst $(NXRT)/%.c,$(B)/nx/%.o,$(NX_PLATFORM_SRC) $(NX_SETTINGS_SRC) $(NX_INPUT_SRC) $(NX_SAVE_SRC)) \
             $(patsubst $(NXRT)/%.mm,$(B)/nx/%.o,$(NX_UI_SRC))
 NX_IMGUI_OBJ := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.o $(B)/imgui/imgui_widgets.o \
-                $(B)/imgui/imgui_impl_sdl3.o $(if $(filter macos,$(PLATFORM)),$(B)/imgui/imgui_impl_metal.o)
+                $(B)/imgui/imgui_impl_sdl3.o
 
 NXFLAGS = -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function $(NX_DEPINC) $(OSFLAGS)
 NXCXXFLAGS = -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends $(NX_DEPINC)
@@ -87,9 +72,6 @@ $(B)/imgui/%.o: $(IMGUI)/%.cpp
 $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(NXCXXFLAGS) -c $< -o $@
-$(B)/imgui/imgui_impl_metal.o: $(IMGUI)/backends/imgui_impl_metal.mm
-	@mkdir -p $(dir $@)
-	$(CXX) $(NXCXXFLAGS) -fobjc-arc -c $< -o $@
 
 nx-objs: $(NX_OBJ) $(NX_IMGUI_OBJ)
 .PHONY: nx-objs

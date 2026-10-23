@@ -1,5 +1,8 @@
 # Build a recomp on nxrt
 
+> **Steam Deck branch.** Only Linux/Vulkan is present here. macOS/Metal and Windows references in older
+docs are historical; see [STEAM_DECK.md](../STEAM_DECK.md).
+
 nxrt is a **runtime library**: you bring a game, it brings everything every recomp needs. This page is the contract
 between the two — what you vendor, what you implement, how it builds, and when things must be rebuilt.
 
@@ -10,7 +13,7 @@ For the layer-by-layer design, read [ARCHITECTURE.md](ARCHITECTURE.md) after thi
 | You are building | Include | You get | Example |
 |---|---|---|---|
 | A recomp | `nxrt.mk` | The whole runtime: recompiler, loader, kernel, IPC, HLE services, NVN renderers, and the app | [`examples/game-template`](../examples/game-template) |
-| A runtime of your own that wants the app around it | `nx.mk` | The five layers only: platform, settings, input, save, ui | [`examples/ui-host`](../examples/ui-host) |
+| A runtime of your own that wants the app around it | `nx.mk` | The five layers only: platform, settings, input, save, ui | — |
 
 Both are Makefile includes, consumed as source. There is no binary to link against and no install step: a clone of this
 repository (or a copy of `nxrt/` inside your project) is the dependency.
@@ -44,7 +47,7 @@ screen and menu.
 
 ```make
 NXRT     := ../nxrt        # games/<id>/ -> your-project/nxrt (git submodule), or the path you copied it to
-GAME_ID  := <id>              # -> <id>game.dylib / .so / .dll
+GAME_ID  := <id>              # -> <id>game.so
 GAME_EXE := <id>recomp
 GAME_SRC := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/ui/*.mm)
 GAME_MODULES := main:0x7000000000 sdk:0x7004000000   # the NSOs in exefs/ and their load addresses
@@ -75,7 +78,7 @@ SDKROOT=$(xcrun --show-sdk-path) make -j10 CLANG=/usr/bin/clang
 ```
 
 `make` builds the **app**. It does not build the game code: that is generated from the player's own game files, at
-setup, on the player's machine, and compiled into `<id>game.dylib` next to the app. In a source checkout you can do it
+setup, on the player's machine, and compiled into `<id>game.so` next to the app. In a source checkout you can do it
 yourself with `make gen` once `extracted/exefs/` holds your own dumped modules.
 
 ## What ships to the player, and what must not
@@ -84,10 +87,9 @@ The app you distribute contains:
 
 - your app binary (nxrt + your game folder compiled in),
 - the recompiler: `gen.py` and its Python packages (`tools/venv`), or a packaged `nxgen` helper,
-- on Windows, `zig` (`tools/fetch_zig.sh` → `zig_slim.sh`) as the compiler the setup uses.
 
 It does **not** contain, and must never contain: game files (`exefs/`, `romfs/`, `.nsp`, `.xci`), keys
-(`prod.keys`), generated C, or the built `<id>game.dylib`. The player supplies their own copy; the setup copies or
+(`prod.keys`), generated C, or the built `<id>game.so`. The player supplies their own copy; the setup copies or
 reads it in place and generates the code from it.
 
 ## When the game code is rebuilt
@@ -116,15 +118,13 @@ it changes only when that format does.
 
 ## Platform support
 
-macOS on Apple Silicon is the verified target (Metal, MetalFX). Windows (Vulkan, `zig cc`) and Linux (Vulkan) build and
-are in the tree, but haven't been re-verified since the ports were merged; treat them as works in progress. See
-[Status](../README.md#status).
+This branch targets **Steam Deck / SteamOS: Linux x86-64, Vulkan**. macOS/Metal and Windows have been removed. The
+Vulkan/Linux target is still in progress; see [STEAM_DECK.md](../STEAM_DECK.md).
 
 ## Building
 
-- macOS: Homebrew `sdl3` and `ffmpeg` (`brew install sdl3 ffmpeg`), Apple's clang. Homebrew's `clang` (LLVM 19) does not
-  find the macOS SDK by itself — pass `CLANG=/usr/bin/clang` and `SDKROOT=$(xcrun --show-sdk-path)`.
-- Windows: MSYS2 UCRT64 (see the LAS port's `docs/BUILD-windows.md`, not shipped here) or `zig cc`.
-- Linux: clang and Vulkan; SDL3 and FFmpeg from the distribution.
+- Linux / SteamOS: clang, lld, make, Python 3, SDL3, FFmpeg, Vulkan, shaderc.
+- On a Deck, use a writable toolchain (distrobox or a SteamOS development environment); the read-only root does not
+  carry the build dependencies.
 
 Environment variables are `NXRT_*`; `NXRT_CC` overrides the compiler the setup uses for the game code.

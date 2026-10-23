@@ -103,7 +103,7 @@ typedef struct {
     uint32_t const_offset, const_size;
 } ShaderBlob;
 
-// Backend (runtime/nvn/renderer.m, runtime/nvn/vulkan/exec.c): build what the record describes through the draw
+// Backend (runtime/nvn/vulkan/exec.c): build what the record describes through the draw
 // path's own code and keep it for the game. Called on one thread, while no game runs; builds may finish later
 // (renderer_prepare_pending). false: not built (the backend can't, or the translation failed).
 bool renderer_prepare_begin(void);

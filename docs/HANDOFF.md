@@ -1,3 +1,6 @@
+> **Steam Deck branch.** This document predates the macOS/Metal and Windows removal. Paths and commands
+> mentioning them are historical; the target is Linux/Vulkan on Steam Deck.
+
 # nxrt — project handoff
 
 **v0.4.0, 2026-10-23.** Release: <https://github.com/fedebuonco/nxrt/releases/tag/v0.4.0> (`master` = the release tag).
