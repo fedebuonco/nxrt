@@ -45,6 +45,7 @@ typedef struct NxGameInfo {
     const char *release_page;  // release page URL, the tag appended
     const char *headline;      // the start screen's big title ("LAS Recompiled")
     const char *romfs_probe;   // a RomFS path every complete copy of the game files has (setup check)
+    uint32_t romfs_files;      // the RomFS's file count in a complete copy (0: the crash dialog can't tell if files are missing)
     const char *title_movie;   // RomFS path of a movie whose first frame is the start screen's background (NULL: none)
     const char *nickname;      // the console account's nickname the game reads (NULL: "Player")
     const char *menu_name;     // the game's tab in the menu ("Link's Awakening"; NULL: game_name)
