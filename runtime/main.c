@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "game_addresses.h"
 #include "gamelib.h"
 #include "paths.h"
 #include "settings.h"
@@ -188,11 +189,12 @@ __attribute__((section(".rst$z"), used)) static const ResetFn __stop_resets[1];
 void backend_reset(void);             // renderer: GPU idle, game textures and address-keyed caches dropped
 void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (re-wrap the heap)
 void backend_clear_window(void);      // a black frame while the game is down
+void backend_quit(void);              // quitting: the render thread stopped, the GPU idle, caches kept (before exit())
 
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
     SDL_Event e;
     while (SDL_PollEvent(&e))
-        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); backend_quit(); exit(0); }
 }
 
 static void teardown(void) {
@@ -222,7 +224,17 @@ static void boot(const char *root) {
     free((void *)g_romfs_dir);  // (each boot: the game folder may have moved since - start screen setup)
     g_romfs_dir = strdup(romfs);
 
+#ifdef __linux__
+    {   // the window and graphics device first (normally made by the start screen or ui_run), so the guest heap can be
+        // the driver's memory before any game thread runs (runtime/nvn/vulkan/exec.c backend_guest_heap_prepare)
+        extern void ui_window_init(void);
+        extern void backend_guest_heap_prepare(void);
+        ui_window_init();
+        backend_guest_heap_prepare();
+    }
+#endif
     char why[512];
+    if (!game_version_select(root, why, sizeof why)) FATAL("%s\n", why);  // (the address table: game_addresses.h)
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
     if (NX_HOOK(modules_loaded)) NX_HOOK(modules_loaded)();  // (e.g. a seed's data patches into the fresh modules)
@@ -285,6 +297,29 @@ static void layers_init(void) {
     extern const NxUiBackend g_ui_backend_vulkan;
     nxui_set_backend(&g_ui_backend_vulkan);
 #endif
+}
+
+// The log's first line after the log's own: this build and the machine, for bug reports. Nothing that identifies the
+// player (platform.h plat_system_info). Once per session: a restart of this process (the start screen re-executing
+// itself for the game) appends to the same log and inherits LASRECOMP_INFO_LOGGED.
+static void log_startup_info(void) {
+    if (getenv("LASRECOMP_INFO_LOGGED")) return;
+    setenv("LASRECOMP_INFO_LOGGED", "1", 1);
+    extern const char *larecomp_version(void);  // runtime/ui/launcher.mm
+    PlatSysInfo si = {0};
+    plat_system_info(&si);
+    char cores[96] = "";
+    if (si.cores > 0) {
+        int n = snprintf(cores, sizeof cores, " %d cores", si.cores);
+        if (si.cores_detail[0]) n += snprintf(cores + n, sizeof cores - n, " (%s)", si.cores_detail);
+        if (si.threads > si.cores) snprintf(cores + n, sizeof cores - n, " / %d threads", si.threads);
+    } else if (si.threads > 0) snprintf(cores, sizeof cores, " %d threads", si.threads);
+    unsigned long long tenths = (si.ram * 10 + (1ull << 29)) >> 30;  // (GB to a tenth; whole when it is: 64 GB, 14.5 GB)
+    char ram[32] = "RAM unknown";
+    if (si.ram && tenths % 10) snprintf(ram, sizeof ram, "%llu.%llu GB RAM", tenths / 10, tenths % 10);
+    else if (si.ram) snprintf(ram, sizeof ram, "%llu GB RAM", tenths / 10);
+    fprintf(stderr, "[info] LAS Recomp %s, %s, %s%s, %s%s%s\n", larecomp_version(), si.os[0] ? si.os : "unknown OS",
+            si.cpu[0] ? si.cpu : "unknown CPU", cores, ram, si.package ? ", " : "", si.package ? si.package : "");
 }
 
 int main(int argc, char **argv) {

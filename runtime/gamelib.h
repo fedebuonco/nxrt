@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "cpu.h"
 
@@ -16,7 +18,8 @@
 #endif
 
 // GAMELIB_ID (-D, from the Makefile): a hash of the generator and the headers the game code is compiled against. A
-// library built with another one is rebuilt, not loaded.
+// library built with another one is rebuilt, not loaded. A library's own id (its .id file, GameLibTables.id) is
+// GAMELIB_ID-<the first 16 hex digits of the game's main build ID>: switching game versions rebuilds it too.
 #ifndef GAMELIB_ID
 #define GAMELIB_ID "dev"
 #endif

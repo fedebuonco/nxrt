@@ -7,6 +7,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <atomic>
+#include <string>
 #include <vector>
 
 #include "imgui.h"
@@ -176,28 +177,10 @@ static ImGuiKey key_from_scancode(SDL_Scancode sc) {
     }
 }
 
-// Nintendo layout: the right face button (A) confirms, the bottom one (B) goes back.
-static ImGuiKey key_from_pad(Uint8 b) {
-    switch (b) {
-    case SDL_GAMEPAD_BUTTON_EAST: return ImGuiKey_GamepadFaceDown;   // activate
-    case SDL_GAMEPAD_BUTTON_SOUTH: return ImGuiKey_GamepadFaceRight; // cancel / back
-    case SDL_GAMEPAD_BUTTON_NORTH: return ImGuiKey_GamepadFaceUp;
-    case SDL_GAMEPAD_BUTTON_WEST: return ImGuiKey_GamepadFaceLeft;
-    case SDL_GAMEPAD_BUTTON_DPAD_UP: return ImGuiKey_GamepadDpadUp;
-    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return ImGuiKey_GamepadDpadDown;
-    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return ImGuiKey_GamepadDpadLeft;
-    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return ImGuiKey_GamepadDpadRight;
-    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return ImGuiKey_GamepadL1;
-    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return ImGuiKey_GamepadR1;
-    case SDL_GAMEPAD_BUTTON_START: return ImGuiKey_GamepadStart;
-    case SDL_GAMEPAD_BUTTON_BACK: return ImGuiKey_GamepadBack;
-    default: return ImGuiKey_None;
-    }
-}
 
 // ---- software keyboard (runtime/hle/swkbd.c: the game's name entry etc.) --------------------------------------
 // The game thread waits in menu_keyboard_run (re-presenting the last frame); this dialog takes the text: typed
-// directly when the player last used a keyboard, an on-screen keyboard (d-pad + A, B deletes, Start / + OK) when
+// directly when the player last used a keyboard, an on-screen keyboard (d-pad + confirm, back deletes, Start / + OK; buttons as in pad_nav.h) when
 // they last used a controller.
 static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
@@ -263,7 +246,7 @@ bool menu_handle_event(const SDL_Event *e) {
             return true;
         }
         if (!capturing()) return false;
-        ImGuiKey k = key_from_pad(e->gbutton.button);
+        ImGuiKey k = ui_pad_key(e->gbutton.which, e->gbutton.button, down);  // (confirm / back: pad_nav.h)
         if (k != ImGuiKey_None) { QEvent q = {}; q.kind = QEvent::KEY; q.key = k; q.down = down; push(q); }
         return true;
     }
@@ -310,6 +293,7 @@ bool menu_handle_event(const SDL_Event *e) {
     }
 }
 
+extern "C" uint32_t g_window_resize_request;  // (test scripts: runtime/hle/input.c "resize")
 void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
@@ -325,6 +309,8 @@ void menu_apply_window_requests(void *win) {
         first = false;
         SDL_SetWindowFullscreen(w, g_ui_settings.fullscreen);
     }
+    if (uint32_t r = __atomic_exchange_n(&g_window_resize_request, 0u, __ATOMIC_RELAXED))
+        SDL_SetWindowSize(w, (int)(r >> 16), (int)(r & 0xffff));
 }
 
 void nxui_set_fullscreen(bool on) {
@@ -730,6 +716,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
         if (g_tab_request == g_pages[i]->id) g_page_request = g_tab_request, g_tab_request = GAME_TAB_ID;
     bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();
     static int focused_tab = -99;  // the tab the controller's cursor is on (from the frame before; -99: none)
+    bool switching = false;  // (L / R this frame: the page changes next frame)
     if (!any_popup && !typing) {
         int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
                  : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1 : 0;
@@ -737,15 +724,41 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             int i = cur;
             do i = (i + step + ntabs) % ntabs; while (!tabs[i].on);
             g_tab_request = tabs[i].id;
-            // the cursor on the tab bar goes along (left behind, A on it switched straight back; user 2026-10-11)
-            if (focused_tab != -99) g_focus_tab = tabs[i].id, g_focus_frames = 0;
+            // the cursor goes onto the new tab (left behind on the tab bar, A on it switched straight back - user
+            // 2026-10-11; left in the old page, it stayed on a row that is gone, and Down went on from where that row
+            // had been)
+            g_focus_tab = tabs[i].id, g_focus_frames = 0;
+            switching = true;
         }
     }
-    // Down with the cursor on the tab bar: the page's first row (option rows; other pages keep ImGui's own pick)
-    bool down_from_tab = focused_tab != -99 && ImGui::GetCurrentContext()->NavCursorVisible && !any_popup &&
-                         (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown) || ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown) ||
-                          ImGui::IsKeyPressed(ImGuiKey_DownArrow));
+    bool down = !any_popup && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown) ||
+                                          ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown) ||
+                                          ImGui::IsKeyPressed(ImGuiKey_DownArrow));
+    bool up = !any_popup && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp) ||
+                                        ImGui::IsKeyPressed(ImGuiKey_GamepadLStickUp) || ImGui::IsKeyPressed(ImGuiKey_UpArrow));
+    // The first Down on a page just switched to (L / R, a click or A on a tab, the menu opening), or Down with the
+    // cursor on the tab bar: the page's first enabled row, top to bottom - never ImGui's pick from wherever its cursor
+    // was (a row of the page before, the tab bar's x). Option rows take it (opt_focus_first); a page without them gets
+    // its first control (g_page_focus_next).
+    if (ImGui::GetIO().MouseClicked[0]) g_page_fresh = false;  // (the mouse went into the page)
+    bool down_from_tab = down && !switching &&
+                         ((focused_tab != -99 && ImGui::GetCurrentContext()->NavCursorVisible) || g_page_fresh);
+    if (down_from_tab) {
+        ImGui::NavMoveRequestCancel();  // (ImGui's own move this frame)
+        g_page_fresh = false;
+        g_focus_tab = -99, g_focus_frames = 0;  // (the cursor stops going back to the tab)
+    }
     opt_focus_first(down_from_tab);
+    // Up / Down on a page of option rows: the next / previous row in order (opt_nav_step), not ImGui's spatial pick
+    if ((down || up) && !down_from_tab && !switching && opt_nav_step(down ? 1 : -1)) ImGui::NavMoveRequestCancel();
+    opt_frame_reset();
+    // The cursor moved out of the page (ImGui's pick, applied this frame for last frame's press - Up from the page's
+    // top control): onto the selected tab. ImGui's pick was the tab nearest the control's x (Controls, from most
+    // rows), or the close button
+    ImGuiContext &g = *ImGui::GetCurrentContext();
+    ImGuiWindow *root = ImGui::GetCurrentWindow()->RootWindow;
+    static bool nav_in_page;  // (the frame before: the cursor on a control of the page - its child windows)
+    if (nav_in_page && g.NavJustMovedToId && g.NavWindow == root && !any_popup) g_focus_tab = -100, g_focus_frames = 0;
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
         for (int k = 0; k < ntabs; k++) {
             const Tab &t = tabs[k];
@@ -783,6 +796,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             else if (focused_tab == t.id) focused_tab = -99;
             ImGui::EndDisabled();
             if (open) {
+                if (t.id != g_shown_tab) g_shown_tab = t.id, g_page_fresh = true, g_page_focus_next = false;
                 g_tab = t.id;
                 ImGui::Spacing();
                 ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_None,  // (the rest of the window: no hint line)
@@ -804,14 +818,25 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 }
                 static const char *scroll_test = getenv("NXRT_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
+                // no enabled option row took the cursor: the page's first control, next frame (SetKeyboardFocusHere:
+                // the first item that takes the cursor, in order)
+                if (opt_focus_first_left() && down_from_tab) g_page_focus_next = true;
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
         }
         g_tab_request = -2;
-        opt_focus_first(false);  // (a page without option rows: nothing took it)
+        opt_focus_first_left();  // (no page drawn: nothing took it)
         ImGui::EndTabBar();
     }
+    nav_in_page = g.NavWindow && g.NavWindow != g.NavWindow->RootWindow && g.NavWindow->RootWindow == root;
+    // (checks: fresh presses only - a held key's repeats come faster than a check's few frames)
+    bool down1 = down && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown, false) ||
+                          ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown, false) || ImGui::IsKeyPressed(ImGuiKey_DownArrow, false));
+    bool up1 = up && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp, false) ||
+                      ImGui::IsKeyPressed(ImGuiKey_GamepadLStickUp, false) || ImGui::IsKeyPressed(ImGuiKey_UpArrow, false));
+    for (int k = 0; k < ntabs; k++)
+        if (tabs[k].id == g_tab) focus_check(down1, up1, down, focused_tab, g_tab, tabs[k].name);
 }
 
 void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, void (*prelaunch)(float)) {
@@ -833,6 +858,7 @@ void menu_render(void *frame, double tw, double th) {
     bool kbd = g_kbd.load() == 1;
     if (!open && !kbd && !g_ui_settings.show_fps && !overlay) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
+        g_ov_same = 0;  // (shown again: built afresh first)
         return;
     }
     if (!g_inited) init();
@@ -844,6 +870,41 @@ void menu_render(void *frame, double tw, double th) {
     double now = SDL_GetTicks() / 1000.0;
     io.DeltaTime = last > 0 && now > last ? (float)(now - last) : 1.0f / 60;
     last = now;
+    if (g_ov_cache < 0) g_ov_cache = !getenv("NXRT_OVERLAY_CACHE") || atoi(getenv("NXRT_OVERLAY_CACHE")) != 0;
+    char key[sizeof g_ov_key];
+    key[0] = 0;
+    if (g_ov_cache) {
+        fps_note(now, io.DeltaTime);
+        char rk[64];
+        // (only the FPS counter and the run timer; input only reaches ImGui while the menu or the name entry is up)
+        if (!open && !kbd && !inv && !trk && !trkd && !chaos && !flyin && race_overlay_key(rk, sizeof rk)) {
+            pthread_mutex_lock(&q_lock);
+            bool events = !q_events.empty();
+            pthread_mutex_unlock(&q_lock);
+            if (!events) snprintf(key, sizeof key, "%.0fx%.0f fps %d %.0f | %s", tw, th, (int)g_settings.show_fps,
+                                  g_settings.show_fps ? g_fps_shown : 0.0, rk);
+        }
+        ImDrawData *dd = ImGui::GetDrawData();
+        if (key[0] && g_ov_same >= 3 && !strcmp(key, g_ov_key) && dd && dd->Valid) {
+            g_text_busy = false;  // (the menu is closed)
+#ifdef __APPLE__
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = target;
+            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            ImGui_ImplMetal_NewFrame(rp);  // (the backend's target description only)
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            ImGui_ImplMetal_RenderDrawData(dd, cb, enc);
+            [enc endEncoding];
+#else
+            rec_drain();  // (ImGui records into cmd itself: the recorder thread idle first, as below)
+            ImGui_ImplVulkan_RenderDrawData(dd, (VkCommandBuffer)cmd);
+#endif
+            return;
+        }
+        if (key[0] && !strcmp(key, g_ov_key)) g_ov_same++;
+        else { memcpy(g_ov_key, key, sizeof key); g_ov_same = key[0] ? 1 : 0; }
+    }
     drain_events(io);
     // fonts are built at 34/56 px for a ~1080 px tall output; scale to the window
     float scale = (float)(th / 1080.0);
@@ -867,7 +928,7 @@ void menu_render(void *frame, double tw, double th) {
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("%.0f fps", io.Framerate);
+        ImGui::Text("%.0f fps", g_ov_cache ? g_fps_shown : io.Framerate);
         ImGui::End();
     }
 
@@ -910,7 +971,8 @@ void menu_render(void *frame, double tw, double th) {
         tabs_body(scale, true, NULL);                                                                          //  pages run)
         // B with nothing focused-deeper closes the menu (not the Esc / B that ends typing: typing is from the frame
         // before, so it's still true the frame a field lets go)
-        if (!any_popup && !typing && !ui_text_busy() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        if (!any_popup && !typing && !ui_text_busy() && !controls_ui_took_back() && !rando_tab_took_back() &&
+            ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             set_open(false);
         ImGui::PopFont();

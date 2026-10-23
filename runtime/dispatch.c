@@ -58,6 +58,13 @@ uint64_t hle_register(const char *name, HostFn fn) {
     return HLE_BASE + 16ull * hle_count++;
 }
 
+// (diagnostics) the host function behind an HLE stub address, NULL if pc isn't one
+const char *hle_name_at(uint64_t pc) {
+    if (pc < HLE_BASE || pc >= HLE_BASE + HLE_SIZE) return NULL;
+    int i = (int)((pc - HLE_BASE) / 16);
+    return i < hle_count ? hle_slots[i].name : NULL;
+}
+
 void hle_override(uint64_t addr, HostFn fn, const char *name) {
     if (override_count == MAX_OVERRIDE) FATAL("too many overrides\n");
     overrides[override_count].addr = addr;
@@ -140,7 +147,7 @@ GuestFn dispatch_lookup(uint64_t addr) {
 #define DCACHE 4096
 static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 
-static GuestFn dispatch_slow(Cpu *c) {
+__attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
@@ -163,6 +170,14 @@ static GuestFn dispatch_slow(Cpu *c) {
     dcache[h].addr = pc;
     dcache[h].fn = f;
     return f;
+}
+
+// A cache miss / an HLE call: looked up, then tail-called. Kept out of rt_dispatch so the cached path needs no stack
+// frame: with the lookup inlined, every guest indirect call saved and restored registers on the way through (it was
+// 17% of the game thread's samples in Mabe on an M-series Mac, with the macOS TLS call).
+__attribute__((noinline)) static void dispatch_miss(Cpu *c) {
+    GuestFn f = dispatch_slow(c);
+    __attribute__((musttail)) return f(c);
 }
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
@@ -288,6 +303,7 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
+    rt_crash_fault(what, fa, pc);
     uint64_t po = 0, lo = 0;
     const char *ps = host_sym(pc, &po), *ls = host_sym(lr, &lo);
     fprintf(stderr, "\n*** %s accessing %#llx\n    host pc %llx (%s+%llx)\n    host lr %llx (%s)\n", what,
