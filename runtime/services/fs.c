@@ -458,6 +458,16 @@ static void rom_index(void) {
     free(dmeta);
     free(fmeta);
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
+    const char *romfs_find = getenv("NXRT_ROMFS_FIND");  // (test) which paths contain this: does the dump have that file?
+    if (romfs_find) {
+        int hits = 0;
+        for (int i = 0; i < rom_nfiles; i++)
+            if (strstr(rom_files[i].path, romfs_find)) {
+                LOG("[fs] romfs: %s\n", rom_files[i].path);
+                hits++;
+            }
+        LOG("[fs] romfs: %d paths contain \"%s\"\n", hits, romfs_find);
+    }
 }
 
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
@@ -510,6 +520,20 @@ static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
     }
     return (ssize_t)done;
 }
+
+// A RomFS file by path, for readers outside the FS service: the movie service plays a movie where it is instead of
+// copying it out (a folder, romfs.bin and the game package all serve the same image through romfs_read).
+bool romfs_file_by_path(const char *rel, uint64_t *out_off, uint64_t *out_size) {
+    if (!rel || !*rel) return false;
+    for (int i = 0; i < rom_nfiles; i++)
+        if (!strcmp(rom_files[i].path, rel)) {
+            *out_off = rom_files[i].off;
+            *out_size = rom_files[i].size;
+            return true;
+        }
+    return false;
+}
+ssize_t romfs_image_pread(void *dst, size_t n, uint64_t off) { return romfs_read(dst, n, off); }
 
 // Path of the RomFS file containing image offset `off` (NULL if none).
 const char *romfs_file_at(uint64_t off) {

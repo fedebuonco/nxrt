@@ -164,6 +164,8 @@ static void ok(Cpu *c) { c->x[0] = 0; }
 // ------------------------------------------------------------------ Extractor
 typedef struct {
     AVFormatContext *fmt;
+    AVIOContext *io;       // the RomFS image as FFmpeg's input (a folder, romfs.bin or the game package)
+    uint64_t io_off, io_size, io_pos;
     int map[16], ntracks;  // exposed track -> stream
     uint64_t selected;  // bitmask of streams
     AVPacket *pkt;
@@ -211,12 +213,62 @@ static void ex_fill(Extractor *e) {
     }
 }
 
+// ---- reading the movie where it is
+// A package-served RomFS (EoW, Sky) has no romfs/ folder on disk, so "rom:/..." can't be handed to FFmpeg as a path:
+// the image is read through the runtime's RomFS reader (folder, romfs.bin and package all serve it). Without this,
+// every movie open failed and a game that plays one before its first scene (EoW's title) stayed black.
+enum { MOVIE_IO_BUF = 1 << 16 };
+static int romio_read(void *opaque, uint8_t *buf, int n) {
+    Extractor *e = opaque;
+    if (e->io_pos >= e->io_size) return AVERROR_EOF;
+    uint64_t left = e->io_size - e->io_pos;
+    if ((uint64_t)n > left) n = (int)left;
+    ssize_t r = romfs_image_pread(buf, (size_t)n, e->io_off + e->io_pos);
+    if (r <= 0) return AVERROR(EIO);
+    e->io_pos += (uint64_t)r;
+    return (int)r;
+}
+static int64_t romio_seek(void *opaque, int64_t off, int whence) {
+    Extractor *e = opaque;
+    if (whence == AVSEEK_SIZE) return (int64_t)e->io_size;
+    int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? (int64_t)e->io_pos : whence == SEEK_END ? (int64_t)e->io_size : -1;
+    if (base < 0) return -1;
+    int64_t p = base + off;
+    if (p < 0 || (uint64_t)p > e->io_size) return -1;
+    e->io_pos = (uint64_t)p;
+    return p;
+}
+static void movie_close(Extractor *e) {
+    if (e->fmt) avformat_close_input(&e->fmt);
+    if (e->io) {  // (AVFMT_FLAG_CUSTOM_IO: avformat doesn't free it)
+        av_freep(&e->io->buffer);
+        avio_context_free(&e->io);
+    }
+}
+static bool movie_open(Extractor *e, const char *host, const char *rel) {
+    if (avformat_open_input(&e->fmt, host, NULL, NULL) >= 0) return true;
+    movie_close(e);
+    uint64_t off, size;
+    if (!romfs_file_by_path(rel, &off, &size) || !size) return false;
+    e->io_off = off, e->io_size = size, e->io_pos = 0;
+    uint8_t *buf = av_malloc(MOVIE_IO_BUF);
+    e->io = buf ? avio_alloc_context(buf, MOVIE_IO_BUF, 0, e, romio_read, NULL, romio_seek) : NULL;
+    if (!e->io) { av_free(buf); return false; }
+    e->fmt = avformat_alloc_context();
+    if (!e->fmt) return false;
+    e->fmt->pb = e->io;
+    e->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+    if (avformat_open_input(&e->fmt, NULL, NULL, NULL) < 0) return false;
+    LOG("[movie] %s read from the RomFS image (%llu KB)\n", rel, (unsigned long long)(size >> 10));
+    return true;
+}
+
 static void ex_set_data_source(Cpu *c) {
     Extractor *e = self_state(c);
     const char *path = (const char *)(uintptr_t)c->x[2];
     // Replacing a source also drops its last packet and track selection, including after a failed open.
     if (e->pkt) av_packet_free(&e->pkt);
-    if (e->fmt) avformat_close_input(&e->fmt);
+    movie_close(e);
     e->selected = 0;
     e->ntracks = 0;
     e->have_pkt = e->eof = e->skippable = false;
@@ -226,14 +278,14 @@ static void ex_set_data_source(Cpu *c) {
     char host[1024];
     snprintf(host, sizeof host, "%s/%s", g_romfs_dir, rel ? rel : "");
     LOG("[movie] open %s -> %s\n", path ? path : "(null)", host);
-    if (avformat_open_input(&e->fmt, host, NULL, NULL) < 0 || avformat_find_stream_info(e->fmt, NULL) < 0) {
+    if (!movie_open(e, host, rel) || avformat_find_stream_info(e->fmt, NULL) < 0) {
         LOG("[movie] cannot open %s\n", host);
-        if (e->fmt) avformat_close_input(&e->fmt);
+        movie_close(e);
         c->x[0] = 1;
         return;
     }
     e->pkt = av_packet_alloc();
-    if (!e->pkt) { avformat_close_input(&e->fmt); c->x[0] = 1; return; }
+    if (!e->pkt) { movie_close(e); c->x[0] = 1; return; }
     // the opening at launch can always be skipped, vanilla and randomizer (with no save yet the game forces it)
     e->skippable = rel && strstr(rel, "movie/opening.webm");
     if (e->skippable) g_skip_pressed_at = 0;  // (a press that ended the title's attract replay isn't for this one)
@@ -356,7 +408,7 @@ static void movie_track(int kind, void *p, bool add) {
 static void ex_dtor(Cpu *c) {
     Extractor *e = self_state(c);
     if (e && e->pkt) av_packet_free(&e->pkt);
-    if (e && e->fmt) avformat_close_input(&e->fmt);
+    if (e) movie_close(e);
     if (e) movie_track(0, e, false);
     c->x[0] = 0;
 }
@@ -789,7 +841,7 @@ RT_ON_RESET(movie_reset) {
     for (int i = 0; i < MAX_MOVIE_OBJS; i++) {
         Extractor *e = g_movie_objs[0][i];
         if (e && e->pkt) av_packet_free(&e->pkt);
-        if (e && e->fmt) avformat_close_input(&e->fmt);
+        if (e) movie_close(e);
         Decoder *d = g_movie_objs[1][i];
         if (d) dec_free(d);
         g_movie_objs[0][i] = g_movie_objs[1][i] = NULL;

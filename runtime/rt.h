@@ -27,6 +27,10 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 void rt_fatal_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));  // (runtime/crash_explain.c)
 void rt_crash_fault(const char *what, uint64_t fa, uint64_t pc);  // (runtime/crash_explain.c)
 extern int rt_romfs_files;  // the game's own RomFS files (runtime/services/fs.c; -1: not read yet)
+// A RomFS file by path, and a read of the RomFS image, for readers outside the FS service (the movie service plays a
+// movie where it is: a folder, romfs.bin and the game package all serve the same image).
+bool romfs_file_by_path(const char *rel, uint64_t *out_off, uint64_t *out_size);
+ssize_t romfs_image_pread(void *dst, size_t n, uint64_t off);
 
 // ---- address space layout (guest addresses == host addresses; GUEST_SHIFT lower on Android, cpu.h)
 // macOS reserves 0x2_0000_0000-0x70_0000_0000, and guest addresses must fit in 39 bits, so the
