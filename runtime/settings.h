@@ -1,6 +1,7 @@
 // The runtime's settings (display, sound, the system language): its section of the settings file (nx_settings.h),
 // edited from the menu's Video / Audio / Controls pages. A game keeps its own keys in the same file (nx_game hooks settings_*).
 #pragma once
+#include "cosmetic_colour.h"
 #include <stdbool.h>
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };

@@ -2,7 +2,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 
 #include "nx_app.h"
 
@@ -21,30 +20,6 @@ void nx_settings_register(const NxSettingsSection *s) {
 const char *nx_settings_path(void) {
     const char *e = getenv("NXRT_SETTINGS");
     return e && *e ? e : nx_app.ini;
-}
-
-int g_default_upscaler = UPSCALE_SHARP;
-int g_default_res_mode = RES_MATCH;
-bool g_gpu_integrated;
-
-static const char *res_name(int m) {
-    static char n[8];
-    if (m >= 1 && m <= 8) { snprintf(n, sizeof n, "%dx", m); return n; }
-    return m == RES_DYNAMIC ? "dynamic" : m == RES_Q75 ? "75%" : m == RES_Q50 ? "50%" : m == RES_Q25 ? "25%" : "match";
-}
-
-void settings_resolve_defaults(bool integrated) {
-    const char *e = getenv("NXRT_INTEGRATED");
-    if (e && *e) integrated = atoi(e) != 0;
-    g_gpu_integrated = integrated;
-    g_default_upscaler = integrated ? UPSCALE_BILINEAR : UPSCALE_SHARP;
-    g_default_res_mode = RES_MATCH;  // (Dynamic is not a default until it is reliable: user 2026-10-18)
-    if (g_settings.upscaler_auto) g_settings.upscaler = g_default_upscaler;
-    if (g_settings.res_auto) g_settings.res_mode = g_default_res_mode;
-    LOG("[settings] %s GPU: upscaler %s (%s), resolution %s (%s), anti-aliasing %s\n", integrated ? "integrated" : "discrete / other",
-        g_settings.upscaler == UPSCALE_BILINEAR ? "bilinear" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "metalfx",
-        g_settings.upscaler_auto ? "default" : "chosen", res_name(g_settings.res_mode), g_settings.res_auto ? "default" : "chosen",
-        g_settings.antialias == AA_SMAA ? "smaa" : "off");
 }
 
 void settings_load(void) {

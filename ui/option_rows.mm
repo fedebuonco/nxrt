@@ -11,7 +11,6 @@
 #include "imgui_internal.h"  // (SetKeyOwner, NavCursorVisible)
 
 extern "C" {
-#include "../cosmetic_colour.h"
 }
 #include "option_rows.h"
 #include "osk.h"

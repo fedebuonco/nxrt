@@ -22,8 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../paths.h"
-#include "../platform.h"
+#include "paths.h"
+#include "platform.h"
 #include "posix_log.h"
 
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
