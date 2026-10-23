@@ -260,6 +260,10 @@ NVN(nvnMemoryPoolBuilderGetMemory) { RET(G(uint64_t, A(0), 0x10)); }
 NVN(nvnMemoryPoolBuilderGetSize) { RET(G(uint64_t, A(0), 0x18)); }
 
 NVN(nvnMemoryPoolInitialize) {
+    if (ENV("NXRT_LOG_NVN"))
+        LOG("[nvn] MemoryPoolInitialize pool=%#llx builder=%#llx storage=%#llx size=%#llx\n", (unsigned long long)A(0),
+            (unsigned long long)A(1), (unsigned long long)G(uint64_t, A(1), 0x10),
+            (unsigned long long)G(uint64_t, A(1), 0x18));
     NvnPool *p = calloc(1, sizeof *p);
     p->storage = G(uint64_t, A(1), 0x10);
     p->size = G(uint64_t, A(1), 0x18);
@@ -269,12 +273,19 @@ NVN(nvnMemoryPoolInitialize) {
 }
 NVN(nvnMemoryPoolFinalize) { free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
-NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
-NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
-NVN(nvnMemoryPoolGetSize) { RET(HOST(NvnPool, A(0))->size); }
-NVN(nvnMemoryPoolGetFlags) { RET(HOST(NvnPool, A(0))->flags); }
+// (Unity calls Map/Get* on pools that were never initialised; the SDK's calls would fault, a recomp can read 0.)
+NVN(nvnMemoryPoolMap) { RET(A(0) ? HOST(NvnPool, A(0))->storage : 0); }
+NVN(nvnMemoryPoolGetBufferAddress) { RET(A(0) ? HOST(NvnPool, A(0))->storage : 0); }  // GPU address == CPU address
+NVN(nvnMemoryPoolGetSize) { RET(A(0) ? HOST(NvnPool, A(0))->size : 0); }
+NVN(nvnMemoryPoolGetFlags) { RET(A(0) ? HOST(NvnPool, A(0))->flags : 0); }
 NVN(nvnMemoryPoolFlushMappedRange) {
+    if (ENV("NXRT_LOG_NVN"))
+        LOG("[nvn] FlushMappedRange pool=%#llx off=%#llx size=%#llx\n", (unsigned long long)A(0),
+            (unsigned long long)A(1), (unsigned long long)A(2));
+    if (!A(0)) { LOG("[nvn] FlushMappedRange on a null pool (offset %#llx size %#llx)\n",
+                     (unsigned long long)A(1), (unsigned long long)A(2)); return; }
     NvnPool *p = HOST(NvnPool, A(0));
+    if (!p) return;
     backend_pool_written(p->storage + A(1), A(2));
 }
 NVN(nvnMemoryPoolInvalidateMappedRange) { (void)c; }
@@ -433,6 +444,7 @@ static NvnTexture *texture_from_builder(uint64_t b) {
     t->ds_mode = G(uint32_t, b, 0x2C);
     t->stride = G(uint64_t, b, 0x30);
     uint64_t pool = G(uint64_t, b, 0x38);
+    t->guest_pool = pool;
     t->pool = pool ? HOST(NvnPool, pool) : NULL;
     t->pool_offset = G(uint64_t, b, 0x40);
     t->addr = t->pool ? t->pool->storage + t->pool_offset : 0;
@@ -485,7 +497,7 @@ NVN(nvnTextureGetSwizzle) { for (int i = 0; i < 4; i++) *(uint32_t *)AP(1 + i) =
 NVN(nvnTextureGetDepthStencilMode) { RET(TEX->ds_mode); }
 NVN(nvnTextureGetStride) { RET(TEX->stride); }
 NVN(nvnTextureGetTextureAddress) { RET(TEX->addr); }
-NVN(nvnTextureGetMemoryPool) { RET(0); }
+NVN(nvnTextureGetMemoryPool) { RET(getenv("NXRT_UNITY_NVN") ? TEX->guest_pool : 0); }  // (Unity needs the real pool)
 NVN(nvnTextureGetMemoryOffset) { RET(TEX->pool_offset); }
 NVN(nvnTextureGetStorageSize) { RET(tegra_total_size(&TEX->layout)); }
 NVN(nvnTextureGetDebugID) { RET(TEX->debug_id); }
@@ -610,7 +622,16 @@ NVN(nvnSamplerGetBorderColori) { memcpy(AP(1), SMP->border, 16); }
 NVN(nvnSamplerGetBorderColorui) { memcpy(AP(1), SMP->border, 16); }
 NVN(nvnSamplerGetMaxAnisotropy) { RETF(SMP->max_aniso); }
 NVN(nvnSamplerGetReductionFilter) { RET(SMP->reduction); }
-NVN(nvnSamplerCompare) { RET(memcmp(HOST(NvnSamplerDesc, A(0)), HOST(NvnSamplerDesc, A(1)), sizeof(NvnSamplerDesc)) == 0); }
+static bool sampler_equal(const NvnSamplerDesc *a, const NvnSamplerDesc *b) {  // (not memcmp: the struct has padding)
+    if (!a || !b) return a == b;
+    return a->min_filter == b->min_filter && a->mag_filter == b->mag_filter && a->wrap[0] == b->wrap[0] &&
+           a->wrap[1] == b->wrap[1] && a->wrap[2] == b->wrap[2] && a->compare_mode == b->compare_mode &&
+           a->compare_func == b->compare_func && a->reduction == b->reduction && a->lod_min == b->lod_min &&
+           a->lod_max == b->lod_max && a->lod_bias == b->lod_bias && a->max_aniso == b->max_aniso &&
+           a->border[0] == b->border[0] && a->border[1] == b->border[1] && a->border[2] == b->border[2] &&
+           a->border[3] == b->border[3] && a->backend == b->backend;
+}
+NVN(nvnSamplerCompare) { RET(sampler_equal(HOST(NvnSamplerDesc, A(0)), HOST(NvnSamplerDesc, A(1)))); }
 NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 
 // ================================================================== descriptor pools
@@ -726,7 +747,12 @@ NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
 }
 
 // ================================================================== programs
-NVN(nvnProgramInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnProgram))); RET(1); }
+NVN(nvnProgramInitialize) {
+    if (ENV("NXRT_LOG_NVN")) LOG("[nvn] ProgramInitialize program=%#llx builder=%#llx\n",
+                                 (unsigned long long)A(0), (unsigned long long)A(1));
+    SET_HOST(A(0), calloc(1, sizeof(NvnProgram)));
+    RET(1);
+}
 NVN(nvnProgramFinalize) { free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }

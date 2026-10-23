@@ -218,7 +218,19 @@ void mods_move_down(int idx) {
     s_mods[idx + 1] = temp;
 }
 
+static bool safe_rel(const char *p) {  // a RomFS path with no ".." component: never leave the mod's romfs/
+    if (!p || !*p || p[0] == '/' || strchr(p, '\\')) return false;
+    for (const char *s = p; *s;) {
+        const char *e = strchr(s, '/');
+        size_t n = e ? (size_t)(e - s) : strlen(s);
+        if (n == 0 || (n == 2 && s[0] == '.' && s[1] == '.')) return false;
+        s = e ? e + 1 : s + n;
+    }
+    return true;
+}
+
 bool mods_romfs_override(const char *rel_path, char *out_host, size_t cap) {
+    if (!safe_rel(rel_path)) return false;
     for (int i = 0; i < s_mod_count; i++) {
         if (!s_mods[i].enabled) continue;
         char candidate[1200];

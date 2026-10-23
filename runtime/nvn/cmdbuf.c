@@ -159,9 +159,18 @@ static CmdRec *record_copy(Cpu *c, uint32_t op, int arg, uint32_t len) {
 
 // ---- state binding
 NVN(nvnCommandBufferBindProgram) {
+    // nvnCommandBufferBindProgram(cmd, program, stages): a NULL program clears only the stages in the mask. Unity binds
+    // the real vertex+fragment program (0x3) and then NULL for the geometry/tessellation/compute stages (0x3c), which
+    // must not clear the vertex+fragment binding.
+    if (!A(1) && getenv("NXRT_UNITY_NVN")) return;  // (Unity binds NULL for stages it has no shaders for)
+    if (ENV("NXRT_LOG_NVN")) {
+        static int n;
+        if (n < 20) { n++; LOG("[nvn] BindProgram cmd=%#llx program=%#llx stages=%#llx\n",
+                               (unsigned long long)A(0), (unsigned long long)A(1), (unsigned long long)A(2)); }
+    }
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_BIND_PROGRAM, 0, &s);
-    r->x[0] = (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]);  // host program
+    r->x[0] = s.x[1] ? (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]) : 0;  // host program (0: an unbind)
 }
 NVN(nvnCommandBufferBindBlendState) { record_copy(c, CMD_BIND_BLEND, 1, 8); }
 NVN(nvnCommandBufferBindChannelMaskState) { record_copy(c, CMD_BIND_CHANNEL_MASK, 1, 4); }

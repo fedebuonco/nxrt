@@ -30,6 +30,7 @@ struct KThread {
     uint32_t handle;
     int prio, core;
     bool cancel, in_sync_wait;
+    volatile int activity;  // 0 runnable, 1 suspended by svcSetThreadActivity (Unity's GC suspends threads)
     bool is_main;  // the process's main thread (kernel_create_main_thread)
     // wait state (protected by g_klock)
     WaitKind wait_kind;

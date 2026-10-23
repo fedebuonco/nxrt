@@ -21,6 +21,7 @@
 
 #include "../hle.h"
 #include "../ipc.h"
+#include "../mods.h"
 #include "../romfs_build.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
@@ -244,9 +245,11 @@ static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, cha
     int n = 0;
     while (dir != 0 && dir < dsize && n < 16) {  // root (offset 0) has an empty name
         uint32_t parent, namelen;
+        if ((uint64_t)dir + 0x18 > dsize) break;
         memcpy(&parent, dmeta + dir, 4);
         memcpy(&namelen, dmeta + dir + 0x14, 4);
         if (namelen > 255) namelen = 255;
+        if ((uint64_t)dir + 0x18 + namelen > dsize) break;
         memcpy(parts[n], dmeta + dir + 0x18, namelen);
         parts[n][namelen] = 0;
         n++;
@@ -317,26 +320,57 @@ static int64_t dir_lookup(const uint8_t *dm, uint64_t dsz, const char *path) {
 
 static void add_new_files(const uint64_t *h, const uint8_t *dmeta, uint64_t dsz, uint64_t fsz) {
     const char *seed = (NX_HOOK(content_dir) ? NX_HOOK(content_dir)() : NULL);
-    if (!seed) return;
-    char root[1100];
-    snprintf(root, sizeof root, "%s/romfs", seed);
     char **known = malloc(sizeof *known * rom_nfiles);
     for (int i = 0; i < rom_nfiles; i++) known[i] = rom_files[i].path;
     qsort(known, rom_nfiles, sizeof *known, path_cmp);
     NewFile *nf = NULL;
     int n = 0, cap = 0;
-    walk_new(root, "", known, rom_nfiles, &nf, &n, &cap);
+    // The enabled mods' new files first (their priority order), then the game's own overlay (e.g. a randomizer seed).
+    static char mod_dirs[MAX_MODS][1100];
+    int nmod_dirs = mods_get_active_romfs_dirs(mod_dirs, MAX_MODS);
+    for (int m = 0; m < nmod_dirs; m++) walk_new(mod_dirs[m], "", known, rom_nfiles, &nf, &n, &cap);
+    if (seed) {
+        char root[1100];
+        snprintf(root, sizeof root, "%s/romfs", seed);
+        walk_new(root, "", known, rom_nfiles, &nf, &n, &cap);
+    }
     free(known);
-    if (!n) return;
-    rom_files = realloc(rom_files, sizeof(RomFile) * (rom_nfiles + n));
+    if (!n) {
+        free(nf);
+        return;
+    }
+    RomFile *grown = realloc(rom_files, sizeof(RomFile) * (rom_nfiles + n));
+    if (!grown) {
+        free(nf);
+        return;
+    }
+    rom_files = grown;
     uint64_t hoff = h[5], hsz = h[6];
-    uint8_t *dcopy = malloc(dsz), *hcopy = malloc(hsz), *head = malloc(0x50);
+    if (hsz < 4) {
+        free(nf);
+        return;
+    }  // (a malformed image: no file-hash buckets to extend)
+    uint8_t *dcopy = malloc(dsz ? dsz : 1), *hcopy = malloc(hsz ? hsz : 1), *head = malloc(0x50);
+    if (!dcopy || !hcopy || !head) {
+        free(dcopy), free(hcopy), free(head), free(nf);
+        return;
+    }
     memcpy(dcopy, dmeta, dsz);
-    if (base_pread(hcopy, hsz, hoff) != (ssize_t)hsz || base_pread(head, 0x50, 0) != 0x50) return;
+    if (base_pread(hcopy, hsz, hoff) != (ssize_t)hsz || base_pread(head, 0x50, 0) != 0x50) {
+        free(dcopy), free(hcopy), free(head), free(nf);
+        return;
+    }
     // the file-meta table to extend: the override-patched copy if there is one
     const uint8_t *base_meta = ov_meta;
     uint8_t *tmp = NULL;
-    if (!base_meta) { tmp = malloc(fsz); base_pread(tmp, fsz, h[7]); base_meta = tmp; }
+    if (!base_meta) {
+        tmp = malloc(fsz ? fsz : 1);
+        if (!tmp || base_pread(tmp, fsz, h[7]) != (ssize_t)fsz) {
+            free(tmp), free(dcopy), free(hcopy), free(head), free(nf);
+            return;
+        }
+        base_meta = tmp;
+    }
     uint64_t extra = 0;
     for (int i = 0; i < n; i++) {
         const char *name = strrchr(nf[i].rel, '/');
@@ -344,7 +378,11 @@ static void add_new_files(const uint64_t *h, const uint8_t *dmeta, uint64_t dsz,
         extra += 0x20 + ((strlen(name) + 3) & ~3u);
     }
     uint64_t nsz = fsz + extra;
-    uint8_t *meta = calloc(1, nsz);
+    uint8_t *meta = calloc(1, nsz ? nsz : 1);
+    if (!meta) {
+        free(tmp), free(dcopy), free(hcopy), free(head), free(nf);
+        return;
+    }
     memcpy(meta, base_meta, fsz);
     free(tmp);
     if (!ov_end) ov_end = (base_size() + 0xF) & ~0xFull;
@@ -394,7 +432,8 @@ static void add_new_files(const uint64_t *h, const uint8_t *dmeta, uint64_t dsz,
     patches[npatches++] = (Patch){0, 0x50, head};
     patches[npatches++] = (Patch){h[3], dsz, dcopy};
     patches[npatches++] = (Patch){hoff, hsz, hcopy};
-    LOG("[fs] randomizer: %d new romfs files\n", added);
+    free(nf);
+    LOG("[fs] layeredfs: %d new romfs files\n", added);
 }
 
 static void rom_index(void) {
@@ -403,10 +442,26 @@ static void rom_index(void) {
     // header: size, dir hash (off,size), dir meta (off,size), file hash (off,size), file meta (off,size), data off
     uint64_t doff = h[3], dsz = h[4], foff = h[7], fsz = h[8];
     rom_data_off = h[9];
-    uint8_t *dmeta = malloc(dsz), *fmeta = malloc(fsz);
-    if (base_pread(dmeta, dsz, doff) != (ssize_t)dsz || base_pread(fmeta, fsz, foff) != (ssize_t)fsz) return;
+    uint64_t image = base_size();
+    if (dsz > image || fsz > image || doff > image || foff > image || dsz > image - doff || fsz > image - foff) {
+        LOG("[fs] romfs: tables past the end of the image\n");
+        return;
+    }
+    uint8_t *dmeta = malloc(dsz ? dsz : 1), *fmeta = malloc(fsz ? fsz : 1);
+    if (!dmeta || !fmeta) {
+        free(dmeta), free(fmeta);
+        return;
+    }
+    if (base_pread(dmeta, dsz, doff) != (ssize_t)dsz || base_pread(fmeta, fsz, foff) != (ssize_t)fsz) {
+        free(dmeta), free(fmeta);
+        return;
+    }
     int cap = 4096;
     rom_files = malloc(sizeof(RomFile) * cap);
+    if (!rom_files) {
+        free(dmeta), free(fmeta);
+        return;
+    }
     for (uint64_t o = 0; o + 0x20 <= fsz;) {
         uint32_t parent, namelen;
         uint64_t data, size;
@@ -414,9 +469,10 @@ static void rom_index(void) {
         memcpy(&data, fmeta + o + 8, 8);
         memcpy(&size, fmeta + o + 0x10, 8);
         memcpy(&namelen, fmeta + o + 0x1C, 4);
+        if (o + 0x20 + namelen > fsz) break;
         char dir[1024], name[256];
         rom_dir_path(dmeta, (uint32_t)dsz, parent, dir, sizeof dir);
-        uint32_t nl = namelen > 255 ? 255 : namelen;
+        uint32_t nl = namelen > 255 ? 255 : namelen;  // (the entry's stride still uses the full length)
         memcpy(name, fmeta + o + 0x20, nl);
         name[nl] = 0;
         if (rom_nfiles == cap) { cap *= 2; rom_files = realloc(rom_files, sizeof(RomFile) * cap); }
@@ -426,11 +482,15 @@ static void rom_index(void) {
         rom_files[rom_nfiles++] = (RomFile){rom_data_off + data, size, path, (uint32_t)o};
         o += 0x20 + ((namelen + 3) & ~3u);
     }
-    // Randomizer seed: replacement files are served from the seed folder. The file-meta table is patched
-    // (in a copy) to point them at data appended past the end of the image; reads there go to host files.
+    // LayeredFS mods (in their priority order) and the randomizer seed: replacement files are served from the mod /
+    // seed folder. The file-meta table is patched (in a copy) to point them at data appended past the end of the
+    // image; reads there go to host files.
+    mods_init();  // (LayeredFS: the enabled mods, in their priority order; settings are loaded by now)
     for (int i = 0; i < rom_nfiles; i++) {
         char host[1200];
-        if (!(NX_HOOK(romfs_override) && NX_HOOK(romfs_override)(rom_files[i].path, host, sizeof host))) continue;
+        if (!mods_romfs_override(rom_files[i].path, host, sizeof host) &&
+            !(NX_HOOK(romfs_override) && NX_HOOK(romfs_override)(rom_files[i].path, host, sizeof host)))
+            continue;
         struct stat sb;
         if (stat(host, &sb)) continue;
         if (!ov_meta) {
@@ -452,7 +512,7 @@ static void rom_index(void) {
         ov_n++;
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
-    if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
+    if (ov_n) LOG("[fs] layeredfs: %d romfs files replaced\n", ov_n);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
     rt_romfs_files = rom_nfiles;  // (the game's own: before a seed's added files; the crash dialog checks it)
     add_new_files(h, dmeta, dsz, fsz);
@@ -1191,4 +1251,36 @@ ssize_t romfs_file_read(int i, void *dst, size_t n, uint64_t off) {
     if (off >= f->size) return 0;
     if (n > f->size - off) n = (size_t)(f->size - off);
     return base_pread(dst, n, f->off + off);
+}
+
+// nn::fs::ReadFile(out, handle, offset, buffer, size[, option]): log the arguments (NXRT_LOG_FS) and run the SDK's
+// implementation. Unity reads its data through this, and a bad buffer shows up here first.
+static void call_guest(Cpu *c, const char *sym) {
+    uint64_t lr = c->x[30];
+    guest_call(c, loader_find_symbol(sym));
+    c->x[30] = lr;
+}
+HLE_FUNC("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", fs_read_file_log) {
+    if (ENV("NXRT_LOG_FS"))
+        LOG("[fs] ReadFile(out=%#llx handle=%#llx off=%lld buf=%#llx size=%#llx lr=%#llx)\n", (unsigned long long)c->x[0],
+            (unsigned long long)c->x[1], (long long)c->x[2], (unsigned long long)c->x[3],
+            (unsigned long long)c->x[4], (unsigned long long)c->x[30]);
+    if (c->x[3] && c->x[3] < GUEST_LO) {  // a buffer that is not a guest address: read into scratch, do not fault
+        static int warned;
+        if (!warned++) LOG("[fs] ReadFile with an invalid buffer %#llx (size %#llx) -> scratch\n",
+                           (unsigned long long)c->x[3], (unsigned long long)c->x[4]);
+        if (c->x[4] > HLE_HEAP_SIZE - 0x1000) {
+            c->x[0] = 1;
+            return;
+        }  // (a corrupt size: don't wrap the allocation)
+        c->x[3] = (uint64_t)hle_alloc(c->x[4] + 0x1000);
+    }
+    call_guest(c, "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm");
+}
+HLE_FUNC("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE", fs_read_file_opt_log) {
+    if (ENV("NXRT_LOG_FS"))
+        LOG("[fs] ReadFile(out=%#llx handle=%#llx off=%lld buf=%#llx size=%#llx option=%#llx)\n",
+            (unsigned long long)c->x[0], (unsigned long long)c->x[1], (long long)c->x[2],
+            (unsigned long long)c->x[3], (unsigned long long)c->x[4], (unsigned long long)c->x[5]);
+    call_guest(c, "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE");
 }

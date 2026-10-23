@@ -34,12 +34,26 @@ static void put32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2]
 static uint8_t *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    *len = (size_t)ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t *p = malloc(*len + 4);
-    if (fread(p, 1, *len, f) != *len) { free(p); p = NULL; }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long n = ftell(f);
+    if (n < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    uint8_t *p = calloc(1, (size_t)n + 4);  // (the 4 trailing bytes stay zero)
+    if (!p) {
+        fclose(f);
+        return NULL;
+    }
+    if (n && fread(p, 1, (size_t)n, f) != (size_t)n) {
+        free(p);
+        p = NULL;
+    }
     fclose(f);
+    if (p) *len = (size_t)n;
     return p;
 }
 

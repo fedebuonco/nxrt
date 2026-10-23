@@ -73,7 +73,7 @@ bin_of() {
     exe=$(exe_of "$1")
     for d in build-merge build-clean build-master build-wip build; do
         [ -x "$GAMES/$1/$d/$exe" ] || continue
-        t=$(stat -f %m "$GAMES/$1/$d/$exe" 2>/dev/null || echo 0)
+        t=$(stat -c %Y "$GAMES/$1/$d/$exe" 2>/dev/null || stat -f %m "$GAMES/$1/$d/$exe" 2>/dev/null || echo 0)
         if [ "$t" -gt "$bt" ]; then bt=$t; best=$GAMES/$1/$d/$exe; fi
     done
     echo "$best"
@@ -84,7 +84,7 @@ run_one() {
     local g=$1 bin ini root log png t0 pid wd rc
     bin=$(bin_of "$g"); ini=$(ini_of "$g"); root=$(root_of "$g")
     if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-        printf '%-6s SKIP    no binary in games/%s/build*/%s\n' "$g" "$g" "$(exe_of "$g")" | tee -a "$OUT/summary.txt"
+        printf '%-6s SKIP    no binary in games/%s/build*/%s\n' "$g" "$g" "$(exe_of "$g")" | tee -a "$OUT/summary.tsv"
         printf '%s\tSKIP\t-\t-\t-\t-\t-\t-\n' "$g" >> "$SUMMARY"
         return
     fi

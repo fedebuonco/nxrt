@@ -55,7 +55,7 @@ static void service_release(Service *s) {
 }
 
 uint32_t ipc_connect_named_port(const char *name) {
-    if (!strcmp(name, "sm:")) return session_new(service_lookup("sm:"));
+    if (!strcmp(name, "sm:") || !strcmp(name, "ldr:ro")) return session_new(service_lookup(name));
     LOG("[ipc] ConnectToNamedPort('%s') unsupported\n", name);
     return 0;
 }

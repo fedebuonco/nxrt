@@ -357,7 +357,8 @@ static void dyn_update(double now, double game_ms, double win_ms, double lines) 
         must = __builtin_popcount(g_down_hist) >= DYN_DOWN_VOTES || g_down_fast_votes >= DYN_DOWN_FAST ||
                (slow && g_down_gw[3] > 0 && mean4 > 0.95 * budget);
     }
-    if (slow && !at_floor() && g_hold_dt == 0 && !hold_wait && !must) g_dyn_good = 0;  // (over: waiting to be sure)
+    if (slow && !at_floor() && g_hold_dt == 0 && !hold_wait && !must)
+        g_dyn_good = 0;  // (over: waiting to be sure)  NOLINT(bugprone-branch-clone)
     else if (hold_wait || (slow && at_floor())) g_dyn_good = 0;  // (at the floor: nothing lower)
     else if (slow) {
         double down = g_dyn - DYN_STEP;

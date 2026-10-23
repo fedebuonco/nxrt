@@ -12,6 +12,8 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../kernel.h"
+#include "../rt.h"
 
 uint64_t loader_find_symbol(const char *name);
 void guest_call(Cpu *c, uint64_t addr);
@@ -133,6 +135,66 @@ HLE_FUNC("_ZN2nn4lmem21AllocateFromFrameHeapEPNS0_6detail8HeapHeadEmi", heap_all
     uint64_t lr = c->x[30], size = c->x[1];
     CALL("_ZN2nn4lmem21AllocateFromFrameHeapEPNS0_6detail8HeapHeadEmi");
     if (!c->x[0]) fail_once("frame heap allocation", lr, size);
+}
+
+// Guest frame walk (frame pointers are kept by the SDK): the call chain of a bad free, to symbolize offline.
+static void dump_guest_frames(Cpu *c, int n) {
+    uint64_t fp = c->x[29];
+    for (int i = 0; i < n && fp >= STACK_BASE && fp < STACK_BASE + STACK_SIZE; i++) {
+        uint64_t prev = *(const uint64_t *)(uintptr_t)fp;
+        uint64_t lr = *(const uint64_t *)(uintptr_t)(fp + 8);
+        LOG("[heaps]   guest frame %d lr=%#llx fp=%#llx\n", i, (unsigned long long)lr, (unsigned long long)fp);
+        if (prev <= fp) break;
+        fp = prev;
+    }
+}
+
+// nn::os::AllocateAddressRegion(out*, size) / AllocateMemoryBlock(out*, size): log what the address-space allocator
+// hands out, so a bad free can be matched to its allocator.
+HLE_FUNC("_ZN2nn2os21AllocateAddressRegionEPmm", os_alloc_address_region) {
+    uint64_t out = c->x[0], size = c->x[1];
+    uint64_t lr = c->x[30];
+    CALL("_ZN2nn2os21AllocateAddressRegionEPmm");
+    if (ENV("NXRT_LOG_HEAPS"))
+        LOG("[vamm] AllocateAddressRegion size=%#llx -> %#llx result=%#x lr=%#llx\n", (unsigned long long)size,
+            (unsigned long long)*(uint64_t *)(uintptr_t)out, (unsigned)c->x[0], (unsigned long long)lr);
+}
+
+// nn::mem::StandardAllocator::Free(void*): report (and walk) a free of a pointer outside the SDK heap.
+HLE_FUNC("_ZN2nn3mem17StandardAllocator4FreeEPv", heap_std_free) {
+    uint64_t p = c->x[1], size = kernel_heap_size();
+    if (ENV("NXRT_LOG_HEAPS") && size && (p < HEAP_BASE || p >= HEAP_BASE + size))
+        LOG("[heaps] free of non-heap pointer %#llx (heap %#llx+%#llx) lr=%#llx\n", (unsigned long long)p,
+            (unsigned long long)HEAP_BASE, (unsigned long long)size, (unsigned long long)c->x[30]), dump_guest_frames(c, 10);
+    CALL("_ZN2nn3mem17StandardAllocator4FreeEPv");
+}
+
+// nn::os::AllocateMemoryBlock(out*, size): with NXRT_HEAP_IN_ALIAS the block is the VAMM/alias region start (where the
+// SDK's own address-space allocations live), so the StandardAllocator covers the pointers the game frees.
+HLE_FUNC("_ZN2nn2os19AllocateMemoryBlockEPmm", os_alloc_memory_block) {
+    if (ENV("NXRT_HEAP_VAMM")) {  // hand the SDK the address region VAMM itself would give it
+        uint64_t f = loader_find_symbol("_ZN2nn2os21AllocateAddressRegionEPmm");
+        if (!f) { c->x[0] = 1; return; }
+        guest_call(c, f);
+        return;
+    }
+    if (ENV("NXRT_HEAP_IN_ALIAS")) {
+        static uint64_t next;
+        uint64_t size = ((c->x[1] + 0x1fffff) & ~0x1fffffull);
+        if (!next) next = ALIAS_BASE;
+        *(uint64_t *)(uintptr_t)c->x[0] = next;
+        next += size;
+        c->x[0] = 0;
+        return;
+    }
+    CALL("_ZN2nn2os19AllocateMemoryBlockEPmm");
+}
+
+// nn::os::IsVirtualAddressMemoryEnabled(): with NXRT_VAMM_COMPAT, VAMM is initialized but reported disabled, so the
+// game allocates its heap through nn::os::AllocateMemoryBlock instead of handing StandardAllocator a null address.
+HLE_FUNC("_ZN2nn2os29IsVirtualAddressMemoryEnabledEv", os_is_vamm_enabled) {
+    if (ENV("NXRT_VAMM_COMPAT")) { c->x[0] = 0; return; }
+    CALL("_ZN2nn2os29IsVirtualAddressMemoryEnabledEv");
 }
 
 // nn::mem::StandardAllocator::Initialize(void *addr, size_t size[, bool])

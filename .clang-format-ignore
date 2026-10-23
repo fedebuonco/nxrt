@@ -1,0 +1,5 @@
+# Vendored code and build output: never reformatted (clang-format reads this next to .clang-format).
+# tools/format.sh already skips them; this also keeps an editor's "format file" from touching them.
+third_party/*
+build/*
+games/*

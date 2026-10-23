@@ -239,9 +239,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             int a = (addr - 0x80) >> 4, comp = (addr >> 2) & 3;
             c->in_attr_mask |= 1u << a;
             c->vs_in_comp[a] |= 1u << comp;
-            int kind = c->key ? c->key->attr_kind[a] : 0;
-            if (kind == 0) sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
-            else sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
+            sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);  // (the attribute is bit-cast whatever its declared kind)
         } else if (addr == 0x2F8) { c->uses_iid = true; strcpy(e, "iid"); }
         else if (addr == 0x2FC) { c->uses_vid = true; strcpy(e, "vid"); }
         else { sprintf(e, "0u /* attr %#x */", addr); }
@@ -637,7 +635,10 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
         else snprintf(xs, sizeof xs, "vec2(%s, %s)", co[0], co[1]);
     } else {
         if (off && !cube) snprintf(xs, sizeof xs, "vec3(vec2(%s, %s) + vec2(%s) / vec2(tsize%d(%s).xy), %s)", co[0], co[1], off, slot, L, co[2]);
-        else snprintf(xs, sizeof xs, "vec3(%s, %s, %s)", co[0], co[1], co[2]);  // cube lookups take no offset
+        else {
+            // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage): n == 3 here, so co[0..2] are set by the caller
+            snprintf(xs, sizeof xs, "vec3(%s, %s, %s)", co[0], co[1], co[2]);  // cube lookups take no offset
+        }
     }
     const char *extra = NULL;  // separate compare argument (cube array shadow)
     if (!t->shadow) {
@@ -928,7 +929,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0xe350000000000000ull, 0xfff0000000000000ull)) {  // CONT
         sp(&c->body, "    pc = pcnt[pcnt_n - 1]; continue;\n");
     } else if (OPM(0xf0f0000000000000ull, 0xfff8000000000000ull) || OPM(0x50b0000000000000ull, 0xfff8000000000000ull) ||
-               OPM(0xef98000000000000ull, 0xfff8000000000000ull)) {
+               OPM(0xef98000000000000ull,
+                   0xfff8000000000000ull)) {  // NOLINT(bugprone-branch-clone): DEPBAR/NOP/MEMBAR do nothing
         // DEPBAR / NOP / MEMBAR
     } else if (OPM(0xe00000000000ff00ull, 0xff0000400000ff00ull) || OPM(0xe000004000000000ull, 0xff00004000000000ull)) {
         // IPA: interpolate fragment input
@@ -1048,7 +1050,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sprintf(t, "(%s * as_type<float>(0x%08xu))", F(R(a)), (uint32_t)bits(w, 20, 32));
         set_reg(c, d, FRES(t, bits(w, 55, 1)));
     } else if (OPM(0x5980000000000000ull, 0xff80000000000000ull) || OPM(0x4980000000000000ull, 0xff80000000000000ull) ||
-               OPM(0x5180000000000000ull, 0xff80000000000000ull) || OPM(0x3280000000000000ull, 0xfe80000000000000ull)) {  // FFMA
+               OPM(0x5180000000000000ull, 0xff80000000000000ull) ||
+               OPM(0x3280000000000000ull, 0xfe80000000000000ull)) {  // FFMA
         const char *bv;
         char cbuf_c[256], bbuf[256];
         const char *cv = operand_c_for_ffma(c, w, cbuf_c, &bv, bbuf);
@@ -1083,7 +1086,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sprintf(u, bits(w, 52, 1) ? "(%s ? 0x3f800000u : 0u)" : "(%s ? 0xFFFFFFFFu : 0u)", t);
         set_reg(c, d, u);
     } else if (OPM(0x5ba0000000000000ull, 0xfff0000000000000ull) || OPM(0x4ba0000000000000ull, 0xfff0000000000000ull) ||
-               OPM(0x36a0000000000000ull, 0xfef0000000000000ull) || OPM(0x53a0000000000000ull, 0xfff0000000000000ull)) {  // FCMP
+               OPM(0x36a0000000000000ull, 0xfef0000000000000ull) ||
+               OPM(0x53a0000000000000ull, 0xfff0000000000000ull)) {  // FCMP
         char cmp[512], cb[256], bb[256];
         const char *bv, *cv;
         if (OPM(0x53a0000000000000ull, 0xfff0000000000000ull)) {
@@ -1107,7 +1111,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sprintf(t, "(%s ? %s : %s)", P((int)bits(w, 39, 3), bits(w, 42, 1)), R(a), B(false));
         set_reg(c, d, t);
     } else if (OPM(0x5cb0000000000000ull, 0xfff8000000000000ull) || OPM(0x4cb0000000000000ull, 0xfff8000000000000ull) ||
-               OPM(0x38b0000000000000ull, 0xfef8000000000000ull)) {  // F2I (src fmt bits 10-11: 1 F16; dst size bits 8-9)
+               OPM(0x38b0000000000000ull,
+                   0xfef8000000000000ull)) {  // F2I (src fmt bits 10-11: 1 F16; dst size bits 8-9)
         char srcv[512];
         if (bits(w, 10, 2) == 1 && c->glsl) sprintf(srcv, "h2f((%s >> %du) & 0xFFFFu)", B(false), 16 * (int)bits(w, 41, 1));
         else if (bits(w, 10, 2) == 1) sprintf(srcv, "float(as_type<half2>(%s)[%d])", B(false), (int)bits(w, 41, 1));
@@ -1308,7 +1313,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         else sprintf(t, sgn ? "bfe_s(%s, %s)" : "bfe_u(%s, %s)", R(a), bv);
         set_reg(c, d, t);
     } else if (OPM(0x5bf0000000000000ull, 0xfff8000000000000ull) || OPM(0x4bf0000000000000ull, 0xfff8000000000000ull) ||
-               OPM(0x36f0000000000000ull, 0xfef8000000000000ull) || OPM(0x53f0000000000000ull, 0xfff8000000000000ull)) {  // BFI
+               OPM(0x36f0000000000000ull, 0xfef8000000000000ull) ||
+               OPM(0x53f0000000000000ull, 0xfff8000000000000ull)) {  // BFI
         const char *bv, *cv;
         char cb[256];
         if (OPM(0x53f0000000000000ull, 0xfff8000000000000ull)) {
@@ -1322,7 +1328,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         }
         set_reg(c, d, t);
     } else if (OPM(0x5b00000000000000ull, 0xffc0000000000000ull) || OPM(0x4e00000000000000ull, 0xfe00000000000000ull) ||
-               OPM(0x3600000000000000ull, 0xfec0000000000000ull) || OPM(0x5100000000000000ull, 0xff80000000000000ull)) {  // XMAD
+               OPM(0x3600000000000000ull, 0xfec0000000000000ull) ||
+               OPM(0x5100000000000000ull, 0xff80000000000000ull)) {  // XMAD
         // per Ryujinx's InstXmad* decoders and EmitXmad
         const char *bv, *cv;
         char cb[256], bb[256];
@@ -1439,7 +1446,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             sp(&c->body, "    { uint ccv = %s; ccz = ccv == 0u; ccs = int(ccv) < 0; }\n", t);
         }
     } else if (OPM(0x5bc0000000000000ull, 0xfff0000000000000ull) || OPM(0x4bc0000000000000ull, 0xfff0000000000000ull) ||
-               OPM(0x36c0000000000000ull, 0xfef0000000000000ull) || OPM(0x53c0000000000000ull, 0xfff0000000000000ull)) {  // PRMT
+               OPM(0x36c0000000000000ull, 0xfef0000000000000ull) ||
+               OPM(0x53c0000000000000ull, 0xfff0000000000000ull)) {  // PRMT
         const char *bv, *cv;
         char cb[256];
         if (OPM(0x53c0000000000000ull, 0xfff0000000000000ull)) { bv = R((int)bits(w, 39, 8)); cv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb); }
@@ -1448,14 +1456,16 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sprintf(t, "prmt(%s, %s, %s)", R(a), cv, bv);
         set_reg(c, d, t);
     } else if (OPM(0x5cf8000000000000ull, 0xfff8000000000000ull) || OPM(0x38f8000000000000ull, 0xfef8000000000000ull) ||
-               OPM(0x5bf8000000000000ull, 0xfff8000000000000ull) || OPM(0x36f8000000000000ull, 0xfef8000000000000ull)) {  // SHF
+               OPM(0x5bf8000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0x36f8000000000000ull, 0xfef8000000000000ull)) {  // SHF
         bool right = (w >> 56) == 0x5c || (w >> 57) == (0x38 >> 1);
         const char *sh = ((w >> 60) == 3) ? B(false) : R((int)bits(w, 20, 8));
         const char *hi = R((int)bits(w, 39, 8));
         if (right) sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) >> (%s & 31u)))", hi, R(a), sh);
         else sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) << (%s & 31u)) >> 32)", hi, R(a), sh);
         set_reg(c, d, t);
-    } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
+    } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
         bool store = bits(w, 51, 1);
         bool wide = bits(w, 45, 1);
         int size = (int)bits(w, 48, 3);
@@ -1566,7 +1576,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         }
         set_reg(c, d, t);
     } else if (OPM(0x5b40000000000000ull, 0xfff0000000000000ull) || OPM(0x4b40000000000000ull, 0xfff0000000000000ull) ||
-               OPM(0x3640000000000000ull, 0xfef0000000000000ull) || OPM(0x5340000000000000ull, 0xfff0000000000000ull)) {  // ICMP
+               OPM(0x3640000000000000ull, 0xfef0000000000000ull) ||
+               OPM(0x5340000000000000ull, 0xfff0000000000000ull)) {  // ICMP
         char cmp[512], cb[256], bb[256];
         const char *bv, *cv;
         if (OPM(0x5340000000000000ull, 0xfff0000000000000ull)) {
@@ -1579,7 +1590,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         icmp_expr(cmp, (int)bits(w, 49, 3), cv, "0u", bits(w, 48, 1));
         sprintf(t, "(%s ? %s : %s)", cmp, R(a), bv);
         set_reg(c, d, t);
-    } else if (OPM(0xef40000000000000ull, 0xfff8000000000000ull) || OPM(0xef50000000000000ull, 0xfff8000000000000ull)) {  // LDL / STL
+    } else if (OPM(0xef40000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0xef50000000000000ull, 0xfff8000000000000ull)) {  // LDL / STL
         // thread-private local memory, modelled as a word array (byte/short accesses within a word)
         bool store = bits(w, 52, 1);
         int size = (int)bits(w, 48, 3);
@@ -1658,7 +1670,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             sp(&c->body, "      p%d = %s;\n", vp, lane ? (mode == 2 ? "true" : "vp_") : c->glsl ? gl[mode] : ms[mode]);
         }
         sp(&c->body, "    }\n");
-    } else if (OPM(0xebf8000000000000ull, 0xfff8000000000000ull)) {  // RED: atomic reduction to global memory, no result
+    } else if (OPM(0xebf8000000000000ull,
+                   0xfff8000000000000ull)) {  // RED: atomic reduction to global memory, no result
         // fields per Ryujinx's InstRed: value 0-7, address 8-15 (64-bit pair with .E, bit 48), size 20-22, op 23-25,
         // offset 28-47 (signed). Checked on Echoes of Wisdom's ebf9000003070002: RED.E.OR [R0], R2.
         int size = (int)bits(w, 20, 3), op = (int)bits(w, 23, 3), vr = d;
@@ -1736,40 +1749,55 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
         sp(&c->body, "    }\n");
     p2r_done:;
-    } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
-        // computed targets can name a scheduling word; execution continues at the next slot (as for BRA)
-        sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n", pc + 8, R(a),
-           (uint32_t)sbits(w, 20, 24));
-    } else if (OPM(0x50a0000000000000ull, 0xfff8000000000000ull)) {  // CSETP (zero/sign flags only)
-        int test = (int)bits(w, 8, 5);
-        const char *cond;
-        switch (test) {
-        case 0: cond = "false"; break;
-        case 15: cond = "true"; break;
-        case 2: case 10: cond = "ccz"; break;
-        case 5: case 13: cond = "!ccz"; break;
-        case 1: case 9: cond = "ccs"; break;
-        case 6: case 14: cond = "!ccs"; break;
-        case 4: case 12: cond = "(!ccz && !ccs)"; break;
-        case 3: case 11: cond = "(ccz || ccs)"; break;
-        default: cond = "false"; fail(c, "csetp test %d", test);
+        } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
+            // computed targets can name a scheduling word; execution continues at the next slot (as for BRA)
+            sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n",
+               pc + 8, R(a), (uint32_t)sbits(w, 20, 24));
+        } else if (OPM(0x50a0000000000000ull, 0xfff8000000000000ull)) {  // CSETP (zero/sign flags only)
+            int test = (int)bits(w, 8, 5);
+            const char *cond;
+            switch (test) {
+            case 0: cond = "false"; break;
+            case 15: cond = "true"; break;
+            case 2:
+            case 10: cond = "ccz"; break;
+            case 5:
+            case 13: cond = "!ccz"; break;
+            case 1:
+            case 9: cond = "ccs"; break;
+            case 6:
+            case 14: cond = "!ccs"; break;
+            case 4:
+            case 12: cond = "(!ccz && !ccs)"; break;
+            case 3:
+            case 11: cond = "(ccz || ccs)"; break;
+            default: cond = "false"; fail(c, "csetp test %d", test);
+            }
+            c->uses_cc = true;
+            int p = (int)bits(w, 3, 3), q = (int)bits(w, 0, 3), bo = (int)bits(w, 45, 2);
+            const char *pc_ = P((int)bits(w, 39, 3), bits(w, 42, 1));
+            sp(&c->body, "    { bool cmp = %s; bool pp = %s;\n", cond, pc_);
+            if (p != PT) {
+                c->pred_used[p] = 1;
+                sp(&c->body, "      p%d = cmp %s pp;\n", p, bool_op(bo));
+            }
+            if (q != PT) {
+                c->pred_used[q] = 1;
+                sp(&c->body, "      p%d = !cmp %s pp;\n", q, bool_op(bo));
+            }
+            sp(&c->body, "    }\n");
+        } else if (OPM(0x5098000000000000ull, 0xfff8000000000000ull)) {  // CSET
+            fail(c, "cset");
+        } else if (OPM(0xf0a8000000000000ull, 0xfff8000000000000ull)) {  // BAR
+            if (!c->glsl)
+                sp(&c->body, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+            else if (c->stage == STAGE_COMPUTE)
+                sp(&c->body, "    barrier();\n");
+            else
+                sp(&c->body, "    /* bar */\n");  // GLSL barrier() is compute / tessellation only
+        } else {
+            fail(c, "unknown instruction %016llx at %#x", (unsigned long long)w, pc);
         }
-        c->uses_cc = true;
-        int p = (int)bits(w, 3, 3), q = (int)bits(w, 0, 3), bo = (int)bits(w, 45, 2);
-        const char *pc_ = P((int)bits(w, 39, 3), bits(w, 42, 1));
-        sp(&c->body, "    { bool cmp = %s; bool pp = %s;\n", cond, pc_);
-        if (p != PT) { c->pred_used[p] = 1; sp(&c->body, "      p%d = cmp %s pp;\n", p, bool_op(bo)); }
-        if (q != PT) { c->pred_used[q] = 1; sp(&c->body, "      p%d = !cmp %s pp;\n", q, bool_op(bo)); }
-        sp(&c->body, "    }\n");
-    } else if (OPM(0x5098000000000000ull, 0xfff8000000000000ull)) {  // CSET
-        fail(c, "cset");
-    } else if (OPM(0xf0a8000000000000ull, 0xfff8000000000000ull)) {  // BAR
-        if (!c->glsl) sp(&c->body, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-        else if (c->stage == STAGE_COMPUTE) sp(&c->body, "    barrier();\n");
-        else sp(&c->body, "    /* bar */\n");  // GLSL barrier() is compute / tessellation only
-    } else {
-        fail(c, "unknown instruction %016llx at %#x", (unsigned long long)w, pc);
-    }
     (void)op13;
     if (guarded) sp(&c->body, "  }\n");
 }
@@ -2157,7 +2185,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
             any_branch = true;
             bool bra = (w & 0xfff0000000000020ull) == 0xe240000000000000ull;
-            if ((w & 0xfff0000000000020ull) == 0xe2b0000000000000ull) forward = false;  // PCNT
+            if ((w & 0xfff0000000000020ull) == 0xe2b0000000000000ull)
+                forward = false;  // PCNT  NOLINT(bugprone-branch-clone)
             else if (t <= (int64_t)pc && !bra) forward = false;                         // backward SSY / PBK
             else if (t <= (int64_t)pc) {                                                // a loop
                 int k = 0;

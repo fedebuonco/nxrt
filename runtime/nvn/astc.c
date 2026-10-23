@@ -109,7 +109,8 @@ static inline uint32_t rbits(const Bits128 *b, int pos, int n) {
     uint64_t v;
     if (pos >= 64) v = b->hi >> (pos - 64);
     else if (pos == 0) v = b->lo;
-    else v = b->lo >> pos | b->hi << (64 - pos);
+    else
+        v = b->lo >> pos | b->hi << (64 - pos);  // NOLINT(clang-analyzer-core.BitwiseShift): pos is 1..63 here
     return (uint32_t)(v & ((1ull << n) - 1));
 }
 
@@ -179,7 +180,9 @@ static void ise_decode(const Bits128 *b, int pos, int count, int q, uint8_t *out
                 T |= rbits(b, pos, tb[k]) << ts[k]; pos += tb[k];
             }
             trits_of(T, t);
-            for (int j = 0; j < k; j++) out[i + j] = (uint8_t)((uint32_t)t[j] << nb | m[j]);
+            for (int j = 0; j < k; j++)
+                out[i + j] =
+                    (uint8_t)((uint32_t)t[j] << nb | m[j]);  // NOLINT(clang-analyzer-core.BitwiseShift): nb <= 8
         }
     } else if (q_quints[q]) {
         static const uint8_t qb[3] = {3, 2, 2}, qs[3] = {0, 3, 5};

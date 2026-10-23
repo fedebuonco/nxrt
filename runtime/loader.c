@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lz4_block.h"
 #include "rt.h"
 #include "nxgame.h"
 
@@ -15,53 +16,51 @@ enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 }
 typedef struct { uint32_t name; uint8_t info, other; uint16_t shndx; uint64_t value, size; } Elf64Sym;
 typedef struct { uint64_t off, info; int64_t addend; } Elf64Rela;
 
-size_t rt_lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, size_t dstlen) {  // (LZ4 block; also shader_prep.c)
-    const uint8_t *s = src, *se = src + srclen;
-    uint8_t *d = dst, *de = dst + dstlen;
-    while (s < se) {
-        uint8_t tok = *s++;
-        size_t lit = tok >> 4;
-        if (lit == 15) { uint8_t b; do { b = *s++; lit += b; } while (b == 255); }
-        if (d + lit > de || s + lit > se) break;
-        memcpy(d, s, lit);
-        d += lit; s += lit;
-        if (s >= se) break;
-        size_t off = s[0] | (s[1] << 8);
-        s += 2;
-        size_t ml = tok & 15;
-        if (ml == 15) { uint8_t b; do { b = *s++; ml += b; } while (b == 255); }
-        ml += 4;
-        uint8_t *m = d - off;
-        if (m < dst || d + ml > de) break;
-        while (ml--) *d++ = *m++;
-    }
-    return d - dst;
-}
-
 static uint8_t *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    *len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t *p = malloc(*len);
-    fread(p, 1, *len, f);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long n = ftell(f);
+    if (n < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    uint8_t *p = malloc((size_t)n ? (size_t)n : 1);
+    if (!p) {
+        fclose(f);
+        return NULL;
+    }
+    if (n && fread(p, 1, (size_t)n, f) != (size_t)n) {
+        free(p);
+        fclose(f);
+        return NULL;
+    }
     fclose(f);
+    *len = (size_t)n;
     return p;
 }
 
 static void load_nso(Module *m, const char *path, uint64_t base) {
     size_t len;
     uint8_t *raw = read_file(path, &len);
-    if (!raw || memcmp(raw, "NSO0", 4)) FATAL("cannot load %s\n", path);
+    if (!raw) FATAL("cannot read %s\n", path);
+    if (len < 0x100 || memcmp(raw, "NSO0", 4)) FATAL("%s is not an NSO\n", path);
     uint32_t flags = *(uint32_t *)(raw + 0xC);
     uint32_t seg[3][3];  // file_off, mem_off, size
     for (int i = 0; i < 3; i++) memcpy(seg[i], raw + 0x10 + i * 0x10, 12);
     uint32_t bss = *(uint32_t *)(raw + 0x3C);
-    uint64_t size = (seg[2][1] + seg[2][2] + bss + 0x3FFF) & ~0x3FFFull;
+    uint64_t size = ((uint64_t)seg[2][1] + seg[2][2] + bss + 0x3FFF) & ~0x3FFFull;
+    if (size < 0x1000 || size > (1ull << 32))
+        FATAL("%s: implausible module size %#llx\n", path, (unsigned long long)size);
     plat_commit(base, size);  // inside the guest window: zero-filled, read/write
     for (int i = 0; i < 3; i++) {
         uint32_t csize = *(uint32_t *)(raw + 0x60 + i * 4);
+        uint64_t want = (flags & (1 << i)) ? csize : seg[i][2];
+        if ((uint64_t)seg[i][0] + want > len) FATAL("%s: segment %d is past the end of the file\n", path, i);
+        if ((uint64_t)seg[i][1] + seg[i][2] > size) FATAL("%s: segment %d is past the end of the module\n", path, i);
         uint8_t *dst = (uint8_t *)base + seg[i][1];
         if (flags & (1 << i)) {
             size_t got = rt_lz4_decompress(raw + seg[i][0], csize, dst, seg[i][2]);
@@ -75,24 +74,65 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
     m->size = size;
     m->text_off = seg[0][1]; m->text_size = seg[0][2];
     m->ro_off = seg[1][1];   m->ro_size = seg[1][2];
-    m->data_off = seg[2][1]; m->data_size = seg[2][2] + bss;
+    m->data_off = seg[2][1];
+    m->data_size = (uint64_t)seg[2][2] + bss;
 
-    uint32_t mod0 = *(uint32_t *)(base + 4);
+    uint32_t mod0 = *(uint32_t *)(uintptr_t)(base + 4);
+    if (mod0 > size - 8 || memcmp((const void *)(uintptr_t)(base + mod0), "MOD0", 4)) FATAL("%s: bad MOD0\n", path);
     uint64_t mod = base + mod0;
-    m->dynamic = mod + *(int32_t *)(mod + 4);
-    for (uint64_t *d = (uint64_t *)m->dynamic; d[0] != DT_NULL; d += 2) {
+    m->dynamic = mod + *(int32_t *)(uintptr_t)(mod + 4);
+    if (m->dynamic < base || m->dynamic + 16 > base + size) FATAL("%s: bad dynamic table\n", path);
+#define NEED(off, bytes)                                                                                               \
+    do {                                                                                                               \
+        if ((off) > size || (bytes) > size - (off)) FATAL("%s: dynamic entry past the module\n", path);                \
+    } while (0)
+    for (uint64_t *d = (uint64_t *)(uintptr_t)m->dynamic;; d += 2) {
+        if ((uintptr_t)d + 16 > (uintptr_t)(base + size)) FATAL("%s: dynamic table runs past the module\n", path);
+        if (d[0] == DT_NULL) break;
         switch (d[0]) {
-        case DT_SYMTAB: m->symtab = base + d[1]; break;
-        case DT_STRTAB: m->strtab = base + d[1]; break;
-        case DT_HASH: m->nsyms = *(uint32_t *)(base + d[1] + 4); break;
-        case 12: m->init = base + d[1]; break;  // DT_INIT
-        case 13: m->fini = base + d[1]; break;  // DT_FINI
-        case DT_INIT_ARRAY: m->init_array = base + d[1]; break;
+        case DT_SYMTAB:
+            NEED(d[1], sizeof(Elf64Sym));
+            m->symtab = base + d[1];
+            break;
+        case DT_STRTAB:
+            NEED(d[1], 1);
+            m->strtab = base + d[1];
+            break;
+        case DT_HASH:
+            NEED(d[1], 8);
+            m->nsyms = *(uint32_t *)(uintptr_t)(base + d[1] + 4);
+            break;
+        case 12:
+            NEED(d[1], 4);
+            m->init = base + d[1];
+            break;  // DT_INIT
+        case 13:
+            NEED(d[1], 4);
+            m->fini = base + d[1];
+            break;  // DT_FINI
+        case DT_INIT_ARRAY:
+            NEED(d[1], 8);
+            m->init_array = base + d[1];
+            break;
         case DT_INIT_ARRAYSZ: m->init_array_sz = d[1]; break;
-        case DT_FINI_ARRAY: m->fini_array = base + d[1]; break;
+        case DT_FINI_ARRAY:
+            NEED(d[1], 8);
+            m->fini_array = base + d[1];
+            break;
         case DT_FINI_ARRAYSZ: m->fini_array_sz = d[1]; break;
         }
     }
+#undef NEED
+    if (m->symtab && m->nsyms) {  // (the symbol table's size comes from DT_HASH's nchain)
+        uint64_t off = m->symtab - base;
+        if (m->nsyms > (size - off) / sizeof(Elf64Sym))
+            FATAL("%s: bad symbol count %llu\n", path, (unsigned long long)m->nsyms);
+    }
+    if (m->strtab && (m->strtab < base || m->strtab >= base + size)) FATAL("%s: bad string table\n", path);
+    if (m->init_array && (m->init_array < base || m->init_array_sz > base + size - m->init_array))
+        FATAL("%s: init array past the module\n", path);
+    if (m->fini_array && (m->fini_array < base || m->fini_array_sz > base + size - m->fini_array))
+        FATAL("%s: fini array past the module\n", path);
     LOG("loaded %-5s at %llx size %llx syms %llu\n", m->name, base, size, m->nsyms);
 }
 
@@ -105,14 +145,41 @@ Module *loader_module(const char *name) {
     return NULL;
 }
 
+// Horizon's rtld looks symbols up in this order: main, the subsdk*s, sdk. That is also the interposition order:
+// a game that exports operator new/delete (Unity does) preempts the SDK's copies for every module's references.
+// NXRT_SYMBOL_PREEMPT=1 opts in; without it the lookup is the historical module-array order, so every other port
+// resolves exactly as it did before this branch.
+static int preempt_on(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("NXRT_SYMBOL_PREEMPT") ? 1 : 0;
+    return v;
+}
+
+static int sym_class(const char *name) {
+    if (!strcmp(name, "main")) return 0;
+    if (!strncmp(name, "subsdk", 6)) return 1;
+    return 2;
+}
+
 uint64_t loader_find_symbol(const char *name) {
-    for (int mi = 0; mi < g_nmodules; mi++) {
-        Module *m = &g_modules[mi];
-        for (uint64_t i = 1; i < m->nsyms; i++) {
-            Elf64Sym *s = sym(m, i);
-            if (s->shndx && !strcmp(symname(m, s), name)) return m->base + s->value;
+    if (!preempt_on())
+        for (int mi = 0; mi < g_nmodules; mi++) {
+            Module *m = &g_modules[mi];
+            for (uint64_t i = 1; i < m->nsyms; i++) {
+                Elf64Sym *s = sym(m, i);
+                if (s->shndx && !strcmp(symname(m, s), name)) return m->base + s->value;
+            }
         }
-    }
+    else
+        for (int pass = 0; pass < 3; pass++)
+            for (int mi = 0; mi < g_nmodules; mi++) {
+                Module *m = &g_modules[mi];
+                if (sym_class(m->name) != pass) continue;
+                for (uint64_t i = 1; i < m->nsyms; i++) {
+                    Elf64Sym *s = sym(m, i);
+                    if (s->shndx && !strcmp(symname(m, s), name)) return m->base + s->value;
+                }
+            }
     return 0;
 }
 
@@ -138,7 +205,13 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {
 static uint64_t resolve(Module *m, uint32_t symidx) {
     Elf64Sym *s = sym(m, symidx);
     const char *name = symname(m, s);
-    if (s->shndx) return m->base + s->value;
+    if (s->shndx) {  // with preemption: an earlier module's export of the same name wins (rtld's order)
+        if (preempt_on()) {
+            uint64_t pre = loader_find_symbol(name);
+            return pre ? pre : m->base + s->value;
+        }
+        return m->base + s->value;
+    }
     HostFn impl = hle_lookup_impl(name);
     if (impl) return hle_register(name, impl);  // host implementation wins over the guest SDK's
     uint64_t a = loader_find_symbol(name);
@@ -159,6 +232,7 @@ static void relocate(Module *m) {
     for (int pass = 0; pass < 2; pass++) {
         Elf64Rela *r = (Elf64Rela *)(pass ? jmprel : rela);
         uint64_t n = (pass ? pltsz : relasz) / sizeof(Elf64Rela);
+        if (n && !r) FATAL("%s: relocation size without a table\n", m->name);
         for (uint64_t i = 0; i < n; i++) {
             uint64_t *where = (uint64_t *)(m->base + r[i].off);
             uint32_t type = (uint32_t)r[i].info, si = r[i].info >> 32;
@@ -167,6 +241,7 @@ static void relocate(Module *m) {
             case R_ABS64:
             case R_GLOB_DAT:
             case R_JUMP_SLOT: {
+                if (type == R_ABS64 && si == 0) { *where = (uint64_t)r[i].addend; break; }  // (absolute, no symbol)
                 uint64_t s = resolve(m, si);
                 *where = s ? s + r[i].addend : 0;
                 if (s >= HLE_BASE && s < HLE_BASE + HLE_SIZE) unresolved++;

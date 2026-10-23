@@ -368,8 +368,10 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                  (unsigned long long)nx_module_base_at(i));
     }
     snprintf(spec, sizeof spec, "LASBUILD3\n%s\n%s\n%s\nzig=%d pointer=%d layout=%s%s%s\n", GAMELIB_BASE_ID,
-             GAMELIB_CFLAGS, GAMELIB_SHARED, t.zig, (int)sizeof(void *), layout,  // (+ the Linux zig target: objects from
-             t.zig && ZIG_TARGET[0] ? " target=" : "", t.zig ? ZIG_TARGET : "");  // before it are rebuilt once)
+             GAMELIB_CFLAGS, GAMELIB_SHARED, t.zig, (int)sizeof(void *),
+             layout,  // (+ the Linux zig target: objects from
+             t.zig && ZIG_TARGET[0] ? " target=" : "",
+             t.zig ? ZIG_TARGET : "");  // before it are rebuilt once)  NOLINT(bugprone-branch-clone)
     if (o->progress) o->progress(0, "Checking completed build files...");
     bool resuming = build_cache_resumable(game_dir);  // (a cancelled or interrupted build; read before open marks this one)
     BuildCache *cache = build_cache_open(game_dir, spec, inputs, 5, why, why_size);

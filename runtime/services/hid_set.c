@@ -31,7 +31,11 @@ SERVICE("hid", hid) {
     case 0: ipc_return_object(resp, service_new("IAppletResource", applet_resource, NULL)); break;
     case 40: case 106: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
     case 101: OUT(uint32_t, 0) = 0x1F; resp_size(resp, 4); break;  // GetSupportedNpadStyleSet
-    case 121: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadJoyHoldType
+    // NOLINTNEXTLINE(bugprone-branch-clone): the hold type and the handheld mode both return 0
+    case 121:
+        OUT(int64_t, 0) = 0;
+        resp_size(resp, 8);
+        break;                                                     // GetNpadJoyHoldType
     case 129: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadHandheldActivationMode
     case 201: {  // SendVibrationValue(handle, value, ...)
         if (req->data_size < 32) { resp->result = 0xD401; break; }

@@ -289,6 +289,18 @@ static void boot(const char *root) {
     uint64_t fini_fn = hle_register("<rtld_fini>", rtld_fini);
     diagnostics_start();
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
+    if (getenv("NXRT_RO_STUB")) {
+        // nn::ro keeps its entry points behind pointers the loader normally points at a table; give them a writable
+        // slot so nn::ro::Initialize{,WithPortName} can install the implementation instead of storing to NULL.
+        static const char *const ro[] = {"_ZN2nn2ro6detail36g_pLookupGlobalManualFunctionPointerE",
+                                         "_ZN2nn2ro6detail34g_pLookupGlobalAutoFunctionPointerE"};
+        for (int i = 0; i < 2; i++) {
+            uint64_t slot = loader_find_symbol(ro[i]);
+            if (!slot) { LOG("ro: %s not found\n", ro[i]); continue; }
+            *(uint64_t *)slot = (uint64_t)hle_alloc(0x100);
+            LOG("ro: %s = %#llx\n", ro[i], (unsigned long long)*(uint64_t *)slot);
+        }
+    }
     if (getenv("NXRT_TLS_ALLOC")) {
         uint64_t setter = loader_find_symbol("_ZN2nn2os32SetMemoryAllocatorForThreadLocalEPFPvmmEPFvS1_mE");
         if (setter) {

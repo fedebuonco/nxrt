@@ -26,7 +26,11 @@ static void profile(Service *s, IpcReq *req, IpcResp *resp) {
         if (req->cmd == 0 && out_buf(req, 0)) memset((void *)(uintptr_t)out_buf(req, 0)->addr, 0, out_buf(req, 0)->size);
         break;
     }
-    case 10: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // GetImageSize
+    // NOLINTNEXTLINE(bugprone-branch-clone): GetImageSize and LoadImage both return 0
+    case 10:
+        OUT(uint32_t, 0) = 0;
+        resp_size(resp, 4);
+        break;                                                 // GetImageSize
     case 11: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // LoadImage
     default: LOG("[acc] IProfile cmd %u (ok)\n", req->cmd);
     }
