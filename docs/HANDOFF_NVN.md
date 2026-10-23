@@ -19,7 +19,8 @@ renderer, with `beta5-merge` merged into it). `master` and `v0.1.0` are untouche
 
 ```
 nvn-renderer-wip @ 76abe95   beta5-merge merged in; beta_5's renderer runs
-  LAS  boots and plays at 60 fps on beta_5's renderer (Metal); title, file select and intro verified
+  LAS  boots and plays at 60 fps on beta_5's renderer (Metal); title, file select, intro and village/field
+       gameplay verified (houses, smoke, cut grass, NPCs all correct); draw_tint confirmed called
   EoW  boots at 60 fps; its first frame is byte-identical to the beta5-merge build's (black: this dump has no
        rd000_Title.webm). Gameplay verification still needs a controller in hand.
   Sky  boots; the library-applet wait is fixed, it now dies inside nn::applet (see "Sky's stall")
