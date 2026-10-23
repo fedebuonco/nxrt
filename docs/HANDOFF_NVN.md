@@ -23,7 +23,9 @@ nvn-renderer-wip @ 76abe95   beta5-merge merged in; beta_5's renderer runs
        gameplay verified (houses, smoke, cut grass, NPCs all correct); draw_tint confirmed called
   EoW  plays at 60 fps: its title movie (read straight from the package RomFS), then the opening dungeon with
        the world, HUD and prompts; 0 skipped draws. One compute shader still fails to translate.
-  Sky  boots; the library-applet wait is fixed, it now dies inside nn::applet (see "Sky's stall")
+  Sky  plays at 60 fps (170 s session, ~30k draws a frame): menus, Quest Logs, the world. 240-ish draws a frame
+       are still skipped (one bindless-texture fragment shader) and the strap-guide dialog is skipped by the
+       port: see "Sky's stall".
 ```
 
 `beta5-merge` itself is as the handoff left it: LAS and EoW at 60 fps on nxrt's renderer, Sky stalling at ~32
@@ -143,19 +145,24 @@ The import claimed the hooks were back; `draw_tint`, `instance_tint` and `instan
 5. Framerate is *not* a reason for this work any more: LAS and EoW already run at a locked 60 fps on nxrt's renderer
    on an M3. The reasons are Vulkan, beta_5's renderer features, and fewer runtime shader compiles.
 
-## Sky's stall (moved, not fixed)
+## Sky's stall (fixed)
 
-It is **not** `WaitProcessWideKey` and not `ArbitrateLock`. The 0x1C threads in the profile are ordinary condition
-variable waits (the dump shows `wait=2`, mutex word 0). The thread that stops the game is in
-`nn::hid::ShowControllerStrapGuide` → `ShowControllerSupportCore` → `nn::applet::CreateLibraryApplet`, waiting on the
-library-applet launchable event. The runtime handed the game that event (`ISelfController` command 9) **unsignaled**,
-so it waited forever after the first ~31 frames.
+It was **not** `WaitProcessWideKey` and not `ArbitrateLock`. The 0x1C threads in the profile are ordinary condition
+variable waits (the dump showed `wait=2`, mutex word 0). The chain was:
 
-That event is now signaled (`runtime/services/am.c`), and Sky gets past it — then the guest code inside
-`CreateLibraryApplet` dereferences NULL *before any IPC reaches `am`*: the SDK's applet manager has no creator for the
-library applet to be made from. Next: implement `ILibraryAppletCreator` / `ILibraryAppletAccessor` enough that the
-applet completes at once (the strap guide, the controller-support dialog, `swkbd`'s applet path), or find the
-initialization the SDK expects before `CreateLibraryApplet`.
+1. `ISelfController` command 9 (`GetLibraryAppletLaunchableEvent`) was created **unsignaled**, so after ~31 frames
+   Sky waited forever before opening its first library applet. It is signaled now (`runtime/services/am.c`).
+2. `ILibraryAppletCreator::CreateLibraryApplet` returned nothing, so the SDK asserted (no free applet slot). Library
+   applets now exist: an `ILibraryAppletAccessor` that reports started/completed at once, and `IStorage` for the
+   applet's data (`runtime/services/am.c`). That is shared and helps any game that opens a system dialog.
+3. Sky still stopped inside `ShowControllerSupportCore` right after the applet was created. The console's
+   "attach the Joy-Con straps" dialog has no meaning in a desktop port, so **Sky's port** replaces that one SDK
+   function with a no-op: `nn::hid::ShowControllerStrapGuide` at `0x7030244c80` (this SDK build), via
+   `hle_override` from its `modules_loaded` hook (`games/sky/runtime/sky_game.c`, not committed: the ports are
+   the owner's). The runtime mechanism is shared; the address belongs to the port.
+
+With that, Sky plays at 60 fps. Known: ~240 draws a frame skipped (one fragment shader fails with "bindless tex"),
+and the crash dialog no longer claims files are missing (the old LAS count is gone).
 
 Two renderer crashes on the way there were real and are fixed: an uninitialized present `crop` (MetalFX set up for
 16384×16384, then a zero-size texture) and a clear kind read from an argument the recorder never set for float clears
