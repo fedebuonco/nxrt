@@ -1,5 +1,9 @@
 # Handoff: bringing LAS beta_5's runtime into nxrt
 
+**Frozen 2026-10-23, tag `nvn-three-games-2026-10-23`: LAS, EoW and Sky all boot and play on `nvn-renderer-wip`.**
+The sections below record how it got there and what is still open (Vulkan on a machine that runs it, Sky's bindless
+shader, beta_5's recolour / Vulkan chunked heap, the release tag after the owner's three-port run).
+
 For the next session. Read this before touching `runtime/nvn/`.
 
 ## What this work is
