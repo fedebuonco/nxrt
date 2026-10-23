@@ -18,6 +18,7 @@
 #include "record.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#include "nx_app.h"
 #include "../pace.h"
 #include "../shader_prep.h"
 #include <pthread.h>
@@ -142,8 +143,9 @@ static void create_instance(void) {
     bool validate = strict || getenv("NXRT_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
-    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
-                             .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                             .pApplicationName = nx_app.title ? nx_app.title : "nxrt",
+                             .pEngineName = "nxrt", .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};

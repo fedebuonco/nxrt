@@ -164,10 +164,19 @@ $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_CFLAGS='"$(strip $(filter-out -I$(RT),$(GENFLAGS)))"' \
                                 -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"'
 
-# the shader precompiler's list of variant shaders, as a C string (runtime/nvn/shader_prep.c)
-$(B)/inc/shader_variants.inc: $(RT)/nvn/shader_variants.txt
+# The shader precompiler's list of variant shaders, as a C string (runtime/nvn/shader_prep.c). The list is the
+# game's own (NX_SHADER_LIST, from the game's Makefile): the library ships none, and a game without one prepares only
+# the shaders the player has already met (runtime/nvn/shader_seen.c).
+NX_SHADER_LIST ?=
+ifeq ($(NX_SHADER_LIST),)
+$(B)/inc/shader_variants.inc: $(NXRT)/nxrt.mk
+	@mkdir -p $(dir $@)
+	@: > $@; echo '""' >> $@
+else
+$(B)/inc/shader_variants.inc: $(NX_SHADER_LIST)
 	@mkdir -p $(dir $@)
 	LC_ALL=C tr -d '\r' < $< | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' > $@; echo '""' >> $@
+endif
 $(B)/rt/nvn/shader_prep.o: $(B)/inc/shader_variants.inc
 $(B)/rt/nvn/shader_prep.o: RTFLAGS += -I$(B)/inc
 

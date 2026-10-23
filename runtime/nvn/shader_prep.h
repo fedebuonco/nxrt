@@ -2,7 +2,8 @@
 // before the game starts, so a first visit anywhere has no compile hitch or pop-in. The approach follows
 // SuperMarioWonderRecomp's ahead-of-time shaders (github.com/BelmanteGu/SuperMarioWonderRecomp).
 //
-// What ships is only a list of variant records (runtime/nvn/shader_variants.txt): pipeline / compute state in NVN terms
+// What ships is only a list of variant records (the game's own, NX_SHADER_LIST in its Makefile): pipeline / compute
+// state in NVN terms
 // (formats, vertex layout, blend state, ...) plus each shader's identity as a one-way hash of its code bytes. No
 // shader code ships in any form: the code is found by that hash in the player's own game files (the BNSH shader
 // containers in the romfs' shader archives, effects and UI archives, and in the main module's data), and each backend
@@ -10,8 +11,9 @@
 // which finds them by content at first use (code addresses differ from run to run). Anything the list misses still
 // compiles at first use (asynchronously, as before) and is logged as a first visit.
 //
-// The start screen runs it once the game files are set up or updated (runtime/ui/launcher.mm: a progress bar and
-// Skip), and on every later start in the background (warm system shader caches: well under a second here); a PLAY
+// A game without a list still prepares the variants the player has met before (runtime/nvn/shader_seen.c), so the
+// first visit of a shader is compiled once and ready from the next run on. The start screen runs it once the game
+// files are set up or updated (runtime/rt_ui.mm, runtime/ui/launcher.mm: a progress bar and Skip), and on every later start in the background (warm system shader caches: well under a second here); a PLAY
 // before that is done shows the same bar. One run at a time. Later
 // (phase 2): a Metal binary archive and periodic Vulkan pipeline cache saves (renderer_prepare_end), and a tag that
 // invalidates them when the translator changes.

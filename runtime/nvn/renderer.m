@@ -1559,7 +1559,7 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     // First-time compiles take ~40 ms each on Metal: build off the render thread; draws using this program are
     // skipped until it's ready (the object appears a few frames later instead of the game stalling).
     static dispatch_queue_t q;
-    if (!q) q = dispatch_queue_create("larecomp.shaders", DISPATCH_QUEUE_CONCURRENT);
+    if (!q) q = dispatch_queue_create("nxrt.shaders", DISPATCH_QUEUE_CONCURRENT);
     dispatch_async(q, ^{ compile_program(pr); });
     return pr;
 }
@@ -2123,7 +2123,7 @@ static CsProg *compute_program(NvnProgram *p) {
     }
     // compiled off the render thread, as graphics programs are (get_program): the first dispatches are skipped
     static dispatch_queue_t q;
-    if (!q) q = dispatch_queue_create("larecomp.compute", DISPATCH_QUEUE_CONCURRENT);
+    if (!q) q = dispatch_queue_create("nxrt.compute", DISPATCH_QUEUE_CONCURRENT);
     dispatch_async(q, ^{ compile_compute(cp); });
     return cp;
 }
@@ -2669,7 +2669,7 @@ static void draw(CmdRec *r, bool indexed) {
             NSString *k = [pk copy];
             double t0 = now_ms();
             static dispatch_queue_t pq;  // (off the render thread; through the binary archive)
-            if (!pq) pq = dispatch_queue_create("larecomp.pipelines", DISPATCH_QUEUE_CONCURRENT);
+            if (!pq) pq = dispatch_queue_create("nxrt.pipelines", DISPATCH_QUEUE_CONCURRENT);
             dispatch_async(pq, ^{
                 NSError *e = nil;
                 id<MTLRenderPipelineState> ps = archive_render_pipeline(pd, &e);
@@ -3629,7 +3629,7 @@ bool renderer_prepare_begin(void) {
     }
     pthread_mutex_unlock(&g_prep_lock);
     if (!g_prep_queue) {
-        g_prep_queue = dispatch_queue_create("larecomp.prepare", DISPATCH_QUEUE_CONCURRENT);
+        g_prep_queue = dispatch_queue_create("nxrt.prepare", DISPATCH_QUEUE_CONCURRENT);
         long n = (long)NSProcessInfo.processInfo.activeProcessorCount - 2;
         g_prep_slots = dispatch_semaphore_create(n < 2 ? 2 : n > 12 ? 12 : n);
     }

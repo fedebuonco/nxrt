@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "paths.h"
+#include "nx_app.h"
 #include "platform.h"
 #include "posix_log.h"
 
@@ -179,15 +180,19 @@ void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
     CFStringRef msg = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);
-    CFUserNotificationDisplayAlert(0, kCFUserNotificationStopAlertLevel, NULL, NULL, NULL, CFSTR("LAS Recomp"), msg,
+    CFStringRef title = CFStringCreateWithCString(NULL, nx_app.title ? nx_app.title : "Recomp", kCFStringEncodingUTF8);
+    CFUserNotificationDisplayAlert(0, kCFUserNotificationStopAlertLevel, NULL, NULL, NULL, title, msg,
                                    CFSTR("OK"), NULL, NULL, NULL);
+    if (title) CFRelease(title);
     if (msg) CFRelease(msg);
 }
 
 static void *notice_thread(void *text) {
     CFStringRef msg = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);
-    CFUserNotificationDisplayAlert(0, kCFUserNotificationCautionAlertLevel, NULL, NULL, NULL, CFSTR("LAS Recomp"), msg,
+    CFStringRef title = CFStringCreateWithCString(NULL, nx_app.title ? nx_app.title : "Recomp", kCFStringEncodingUTF8);
+    CFUserNotificationDisplayAlert(0, kCFUserNotificationCautionAlertLevel, NULL, NULL, NULL, title, msg,
                                    CFSTR("OK"), NULL, NULL, NULL);
+    if (title) CFRelease(title);
     if (msg) CFRelease(msg);
     free(text);
     return NULL;

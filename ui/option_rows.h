@@ -61,7 +61,7 @@ void opt_focus_row(int i);
 bool opt_nav_step(int dir);
 // after a page: true if a focus request is still waiting (the page has no enabled option row); clears it
 bool opt_focus_first_left(void);
-// this frame's page (focus checks, LARECOMP_MENU_FOCUS_LOG): its rows in order, the first enabled one and the focused
+// this frame's page (focus checks, NXRT_MENU_FOCUS_LOG): its rows in order, the first enabled one and the focused
 // one (indices, -1: none); opt_frame_reset clears them before a page is drawn
 int opt_row_count(void);
 const char *opt_row_label(int i);

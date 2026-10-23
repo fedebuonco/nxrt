@@ -20,6 +20,7 @@
 #include <strings.h>
 
 #include "../hle.h"
+#include "nx_app.h"
 #include "paths.h"
 
 typedef struct { uint64_t addr, size; } Font;
@@ -217,7 +218,8 @@ static void load_fonts(void) {
     if (!fonts[F_STD].addr && rt_resource("DejaVuSans.ttf", "third_party/fonts/DejaVu/DejaVuSans.ttf", bundled, sizeof bundled))
         load_one_checked(bundled, &fonts[F_STD], true);
     if (!fonts[F_STD].addr)  // (only a broken install: the app ships DejaVu Sans)
-        FATAL("no font for the game's text: import the Switch fonts in Settings (Game font), or reinstall LAS Recomp\n");
+        FATAL("no font for the game's text: import the Switch fonts in Settings (Game font), or reinstall %s\n",
+          nx_app.title ? nx_app.title : "this app");
 }
 
 // SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExt, 3 ChineseTraditional, 4 Korean, 5 NintendoExt

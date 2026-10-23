@@ -546,10 +546,16 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
             fclose(f);
         }
     } else list = strdup(shipped_list);
-    if (!list || !*list) { free(list); LOG("[shader] preparation: no variant list\n"); return false; }
+    // (a game without a shipped list: the player's own list is still prepared - below)
     if (!renderer_prepare_begin()) { free(list); LOG("[shader] preparation: no GPU device yet\n"); return false; }
     uint64_t seen_game;
     char *seen = shader_seen_read(&seen_game);  // (the player's own list: after the shipped one)
+    if ((!list || !*list) && (!seen || !*seen)) {
+        free(list), free(seen);
+        LOG("[shader] preparation: nothing to prepare (no variant list, none met yet)\n");
+        renderer_prepare_end();
+        return false;
+    }
     int total = 0;
     for (char *p = list; *p; p++) total += *p == '\n';
     for (char *p = seen; p && *p; p++) total += *p == '\n';

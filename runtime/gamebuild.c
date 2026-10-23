@@ -15,6 +15,7 @@
 #include "gamelib.h"
 #include "nxgame.h"
 #include "paths.h"
+#include "nx_app.h"
 #include "platform.h"
 #include "rt.h"
 
@@ -345,7 +346,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
     Tools t;
     if (!find_tools(&t)) {
-        snprintf(why, why_size, "the game code builder is missing from this copy of LAS Recomp");
+        snprintf(why, why_size, "the game code builder is missing from this copy of %s", nx_app.title ? nx_app.title : "the app");
         return false;
     }
     char work[1100], tmp[1100];

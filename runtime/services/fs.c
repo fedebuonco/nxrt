@@ -113,7 +113,9 @@ static void base_close(void) {
 static void base_open(void) {
     if (g_base_open) return;
     char path[1100], why[256] = "";
-    snprintf(path, sizeof path, "%s/region_common", g_romfs_dir);
+    // (a folder of game files: a path every complete copy has - the game's own probe; the library has no game's name)
+    const char *probe = nx_game.info.romfs_probe && *nx_game.info.romfs_probe ? nx_game.info.romfs_probe : "region_common";
+    snprintf(path, sizeof path, "%s/%s", g_romfs_dir, probe);
     struct stat sb;
     // NXRT_ROMFS_BIN=1: an older version's image, for comparing the two read paths
     if (!getenv("NXRT_ROMFS_BIN") && stat(path, &sb) == 0 && romfs_layout(g_romfs_dir, &g_base, why, sizeof why)) {

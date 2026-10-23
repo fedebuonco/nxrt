@@ -480,8 +480,10 @@ static void log_to_file_without_console(void) {
 static void require_cpu(void) {
     __builtin_cpu_init();
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    MessageBoxA(NULL, "LAS Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
-                "LAS Recomp", MB_ICONERROR | MB_OK);
+    char cpu[256];
+    snprintf(cpu, sizeof cpu, "%s needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
+             nx_app.title ? nx_app.title : "This app");
+    MessageBoxA(NULL, cpu, nx_app.title ? nx_app.title : "Recomp", MB_ICONERROR | MB_OK);
     ExitProcess(1);
 }
 
@@ -493,11 +495,11 @@ void plat_fatal_notice(void) {
     rt_crash_explain(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
-    MessageBoxA(NULL, text, "LAS Recomp", MB_ICONERROR | MB_OK);
+    MessageBoxA(NULL, text, nx_app.title ? nx_app.title : "Recomp", MB_ICONERROR | MB_OK);
 }
 
 static DWORD WINAPI notice_thread(LPVOID text) {
-    MessageBoxA(NULL, text, "LAS Recomp", MB_ICONWARNING | MB_OK);
+    MessageBoxA(NULL, text, nx_app.title ? nx_app.title : "Recomp", MB_ICONWARNING | MB_OK);
     free(text);
     return 0;
 }

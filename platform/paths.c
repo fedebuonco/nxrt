@@ -94,9 +94,11 @@ static bool writable(const char *dir) {
     return true;
 }
 
+static const char *app_title(void);
+
 static void fail(const char *msg) {
     fprintf(stderr, "%s\n", msg);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", msg, NULL);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, app_title(), msg, NULL);
     exit(1);
 }
 
@@ -108,10 +110,17 @@ bool rt_dev_mode(void) { return g_dev; }
 #define NOTE_TO ".lasrecomp_move_to"            // in a move's source until it switched: where the copy went
 #define NOTE_FROM ".lasrecomp_move_from"        // in a move's destination: the old folder, still to be emptied
 #define MARK_PARTIAL ".lasrecomp_incomplete"    // in a move's destination until its copy was checked
-// What a data folder holds (and a move takes along). Logs stay where they are.
-static const char *const DATA_ENTRIES[] = {"save", "rando", "larecomp.ini", "fonts", "gamecontrollerdb.txt", "cache",
-                                           "extracted"};
-#define N_ENTRIES (sizeof DATA_ENTRIES / sizeof *DATA_ENTRIES)
+
+
+// What a data folder holds (and a move takes along). Logs stay where they are. The settings file is the app's own
+// (nx_app.ini): the library doesn't carry a game's name.
+static const char *app_title(void) { return nx_app.title && *nx_app.title ? nx_app.title : "Recomp"; }
+static const char *const DATA_ENTRY_BASE[] = {"save", "rando", "fonts", "gamecontrollerdb.txt", "cache", "extracted"};
+static size_t n_entries(void) { return sizeof DATA_ENTRY_BASE / sizeof *DATA_ENTRY_BASE + 1; }
+static const char *data_entry(size_t i) {
+    if (i == 2) return nx_app.ini && *nx_app.ini ? nx_app.ini : "settings.ini";
+    return i < 2 ? DATA_ENTRY_BASE[i] : DATA_ENTRY_BASE[i - 1];
+}
 static char g_home[1024];  // the platform's folder (where POINTER_FILE lives)
 
 static void exe_dir(char *out, size_t n) {
@@ -230,9 +239,9 @@ bool rt_data_root_early(char *out, size_t n) {
 // The entries of a data folder (DATA_ENTRIES) removed; links themselves, never what they point to
 static bool remove_entries(const char *dir) {
     bool ok = true;
-    for (size_t i = 0; i < N_ENTRIES; i++) {
+    for (size_t i = 0; i < n_entries(); i++) {
         char p[1100];
-        join(p, sizeof p, dir, DATA_ENTRIES[i]);
+        join(p, sizeof p, dir, data_entry(i));
         if (!is_link(p) && !exists(p)) continue;
         if (is_dir(p) && !is_link(p)) ok &= plat_remove_tree(p);
 #ifdef _WIN32
@@ -274,12 +283,12 @@ static void finish_moves(const char *root, void (*progress)(int, double)) {
             fprintf(stderr, "[paths] removing the old copy of the data in %s\n", other);
             join(p, sizeof p, other, NOTE_TO);
             remove(p);  // (first: that folder can never undo this move)
-            for (size_t i = 0; i < N_ENTRIES; i++) {
+            for (size_t i = 0; i < n_entries(); i++) {
                 char e[1100];
-                join(e, sizeof e, other, DATA_ENTRIES[i]);
+                join(e, sizeof e, other, data_entry(i));
                 if (is_dir(e) && !is_link(e)) plat_remove_tree(e);
                 else remove(e);
-                if (progress) progress(2, (double)(i + 1) / N_ENTRIES);
+                if (progress) progress(2, (double)(i + 1) / n_entries());
             }
             if (!same_dir(other, g_home)) rmdir(other);  // (only if empty)
         }
@@ -301,12 +310,12 @@ void rt_paths_init(void) {
         while (pointer_root(g_home, ptr, sizeof ptr)) {  // another folder chosen on the start screen
             if (is_dir(ptr) && writable(ptr)) { snprintf(root, sizeof root, "%s", ptr); break; }
             char msg[1400];
-            snprintf(msg, sizeof msg, "LAS Recomp's data folder isn't available:\n%s\n\nIf it's on a drive that isn't "
-                     "connected, connect it and try again.", ptr);
+            snprintf(msg, sizeof msg, "%s's data folder isn't available:\n%s\n\nIf it's on a drive that isn't "
+                     "connected, connect it and try again.", app_title(), ptr);
             const SDL_MessageBoxButtonData b[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Try again"},
                                                   {0, 1, "Use the default folder"},
                                                   {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 2, "Quit"}};
-            const SDL_MessageBoxData box = {SDL_MESSAGEBOX_WARNING, NULL, "LAS Recomp", msg, 3, b, NULL};
+            const SDL_MessageBoxData box = {SDL_MESSAGEBOX_WARNING, NULL, app_title(), msg, 3, b, NULL};
             int k = 2;
             if (!SDL_ShowMessageBox(&box, &k)) fprintf(stderr, "%s\n", msg);
             if (k == 2) exit(1);
@@ -321,11 +330,11 @@ void rt_paths_init(void) {
     char msg[1400];
     if (!is_dir(root) || !writable(root) || chdir(root) != 0) {
 #ifdef _WIN32
-        snprintf(msg, sizeof msg, "LAS Recomp can't write to its folder:\n%s\n\nIt keeps game files, saves and seeds "
-                 "next to the program. Move the \"LAS Recomp\" folder somewhere you can write to (e.g. Documents or "
-                 "Desktop, not Program Files) and start it again.", root);
+        snprintf(msg, sizeof msg, "%s can't write to its folder:\n%s\n\nIt keeps game files, saves and seeds "
+                 "next to the program. Move the \"%s\" folder somewhere you can write to (e.g. Documents or "
+                 "Desktop, not Program Files) and start it again.", app_title(), root, app_title());
 #else
-        snprintf(msg, sizeof msg, "LAS Recomp can't write to its data folder:\n%s", root);
+        snprintf(msg, sizeof msg, "%s can't write to its data folder:\n%s", app_title(), root);
 #endif
         fail(msg);
     }
@@ -468,9 +477,9 @@ const char *rt_data_root_fixed(void) {
 }
 
 static bool has_entries(const char *dir) {
-    for (size_t i = 0; i < N_ENTRIES; i++) {
+    for (size_t i = 0; i < n_entries(); i++) {
         char p[1100];
-        join(p, sizeof p, dir, DATA_ENTRIES[i]);
+        join(p, sizeof p, dir, data_entry(i));
         if (exists(p) || is_link(p)) return true;
     }
     return false;
@@ -503,15 +512,15 @@ static unsigned long long free_space(const char *dir) {
 
 static unsigned long long entries_size(const char *dir) {
     unsigned long long n = 0;
-    for (size_t i = 0; i < N_ENTRIES; i++) {
+    for (size_t i = 0; i < n_entries(); i++) {
         char p[1100];
-        join(p, sizeof p, dir, DATA_ENTRIES[i]);
+        join(p, sizeof p, dir, data_entry(i));
         n += tree_size(p);
     }
     return n;
 }
 
-// LAS Recomp's data (an unfinished copy too), or nothing yet
+// the app's data (an unfinished copy too), or nothing yet
 static bool usable_dir(const char *dir) {
     char p[1100];
     join(p, sizeof p, dir, MARK_PARTIAL);
@@ -526,10 +535,10 @@ void rt_data_target(const char *picked, RtDataTarget *t) {
         snprintf(t->refuse, sizeof t->refuse, "That folder can't be opened.");
         return;
     }
-    // the folder itself when it's empty, LAS Recomp's data, or the platform's folder; otherwise a "LAS Recomp"
+    // the folder itself when it's empty, the app's data, or the platform's folder; otherwise an app-named
     // folder in it
     if (same_dir(r, g_home) || usable_dir(r)) snprintf(t->path, sizeof t->path, "%s", r);
-    else join(t->path, sizeof t->path, r, "LAS Recomp");
+    else join(t->path, sizeof t->path, r, app_title());
     join(p, sizeof p, t->path, MARK_PARTIAL);
     t->has_data = has_entries(t->path) && !exists(p);
     t->bytes = entries_size(g_root);
@@ -541,7 +550,7 @@ void rt_data_target(const char *picked, RtDataTarget *t) {
     else if (within(t->path, root)) snprintf(t->refuse, sizeof t->refuse, "That folder is inside the data folder.");
     else if (within(root, t->path)) snprintf(t->refuse, sizeof t->refuse, "That folder holds the data folder.");
     else if (in_app(r)) snprintf(t->refuse, sizeof t->refuse, "That folder is inside the app.");
-    else if (!writable(r)) snprintf(t->refuse, sizeof t->refuse, "LAS Recomp can't write to that folder.");
+    else if (!writable(r)) snprintf(t->refuse, sizeof t->refuse, "%s can't write to that folder.", app_title());
     else if (!same_dir(t->path, g_home) && !usable_dir(t->path))
         snprintf(t->refuse, sizeof t->refuse, "Choose an empty folder.");
 }
@@ -703,7 +712,7 @@ static bool prepare_target(const char *to, char *err, size_t n) {
     char p[1100];
     mkdirs(to);
     if (!is_dir(to) || !writable(to)) {
-        snprintf(err, n, "LAS Recomp can't write to %s.", to);
+        snprintf(err, n, "%s can't write to %s.", app_title(), to);
         return false;
     }
     join(p, sizeof p, to, MARK_PARTIAL);
@@ -734,7 +743,7 @@ bool rt_data_move(const char *to, void (*progress)(int step, double frac), char 
         return false;
     }
     if (has_entries(abs_to)) {
-        snprintf(err, n, "That folder already has LAS Recomp data.");
+        snprintf(err, n, "That folder already has %s data.", app_title());
         return false;
     }
     Move m = {progress, 0, entries_size(from), 0, err, n, malloc(MOVE_BUF), malloc(MOVE_BUF)};
@@ -746,10 +755,10 @@ bool rt_data_move(const char *to, void (*progress)(int step, double frac), char 
     for (int step = 0; step < 2 && ok; step++) {  // copy, then check every file of the copy
         m.step = step, m.done = 0;
         moved(&m, 0);
-        for (size_t i = 0; i < N_ENTRIES && ok; i++) {
+        for (size_t i = 0; i < n_entries() && ok; i++) {
             char s[1100], d[1100];
-            join(s, sizeof s, from, DATA_ENTRIES[i]);
-            join(d, sizeof d, abs_to, DATA_ENTRIES[i]);
+            join(s, sizeof s, from, data_entry(i));
+            join(d, sizeof d, abs_to, data_entry(i));
             if (!exists(s) && !is_link(s)) continue;
             ok = step ? check_tree(&m, s, d) : copy_tree(&m, s, d);
         }

@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include "paths.h"
+#include "nx_app.h"
 #include "platform.h"
 #include "posix_log.h"
 
@@ -213,8 +214,8 @@ static void log_to_file_without_terminal(void) {
 static void require_cpu(void) {
     __builtin_cpu_init();
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    fprintf(stderr, "FATAL: LAS Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or "
-                    "newer).\n");
+    fprintf(stderr, "FATAL: %s needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or "
+                    "newer).\n", nx_app.title ? nx_app.title : "This app");
     exit(1);
 }
 #else
@@ -335,11 +336,11 @@ void plat_fatal_notice(void) {
     rt_crash_explain(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, nx_app.title ? nx_app.title : "Recomp", text, NULL);
 }
 
 static void *notice_thread(void *text) {
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "LAS Recomp", text, NULL);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, nx_app.title ? nx_app.title : "Recomp", text, NULL);
     free(text);
     return NULL;
 }
