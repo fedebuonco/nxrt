@@ -43,8 +43,8 @@ the same start screen, menu, controls, settings and saves ([`examples/ui-host`](
 
 All of this lives at the root of this repository and is the same code for every game:
 
-- **The recompiler:** `tools/gen.py`, `lifter.py`, `analyze.py`, `nso.py`, `passes.py`, `simd_c.py`, and the headers the
-  generated C compiles against (`runtime/cpu.h`, `simd.h`, `simd_fp.h`, `gamelib.h`).
+- **The recompiler:** `tools/gen.py` and its stages in `tools/recomp/`, with `lifter.py`, `analyze.py`, `nso.py`, and
+  the headers the generated C compiles against (`runtime/cpu.h`, `gamelib.h`).
 - **The runtime:**
   - loader, dispatcher, kernel, IPC;
   - every emulated service (fs, audio, hid, am, pl…);
@@ -95,11 +95,21 @@ gen.py <module> <nso> <base> <outdir> [--game games/<id>/tools] [--hle hle_symbo
     different build of the game fails generation loudly instead of miscompiling.
   - `VARIANTS[offset] = [words]`: sites in `main` where the game chooses an instruction at run time, through the
     `code_variant` hook. LAS's randomizer uses this for its seed patches.
-- **`--shift`:** moves the guest address range lower (for a future Android port). Off by default; it changes nothing on
-  desktop.
 
 The generated C for all modules, plus `tools/gamelib_entry.c` (one table per module), is compiled into the game code
 library. The runtime loads that library and looks recompiled functions up in it by guest address.
+
+**Inside, a pipeline of stages** (`tools/recomp/`; `gen.py` only runs them):
+
+| Stage | File | Job |
+|---|---|---|
+| load | `module.py` | Read the NSO, its code words; cache lifted instructions. This object is what `patches.py` sees |
+| discover | `discover.py` | Function starts from unwind data, symbols, relocations, `bl` targets and addresses built in registers, then split functions until no branch leaves its function |
+| cfg | `cfg.py` | Branch targets inside a function, jump tables (emulated with unicorn), which `br`s fall back to dispatch |
+| lift | `lifter.py` | One ARM64 instruction → C (FP/SIMD as inline asm) |
+| emit | `emit.py` | One function → C lines, the game's patches and variants applied |
+| plan | `plan.py` | Functions → chunk files, the address table, the main module's build id |
+| report | `report.py` | Statistics and the progress lines the start screen reads |
 
 ### Changes made to it while merging the games
 
@@ -111,7 +121,6 @@ These apply to every game:
   are no longer split there.
 - **From EoW:**
   - `lifter.py` lifts exclusive pairs, CAS / CASP and the LSE atomics.
-  - `--shift` and label naming that keeps the unshifted address.
 - **Game library format version 2:** a list of modules instead of the fixed main + sdk pair. Sky and EoW each designed
   this on their own and arrived at the same format.
 
@@ -125,7 +134,7 @@ minutes and reuses the game files already there.
 
 | You change | Who has to rebuild their game code |
 |---|---|
-| `gen.py`, `lifter.py`, the other recompiler tools, `cpu.h` / `simd*.h` / `gamelib.h`, `hle_symbols.txt` | Every game |
+| `gen.py`, `tools/recomp/*`, `lifter.py`, the other recompiler tools, `cpu.h` / `gamelib.h`, `hle_symbols.txt` | Every game |
 | A game's `patches.py` or `GAME_MODULES` | That game only |
 | Anything else in the runtime, the layers or the game's runtime code | Nobody: it is part of the app, not the game code |
 

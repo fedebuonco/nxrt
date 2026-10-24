@@ -4,8 +4,8 @@
 to boot, draw and look like a proper app. Everything else is either opt-in (extras) or the game's own work, which lives
 outside the library.
 
-**Status (branch `macos-core`):** A1 done (the other backends removed); B0's build profile done (below). Everything else
-is still planned. File paths are `master`'s.
+**Status (branch `macos-core`):** A1 done (the other backends removed); B0's build profile done; B1 done (the
+generator split into stages, byte-identical output). Everything else is still planned. File paths are `master`'s.
 
 **Left over from A1:** the shader translator still has its GLSL output path and Vulkan-only parts (GMEM chunk bindings
 in `maxwell/shader.h`; `tools/test_translate.sh`'s GLSL mode), and the upscaler setting still lists FSR 1 and NIS,
@@ -178,7 +178,7 @@ bool (*draw)(const NxDraw *d, NxDrawActions *a);  // render thread; d->stage: pr
 - `analyze.py` finds the functions (symbols, unwind data, call targets, address references, in rounds);
 - `gen.py` finds control flow and jump tables, then writes the C;
 - `lifter.py` turns each instruction into C;
-- `passes.py` / `simd_c.py` handle optimisation passes and portable SIMD.
+- (`passes.py` isn't part of it: it summarises a renderer debug log, and moves to dev.)
 
 clang then compiles the C into the game library.
 
@@ -249,6 +249,18 @@ load ──► discover ──► cfg ──► lift ──► optimise ──�
 Plus a `report` at the end: functions, tables (proven / fallback), indirect jumps, `optnone` functions, compile units.
 That makes every improvement measurable per game.
 
+### B1 result (2026-10-24)
+
+- **The split:** `tools/gen.py` (690 lines) became a 70-line driver over `tools/recomp/`: `module.py` (load),
+  `discover.py`, `cfg.py`, `emit.py`, `plan.py`, `report.py`. `lifter.py` is the lift stage unchanged.
+- **The hidden state is gone:** the game's patches are a `Game` object passed in instead of globals, and
+  `emit_function` returns its references instead of leaving them on the module.
+- **Verified:** all 16 modules of LAS, Sky, EoW, Tunic and Dread (3.3 GB of C) are **byte-identical** to the
+  single-file generator's output. The statistics lines and the progress lines the start screen reads are identical
+  too.
+- **Not verified:** `tools/test_lift.py` can't run. Its C harness (`tools/test_harness.c`) is missing on `master`
+  too, an older breakage. B4 rebuilds that test.
+
 ### Steps
 
 Each step keeps the games working. The library's id covers the recompiler (see ARCHITECTURE.md), so each step that
@@ -257,7 +269,7 @@ changes the output makes players rebuild once. Bundle those steps into as few re
 | Step | What | How it's checked | Players rebuild? |
 |---|---|---|---|
 | **B0. Baseline** ✅ build side done (above); run-time benchmark pending | Profile a full LAS build: time per compile unit, the slowest functions, how many go through the fallback; a run-time benchmark (fixed scene, frame time) | Numbers recorded in this doc | No |
-| **B1. Restructure** | Split into the stages above, **with byte-identical C output** for LAS, Sky, EoW, Tunic and Dread (`--simd asm`, no shift). Drop `--simd c` and `--shift` here: they don't change the output of an Apple Silicon build | `diff` of the generated C against today's | No (same output) |
+| **B1. Restructure** ✅ | Split into the stages above, **with byte-identical C output** for LAS, Sky, EoW, Tunic and Dread (`--simd asm`, no shift). Drop `--simd c` and `--shift` here: they don't change the output of an Apple Silicon build | `diff` of the generated C against today's | The library id changes (new files are hashed), but the C is identical, so the app's build cache reuses every object: a relink, not a rebuild |
 | **B2. Jump tables** | Real table recovery; the fallback only where unproven | Report: fallback functions down; games boot and play their known scenes; build time vs B0 | Yes |
 | **B3. Incremental builds** | Builds on the existing build cache: **stable file assignment** (by address range, not packing order), so a changed function rebuilds only its own file; an option to drop the kept objects (1.8 GB) after a successful build | A one-instruction lifter change rebuilds only the affected files | Once (new layout) |
 | **B4. Differential testing** | Each lifted instruction run against the Mac's own ARM64 CPU, with random inputs; extends `test_lift.py` | Runs in CI; every mismatch is a bug found before a game shows it | No |
