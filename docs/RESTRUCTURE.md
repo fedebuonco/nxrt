@@ -4,7 +4,12 @@
 to boot, draw and look like a proper app. Everything else is either opt-in (extras) or the game's own work, which lives
 outside the library.
 
-**Status:** a plan, nothing done yet. File paths are `master`'s.
+**Status (branch `macos-core`):** A1 done (the other backends removed); B0's build profile done (below). Everything else
+is still planned. File paths are `master`'s.
+
+**Left over from A1:** the shader translator still has its GLSL output path and Vulkan-only parts (GMEM chunk bindings
+in `maxwell/shader.h`; `tools/test_translate.sh`'s GLSL mode), and the upscaler setting still lists FSR 1 and NIS,
+which only the removed backends drew. These go with the extras move (`upscalers`) and a translator clean-up after B1.
 
 **Decided (2026-10-24):**
 - **macOS only for now.** The Vulkan renderer and the Windows / Linux platform code are removed, not moved. Kept: the
@@ -177,11 +182,37 @@ bool (*draw)(const NxDraw *d, NxDrawActions *a);  // render thread; d->stage: pr
 
 clang then compiles the C into the game library.
 
-**Measured on LAS (2026-10-22):**
-- 86,669 functions in main, 34,982 in sdk;
-- sdk alone: 489 jump tables, and 9,940 indirect jumps resolved at run time;
-- generation takes seconds (sdk: 6 s); the whole build takes 324 s on 8 jobs, so **compiling is the cost**;
-- 720 object files, a 91 MB library, and 1.8 GB of build files left in the game folder.
+**Measured on LAS (B0, 2026-10-24, M-series Mac, 8 cores, 16 GB; branch `macos-core`):**
+
+| | main | sdk | total |
+|---|---|---|---|
+| Functions | 86,669 | 34,982 | 121,651 |
+| Jump tables | 448 | 489 | 937 |
+| Indirect jumps resolved at run time (`br_dispatch`) | 4,640 | 9,940 | 14,580 |
+| Generation (Python) | 21 s | 5 s | 26 s |
+| Generated C | | | 451 MB in 719 files |
+
+- **Compiling:** 1,260 CPU-seconds, **163 s wall-clock** with 8 jobs. The app's own build on the portable SSD took
+  324 s; the difference is generation, the game drive's I/O and the build cache's receipts.
+- **The fallback is the cost:**
+  - **What:** 817 functions (0.67%) use the all-instruction fallback. They hold 9% of the C (40 MB, 307,075 switch
+    cases).
+  - **How much slower:** they compile at **21 s per MB of C, against 1.7 s per MB for files without one: 12× slower**.
+  - **Share of the time:** files that are mostly fallback take 538 s of the 1,260 (43%).
+  - **The worst offenders:** the 12 slowest files are each a single fallback function. The slowest, `f_70007d88a0`
+    (254 KB of C), takes **61 s alone**, which is also the build's critical path.
+  - **No optimisation at all:** 6 functions are compiled `optnone` (2.9 MB).
+- **Estimate:** compiling the fallback C at the normal rate would bring the compile from ~1,260 to ~760 CPU-seconds
+  (−40%), and the wall-clock from 163 s towards ~95 s, since the 61 s tail goes. Real table recovery won't prove every
+  table, so this is an upper bound.
+- **Rebuilds are already partly incremental.** The app's build cache (`runtime/build_cache.*`) hashes each generated file
+  and reuses its object when the file is unchanged, and removes the generated C after a successful build. Two things are
+  still missing:
+  - **Files shift:** functions are packed into files by size, so one changed function moves the boundaries of every file
+    after it, and most objects are rebuilt anyway.
+  - **Disk space:** the 720 kept objects are the 1.8 GB left in the game folder.
+- **Not measured yet:** run-time speed (frame time in a fixed scene). That needs a scripted in-game scene and comes with
+  B2.
 
 **What holds it back:**
 1. **The all-instruction fallback.** Any function with a jump table makes every instruction a possible jump target: one
@@ -190,8 +221,8 @@ clang then compiles the C into the game library.
 2. **Guest registers live in memory** (`c->x[...]`). They are written back at every call, dispatch and kernel call, so
    the generated code does far more loads and stores than the original.
 3. **Every indirect jump is a table lookup** (`rt_dispatch`): virtual methods, function pointers, calls between modules.
-4. **Rebuilds start over.** Any change to the recompiler or its headers recompiles all ~120k functions; nothing is
-   reused.
+4. **Rebuilds mostly start over.** Objects are reused per file, but files are packed by size, so one changed function
+   shifts every file after it. A recompiler change rebuilds nearly everything.
 5. **The stages are tangled.** Discovery, control flow, patching and emission share state inside `gen.py`, which makes
    each improvement risky and hard to test on its own.
 
@@ -225,10 +256,10 @@ changes the output makes players rebuild once. Bundle those steps into as few re
 
 | Step | What | How it's checked | Players rebuild? |
 |---|---|---|---|
-| **B0. Baseline** | Profile a full LAS build: time per compile unit, the slowest functions, how many go through the fallback; a run-time benchmark (fixed scene, frame time) | Numbers recorded in this doc | No |
+| **B0. Baseline** ✅ build side done (above); run-time benchmark pending | Profile a full LAS build: time per compile unit, the slowest functions, how many go through the fallback; a run-time benchmark (fixed scene, frame time) | Numbers recorded in this doc | No |
 | **B1. Restructure** | Split into the stages above, **with byte-identical C output** for LAS, Sky, EoW, Tunic and Dread (`--simd asm`, no shift). Drop `--simd c` and `--shift` here: they don't change the output of an Apple Silicon build | `diff` of the generated C against today's | No (same output) |
 | **B2. Jump tables** | Real table recovery; the fallback only where unproven | Report: fallback functions down; games boot and play their known scenes; build time vs B0 | Yes |
-| **B3. Incremental builds** | Stable units, a hash per function, reuse of unchanged objects; build files removed after a successful build (kept with a flag) | A one-instruction lifter change rebuilds only the affected functions; the game folder no longer keeps 1.8 GB | Once (new layout) |
+| **B3. Incremental builds** | Builds on the existing build cache: **stable file assignment** (by address range, not packing order), so a changed function rebuilds only its own file; an option to drop the kept objects (1.8 GB) after a successful build | A one-instruction lifter change rebuilds only the affected files | Once (new layout) |
 | **B4. Differential testing** | Each lifted instruction run against the Mac's own ARM64 CPU, with random inputs; extends `test_lift.py` | Runs in CI; every mismatch is a bug found before a game shows it | No |
 | **B5. Faster dispatch** | Calls between modules resolved ahead of time (imports are known after relocation), inline caches at indirect call sites | Run-time benchmark vs B0 | Yes |
 | **B6. Register caching** | Hot guest registers kept in C locals, written back only where a callee or the runtime can see them | Run-time benchmark vs B0; differential tests; games boot and play | Yes |
