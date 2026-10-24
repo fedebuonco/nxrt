@@ -1,0 +1,279 @@
+# Restructuring plan: a macOS port basis
+
+**Goal.** nxrt is the common starting point for porting a Switch game to macOS. It holds exactly what every port needs
+to boot, draw and look like a proper app. Everything else is either opt-in (extras) or the game's own work, which lives
+outside the library.
+
+**Status:** a plan, nothing done yet. File paths are `master`'s.
+
+**Decided (2026-10-24):**
+- **macOS only for now.** The Vulkan renderer and the Windows / Linux platform code are removed, not moved. Kept: the
+  backend-agnostic seams (`renderer.h`, `NxUiBackend`, `platform.h`), so another backend can come back later without
+  touching core. `steam_deck` keeps its own Linux/Vulkan copy and isn't reconciled.
+- **One generic `draw` hook with draw actions** replaces LAS's eight drawing hooks.
+- **The recompiler is rewritten** (part B): restructured into clear stages, then made faster to build and faster to run.
+
+- **Apple Silicon only.** Intel Macs aren't supported. The recompiler's portable-C SIMD path (`simd_c.py`, the non-asm
+  half of `simd.h` / `simd_fp.h`, `--simd c`) and the Android `--shift` option (`GUEST_SHIFT` in `cpu.h`) are removed;
+  generated code always uses the ARM64 inline-asm SIMD.
+
+The work has two parts that can run side by side: **A, the library** and **B, the recompiler**.
+
+---
+
+## Part A: the library
+
+### Where it stands
+
+`master` is about 54k lines, not counting `third_party/`. The games have already left the library (`games/` is
+ignored, and each game builds against nxrt).
+
+| Part | Lines | After |
+|---|---|---|
+| Recompiler (`tools/gen.py`, `lifter.py`, `analyze.py`, `nso.py`, `passes.py`, `simd_c.py`) | ~2.9k | core, rewritten (part B); `simd_c.py` removed |
+| Kernel, IPC, loader, dispatch, services, HLE | ~7.5k | core |
+| NVN core: objects, command buffers, Maxwell translator, ASTC, Tegra layouts, render queue, pacing | ~5.8k | core |
+| Metal renderer (`renderer.m`, `metal.m`) | ~5.3k | core |
+| Layers (platform, settings, input, save, ui) | ~7.4k | core, minus Windows/Linux |
+| Vulkan renderer (`runtime/nvn/vulkan/`) | ~10.7k | **removed** |
+| Windows + Linux platform | ~1.5k | **removed** |
+| Opt-in features (mods, texture packs, LiveSplit, upscalers, shader cache…) | ~3.3k | extras |
+| Tests and test tools | ~4.7k | dev |
+
+**Hooks born from one game.** `nxgame.h` has about 55 hooks. Which games set them today:
+
+| Used by | Hooks |
+|---|---|
+| **LAS only** | `draw_shader`, `draw_textures`, `draw_tint`, `draw_mirror`, `draw_effect_stretch`, `instances_tinted`, `instance_tint`, `box_depth_draws`, `scene_fresh_targets`, `pad_mirrored`, `code_variant`, `profiles_*`, `present_wide` / `present_crop` / `present_shape` / `present_frame_end`, `content_dir`, `romfs_override`, `save_read` / `save_written`, `game_tick`, `in_play`, `scene_name`, `pad_script`, `menu_opened` |
+| **Sky only** | `inner_entries`, `input_event`, `mouse_wanted`, `stick_deadzone`, `keyboard_prompts`, `language_code`, `max_frame_rate` |
+| **LAS and Sky** | `tex_identify` / `tex_generation` / `tex_apply`, `pad_filter`, `pad_final`, `present_tick`, `movie_skippable`, `modules_loaded`, `settings_*`, `menu_pages`, `overlay_*` |
+| **EoW, Tunic** | `late_module_init` (plus identity) |
+| **Dread** | identity only (and the `romfs_files` field, shared with LAS) |
+| **No game** | `romfs_read_filter`, `romfs_file_opened`, `tex_replace` |
+
+The expensive ones are LAS's drawing hooks. Mirror mode and the gold tints are threaded through the shader translator
+and both renderers, in about 85 places.
+
+### Target layout
+
+```
+nxrt/
+  core/                      the macOS port basis (~30k lines)
+    platform/                macOS + shared parts (paths, app identity, logging, crash dialog); platform.h is the seam
+    settings/ input/ save/   as today (input without rumble / light, which move to extras)
+    ui/                      start screen + setup, menu (system tabs + the game's tab), on-screen keyboard, option rows;
+                             ui/backends/metal.mm behind NxUiBackend
+    runtime/                 loader, dispatch, kernel, IPC, services, HLE, main, game-files setup (gamebuild, romfs_build,
+                             nxpkg), diagnostics (crash_explain, slowframe, fnprof)
+    runtime/nvn/             objects, cmdbuf, formats, tegra, astc, rqueue, pace, maxwell/; renderer.m + metal.m behind
+                             renderer.h
+    recompiler/              the rewritten generator (part B)
+  extras/<feature>/          opt-in features, registering through core's extension points
+  dev/                       tests/, tools/test_*, log_triage.py, format.sh, tidy.sh, run_ports.sh, gen_compile_commands.py
+  examples/                  game-template, ui-host
+```
+
+A game's Makefile chooses its features:
+
+```make
+NXRT_BACKEND  := metal                                 # the only one for now: the seam stays visible
+NXRT_FEATURES := mods texpacks upscalers shader-cache  # empty = the bare core
+include $(NXRT)/nxrt.mk
+```
+
+### What moves where
+
+**Stays in core:**
+
+| Area | Files (`master`) |
+|---|---|
+| Recompiler | `tools/*` generator files → `core/recompiler/` (rewritten in part B), `gamelib_entry.c`, `sym.py` (made module-aware) |
+| Code runtime | `runtime/cpu.h`, `simd.h`, `simd_fp.h`, `loader.c`, `dispatch.c`, `gamelib.*`, `kernel.*`, `ipc.*`, `hle.h`, `rt.h`, `main.c`, `nxgame.h`, `lz4_block.*` |
+| OS emulation | `runtime/hle/*` (framepace, heaps, hid, libc, movie, nvn_boot, pl, swkbd, vi), `runtime/services/*` |
+| Graphics | `runtime/nvn/objects.c`, `cmdbuf.c`, `formats.c`, `tegra.*`, `astc.*`, `rqueue.*`, `pace.*`, `tex_hash.h`, `maxwell/*`, `renderer.*`, `metal.m`, `smaa_data.c` (SMAA is the default antialiasing) |
+| Game setup | `runtime/gamebuild.*`, `romfs_build.*`, `nxpkg.*`, `rt_ui.mm` (minus the extras' rows), `rt_settings.c`, `settings.h`, `frame_rate.*` |
+| Diagnostics | `runtime/crash_explain.c`, `nvn/slowframe.*`, `fnprof.c` |
+| Layers | `platform/app.c`, `paths.*`, `platform.h`, `posix_log.h`, `macos.c`, `nx_app.h`; `settings/*`; `input/*`; `save/*`; `ui/*` with `ui/backends/metal.mm` |
+
+**Moves to extras:**
+
+| Feature | From | Needs from core |
+|---|---|---|
+| `mods` | `runtime/mods.*`, `rt_mods_ui.mm`, the LayeredFS part of `services/fs.c` | a RomFS overlay registry (`rt_fs_add_overlay`) |
+| `texpacks` | `runtime/nvn/custom_tex.*` | a texture-replacement provider (today's `tex_replace` path) |
+| `upscalers` | `runtime/nvn/output_scale.*` (MetalFX, FSR, NIS), the upscaler rows in Video | a present-pass stage |
+| `shader-cache` | `runtime/nvn/shader_prep.*`, `shader_seen.c`, `build_cache.*`, `cache_sha256.h`, the start-screen shader bar | a pipeline-cache provider, a start-screen task slot |
+| `livesplit` | `runtime/livesplit.*`, `run_timer.*`, the Controls knobs | a frame / state callback for extras |
+| `screen-filter` | `runtime/nvn/screen_filter.h` and its use in `metal.m` (from LAS's Cosmetics tab) | the present-pass stage |
+| `pad-extras` | rumble and controller light (`input/input.c`, `services/hid_set.c`, the renderer's vibration path) | an output hook in nx-input |
+| `update-check` | the release check in `ui/launcher.mm` | the start-screen info slot (`NxUiStartInfo`) |
+| `boot-profiles` | `profiles_*`, `code_variant` (LAS's randomizer seeds; usable for mod sets too) | the generator's `VARIANTS` option (part B keeps it) |
+| `draw-tint` | the tint binding in translated shaders | the draw actions' tint fields |
+
+Each extra registers like a game does: settings sections (`nx_settings_register`), menu tabs and rows (`nxui_*`), and the
+new extension points. Core never `#include`s an extra. With `NXRT_FEATURES` empty, none is compiled.
+
+**Removed:**
+- `runtime/nvn/vulkan/*`, the ui Vulkan backend, every non-Apple renderer path.
+- `platform/windows.c`, `windows_threads.h`, `win_compat.h`, `windows.rc`, `windows.manifest`, `tools/build_deps_windows.sh`,
+  `tools/pe_no_cfg.py`; `platform/linux.c`, `linux_compat.h`, `cpu_check.h`.
+- The Windows-only features: ReShade, the OneDrive warning.
+- The portable-C SIMD path: `tools/simd_c.py` (~1.2k lines), the non-asm half of `runtime/simd.h` / `simd_fp.h`, and
+  `--simd c`; the Android guest shift (`--shift`, `GUEST_SHIFT` / `GUEST()` in `cpu.h`, `rt.h`, `kernel.h`, `fnprof.c`).
+- **Kept:** `tools/fetch_zig.sh` and `zig_slim.sh` (macOS ships zig to build the game code on players' Macs), without
+  their Windows / Linux branches. All of this stays in git history and on `steam_deck`.
+
+**Moves to dev:** `tests/`, `tools/test_*`, `tools/log_triage.py`, `format.sh`, `tidy.sh`, `run_ports.sh`,
+`gen_compile_commands.py`. These still run in CI, but a port doesn't build them.
+
+### Game-born mechanisms leave the library
+
+| Mechanism | Today | After |
+|---|---|---|
+| Mirror mode | `draw_mirror`, `pad_mirrored`, `flip_x` in the shader keys | Draw action "flip"; LAS flips the pad in its own `pad_filter` |
+| Gold tints | `draw_tint`, `instances_tinted`, `instance_tint`; a tint binding in every translated shader | Draw actions "tint this draw / these instances"; the binding is compiled in only with `draw-tint` |
+| LAS widescreen pieces | `box_depth_draws`, `draw_effect_stretch` | Draw actions "box to 16:9", "stretch" |
+| Phone-box scene | `scene_fresh_targets` | A `scene_changed` hook returning flags ("clear targets") |
+| LAS test hooks | `NXRT_DOORJUMP_TEST`, `NXRT_PLACE` in `input/input.c` | Gone; LAS scripts input through `pad_script` |
+| LAS comments | "rupee" in `metal.m`, `option_rows.h` | Reworded |
+| Unused hooks | `romfs_read_filter`, `romfs_file_opened`, `tex_replace` | Dropped; `tex_replace` becomes the texpacks extension point |
+
+**Draw actions:**
+
+```c
+typedef struct NxDrawActions {
+    bool skip;            // leave the draw out
+    bool flip_x;          // mirror it horizontally
+    bool box_16_9;        // keep it inside the 16:9 area (widescreen)
+    float stretch_x;      // 1 = none
+    bool tinted; float tint[8];  // rgba multiply, rgba add (needs NXRT_FEATURES += draw-tint)
+    bool (*instance_tint)(const float *model, float tint[8]);  // per instance (ssbo0 matrices), NULL = all alike
+} NxDrawActions;
+bool (*draw)(const NxDraw *d, NxDrawActions *a);  // render thread; d->stage: program known / textures bound
+```
+
+**The hook set after:** about 35 instead of 55, with no hook that exists for only one feature of one game.
+- **Identity:** `nx_game.info`.
+- **Boot:** `modules_loaded`, `inner_entries`, `late_module_init`.
+- **Frame:** `game_tick`, `present_tick`, `in_play`, `scene_name`, `scene_changed`, `movie_skippable`.
+- **Input:** `input_event`, `mouse_wanted`, `stick_deadzone`, `keyboard_prompts`, `pad_script`, `pad_filter`, `pad_final`.
+- **Files and saves:** `romfs_override`, `content_dir`, `save_read`, `save_written`.
+- **Options:** `language_code`, `max_frame_rate`, `settings_*`, `menu_pages`, `menu_opened`, `overlay_*`.
+- **Graphics:** `tex_identify` / `tex_generation` / `tex_apply`, `draw`, `present_wide` / `present_crop` /
+  `present_shape` / `present_frame_end`.
+
+---
+
+## Part B: the recompiler rewrite
+
+### What it is today
+
+`gen.py` and its helpers (~2.9k lines of Python) turn each game module into C:
+- `nso.py` reads the module;
+- `analyze.py` finds the functions (symbols, unwind data, call targets, address references, in rounds);
+- `gen.py` finds control flow and jump tables, then writes the C;
+- `lifter.py` turns each instruction into C;
+- `passes.py` / `simd_c.py` handle optimisation passes and portable SIMD.
+
+clang then compiles the C into the game library.
+
+**Measured on LAS (2026-10-22):**
+- 86,669 functions in main, 34,982 in sdk;
+- sdk alone: 489 jump tables, and 9,940 indirect jumps resolved at run time;
+- generation takes seconds (sdk: 6 s); the whole build takes 324 s on 8 jobs, so **compiling is the cost**;
+- 720 object files, a 91 MB library, and 1.8 GB of build files left in the game folder.
+
+**What holds it back:**
+1. **The all-instruction fallback.** Any function with a jump table makes every instruction a possible jump target: one
+   giant `switch`. This is a safety net for table cases that were missed. clang can't optimise these functions well, and
+   above 3,000 instructions they are compiled with no optimisation at all (two LAS functions took over an hour each).
+2. **Guest registers live in memory** (`c->x[...]`). They are written back at every call, dispatch and kernel call, so
+   the generated code does far more loads and stores than the original.
+3. **Every indirect jump is a table lookup** (`rt_dispatch`): virtual methods, function pointers, calls between modules.
+4. **Rebuilds start over.** Any change to the recompiler or its headers recompiles all ~120k functions; nothing is
+   reused.
+5. **The stages are tangled.** Discovery, control flow, patching and emission share state inside `gen.py`, which makes
+   each improvement risky and hard to test on its own.
+
+### The new shape
+
+It stays in Python (generation isn't the bottleneck), as a pipeline with one job per stage and data passed between them:
+
+```
+load ──► discover ──► cfg ──► lift ──► optimise ──► emit ──► plan
+(nso)    (functions)  (blocks,  (instr →  (passes)    (C)       (files, hashes,
+                      tables)   IR/C)                           what to rebuild)
+```
+
+| Stage | Job | New |
+|---|---|---|
+| `load` | Read the NSO, relocations, symbols | Unchanged (`nso.py`) |
+| `discover` | Function starts | Takes `inner_entries`-style hints from the game, and reports what it couldn't classify |
+| `cfg` | Basic blocks, branch targets, jump tables | **Real jump-table recovery** (bounds from the compare before the table, emulation as a check), per table; the all-instruction fallback only for tables it can't prove |
+| `lift` | Instructions → C | Unchanged semantics at first; the target of differential testing |
+| `optimise` | Passes over the lifted code | Register caching (step B5) lives here |
+| `emit` | C text | One function per stable unit; game patches and `VARIANTS` applied here |
+| `plan` | Which files to compile | **Stable file assignment and a hash per function**, so a rebuild recompiles only what changed |
+
+Plus a `report` at the end: functions, tables (proven / fallback), indirect jumps, `optnone` functions, compile units.
+That makes every improvement measurable per game.
+
+### Steps
+
+Each step keeps the games working. The library's id covers the recompiler (see ARCHITECTURE.md), so each step that
+changes the output makes players rebuild once. Bundle those steps into as few releases as possible.
+
+| Step | What | How it's checked | Players rebuild? |
+|---|---|---|---|
+| **B0. Baseline** | Profile a full LAS build: time per compile unit, the slowest functions, how many go through the fallback; a run-time benchmark (fixed scene, frame time) | Numbers recorded in this doc | No |
+| **B1. Restructure** | Split into the stages above, **with byte-identical C output** for LAS, Sky, EoW, Tunic and Dread (`--simd asm`, no shift). Drop `--simd c` and `--shift` here: they don't change the output of an Apple Silicon build | `diff` of the generated C against today's | No (same output) |
+| **B2. Jump tables** | Real table recovery; the fallback only where unproven | Report: fallback functions down; games boot and play their known scenes; build time vs B0 | Yes |
+| **B3. Incremental builds** | Stable units, a hash per function, reuse of unchanged objects; build files removed after a successful build (kept with a flag) | A one-instruction lifter change rebuilds only the affected functions; the game folder no longer keeps 1.8 GB | Once (new layout) |
+| **B4. Differential testing** | Each lifted instruction run against the Mac's own ARM64 CPU, with random inputs; extends `test_lift.py` | Runs in CI; every mismatch is a bug found before a game shows it | No |
+| **B5. Faster dispatch** | Calls between modules resolved ahead of time (imports are known after relocation), inline caches at indirect call sites | Run-time benchmark vs B0 | Yes |
+| **B6. Register caching** | Hot guest registers kept in C locals, written back only where a callee or the runtime can see them | Run-time benchmark vs B0; differential tests; games boot and play | Yes |
+| **B7. Profile-guided builds** | `NXRT_FNPROF` profiles feed clang: hot code at higher optimisation, cold code at `-O1` for faster builds | Build time and frame time vs B0 | Yes |
+
+B1 comes first because it carries no risk (identical output) and makes all the others easier. B2 and B3 give the
+quickest wins for every game. B6 is the big performance project, and should only start once B4 can catch its mistakes.
+
+---
+
+## What each game has to change
+
+| Game | Part A | Part B |
+|---|---|---|
+| **LAS** | The most work. Eight drawing hooks become one `draw` hook (mirror, tints, boxing, stretch); its pad flip moves into `pad_filter`; `scene_fresh_targets` becomes `scene_changed`; `NXRT_FEATURES += boot-profiles draw-tint screen-filter` and what it ships today; test scripts move to `pad_script`. Re-verify mirror mode, gold pots and bushes, widescreen boxing, the phone box, the randomizer | Nothing in its code. `patches.py` and `VARIANTS` keep their format. One rebuild per output-changing step |
+| **Sky** | Small: hooks unchanged; `NXRT_FEATURES := mods texpacks upscalers` | Nothing. Its `inner_entries` may become unnecessary after B2; keep them until it's verified |
+| **EoW, Tunic, Dread** | Makefile only (`NXRT_FEATURES` if they want extras) | Nothing |
+| **New ports** | Start from `examples/game-template` with `NXRT_FEATURES` empty | Get the new report for free: which tables and functions need attention |
+
+Players notice nothing in features, as long as each game lists today's features in `NXRT_FEATURES`. They notice a
+one-time rebuild per recompiler release, and later shorter builds and faster games.
+
+## Order of work
+
+Each step builds every game and checks LAS (the most hooks) before the next. A and B run side by side; B never waits
+for A.
+
+| # | Part A (library) | Part B (recompiler) |
+|---|---|---|
+| 1 | **Remove Vulkan, Windows, Linux** and the x86 / Android paths; keep the seams | **B0** baseline |
+| 2 | **Draw actions** in Metal; port LAS; remove the eight old hooks | **B1** restructure, byte-identical |
+| 3 | **Leftovers:** test variables, `pad_mirrored`, `scene_changed`, unused hooks, comments | **B2** jump tables |
+| 4 | **Extension points:** fs overlay, texture provider, present stage, pipeline cache, start-screen task slot, input output hook | **B3** incremental builds |
+| 5 | **Move the extras** behind `NXRT_FEATURES`, one at a time | **B4** differential testing |
+| 6 | **Move dev tooling**; update the docs to the new layout | **B5** dispatch, then **B6** registers, then **B7** profiles |
+
+## Risks
+
+- **Draw actions touch the shader translator.** The shader cache key must change with them, or old cached pipelines
+  would be reused wrongly. Bump the cache salt.
+- **Removing Vulkan** drops Windows, Linux and the Steam Deck from `master`. That's intended for now; `steam_deck` keeps
+  its copy.
+- **Recompiler changes force rebuilds** for every player of every game: bundle B2, B3, B5, B6 and B7 into as few releases
+  as possible.
+- **Jump-table recovery and register caching can silently miscompile.** Keep the fallback for unproven tables, and don't
+  start B6 before B4's differential tests run in CI.
+- **Extension points are new API.** Keep them few, and document them in ARCHITECTURE.md, because extras and games will
+  depend on them.
