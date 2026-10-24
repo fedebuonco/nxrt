@@ -2,15 +2,15 @@
 consecutive FP/SIMD instructions are batched into one asm block; the game's patches replace single instructions and
 its variants let the runtime pick an instruction (nx_code_variant).
 
-Branches inside the function are gotos, to other functions tail calls, anywhere else rt_dispatch. A function with a
-jump table also gets the all-instruction fallback: a `switch (c->pc)` over every instruction, so a table case the
-emulation missed still lands on the right instruction.
+Branches inside the function are gotos, to other functions tail calls, anywhere else rt_dispatch. A proven jump table
+(cfg.py) is a `switch` over its targets. A `br` whose table couldn't be proven makes its function take the
+all-instruction fallback: a `switch (c->pc)` over every instruction, so any target still lands on the right one.
 """
 import re
 
 from lifter import Unsupported, emit_asm_batch, hx
 
-OPTNONE_INSNS = 3000  # functions with jump tables above this many instructions are compiled unoptimized
+OPTNONE_INSNS = 3000  # functions with the all-instruction fallback above this many instructions are compiled unoptimized
 
 
 def fname(a):
@@ -64,7 +64,8 @@ def emit_function(m, game, entry, end, labels, tables, hle):
     # A huge function with the all-instruction fallback (thousands of labels, one big switch) sends clang's
     # optimizer into the hours (main 1.0.0: f_7000a7c130, f_7001389610 - over an hour each at -O1): unoptimized
     # those compile in seconds.
-    huge = bool(tables) and (end - entry) // 4 > OPTNONE_INSNS and entry not in hle
+    all_labels = 'all' in tables.values()  # (an unproven table: the all-instruction fallback)
+    huge = all_labels and (end - entry) // 4 > OPTNONE_INSNS and entry not in hle
     attr = '__attribute__((optnone, noinline)) ' if huge else ''
     if huge:
         m.stats['optnone'] += 1
@@ -90,10 +91,8 @@ def emit_function(m, game, entry, end, labels, tables, hle):
         refs.add(t)
         return f'__attribute__((musttail)) return {fname(t)}(c);'
 
-    # Functions with jump tables also get the all-instruction fallback: a table whose emulation
-    # missed some cases then still reaches the right instruction instead of aborting.
-    all_labels = bool(tables)
     if all_labels:
+        m.stats['fallback_functions'] += 1
         labels = set(range(entry, end, 4))
     variants = game.variants if m.name == 'main' else {}  # (the game's variant sites are main-module offsets)
     rando_here = [a for a in range(entry, end, 4) if a - m.base in variants]
@@ -161,9 +160,14 @@ def emit_function(m, game, entry, end, labels, tables, hle):
                 out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
                 continue
             if jt:
+                # (a proven table: its index is bounds-checked before the br, so the default can't happen; if it does,
+                # rt_dispatch says which address had no function)
                 cases = ' '.join(f'case {hx(t)}: {jump(t)}' for t in jt)
                 out.append(f'    switch ({ins.target}) {{ {cases} default: break; }}')
-                out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
+                if all_labels:
+                    out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
+                else:
+                    out.append(f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
                 continue
             out.append(f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
         elif k == 'ret':

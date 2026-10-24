@@ -5,7 +5,8 @@ to boot, draw and look like a proper app. Everything else is either opt-in (extr
 outside the library.
 
 **Status (branch `macos-core`):** A1 done (the other backends removed); B0's build profile done; B1 done (the
-generator split into stages, byte-identical output). Everything else is still planned. File paths are `master`'s.
+generator split into stages, byte-identical output); B2 done for LAS and EoW (EoW's compile timing pending).
+Everything else is still planned. File paths are `master`'s.
 
 **Left over from A1:** the shader translator still has its GLSL output path and Vulkan-only parts (GMEM chunk bindings
 in `maxwell/shader.h`; `tools/test_translate.sh`'s GLSL mode), and the upscaler setting still lists FSR 1 and NIS,
@@ -261,6 +262,36 @@ That makes every improvement measurable per game.
 - **Not verified:** `tools/test_lift.py` can't run. Its C harness (`tools/test_harness.c`) is missing on `master`
   too, an older breakage. B4 rebuilds that test.
 
+### B2 result (2026-10-24)
+
+- **How a table is proven:** a table is emulated twice, with every register other than the index holding different
+  values. If both runs give the same targets, the targets depend only on the index and the module's own data, and
+  the table counts as proven.
+- **What a proven table becomes:** a plain `switch` over its targets; its default (which the bounds check rules
+  out) goes to `rt_dispatch`, which names the address if a case was ever missed. Only a `br` that isn't a proven table
+  makes its function take the all-instruction fallback. `optnone` applies only to those.
+- **Proof failures:** few. Between 0 and 6 tables per module failed the second run; they keep the fallback.
+
+| Game | Functions with the fallback | Compiled unoptimised | Game library |
+|---|---|---|---|
+| LAS | 817 → **107** | 6 → 1 | 91 → 80 MB |
+| Sky | 2,324 → **341** | 95 → 24 | (not built) |
+| EoW | 2,304 → **413** | 43 → 18 | 220 → 195 MB |
+| Tunic | 2,183 → **316** | 30 → 11 | (not built) |
+| Dread | 1,071 → **143** | 9 → 1 | (not built) |
+
+- **LAS compile** (back to back, same conditions, source on the portable SSD): **wall-clock 210 → 141 s, CPU 1,651 →
+  1,101 s: −33% both.** B0's estimate was an upper bound of −40%. The slowest file is now 39 s (was 47 s), and after
+  the top two the files drop to 18 s and below.
+- **EoW compile:** not timed yet. The run was stopped to build the libraries for play-testing.
+- **Play-tested:**
+  - **LAS:** gets into gameplay (Tarin's house) with no faults.
+  - **EoW:** plays. Its occasional freezes (every guest thread waiting on a condition variable) were there before B2
+    too.
+  - **Sky, Tunic, Dread:** generated only, not built or run.
+- **Found while testing (fixed separately):** the start screen waited forever on shader preparation for games set up
+  from a package (no `romfs/` folder). Older than B2, and on `master` too.
+
 ### Steps
 
 Each step keeps the games working. The library's id covers the recompiler (see ARCHITECTURE.md), so each step that
@@ -270,7 +301,7 @@ changes the output makes players rebuild once. Bundle those steps into as few re
 |---|---|---|---|
 | **B0. Baseline** ✅ build side done (above); run-time benchmark pending | Profile a full LAS build: time per compile unit, the slowest functions, how many go through the fallback; a run-time benchmark (fixed scene, frame time) | Numbers recorded in this doc | No |
 | **B1. Restructure** ✅ | Split into the stages above, **with byte-identical C output** for LAS, Sky, EoW, Tunic and Dread (`--simd asm`, no shift). Drop `--simd c` and `--shift` here: they don't change the output of an Apple Silicon build | `diff` of the generated C against today's | The library id changes (new files are hashed), but the C is identical, so the app's build cache reuses every object: a relink, not a rebuild |
-| **B2. Jump tables** | Real table recovery; the fallback only where unproven | Report: fallback functions down; games boot and play their known scenes; build time vs B0 | Yes |
+| **B2. Jump tables** ✅ (LAS, EoW) | Real table recovery; the fallback only where unproven | Report: fallback functions down; games boot and play their known scenes; build time vs B0 | Yes |
 | **B3. Incremental builds** | Builds on the existing build cache: **stable file assignment** (by address range, not packing order), so a changed function rebuilds only its own file; an option to drop the kept objects (1.8 GB) after a successful build | A one-instruction lifter change rebuilds only the affected files | Once (new layout) |
 | **B4. Differential testing** | Each lifted instruction run against the Mac's own ARM64 CPU, with random inputs; extends `test_lift.py` | Runs in CI; every mismatch is a bug found before a game shows it | No |
 | **B5. Faster dispatch** | Calls between modules resolved ahead of time (imports are known after relocation), inline caches at indirect call sites | Run-time benchmark vs B0 | Yes |

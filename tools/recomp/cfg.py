@@ -2,7 +2,9 @@
 indirect jumps have to fall back to "any instruction of the function" (the all-instruction fallback, emit.py).
 
 Jump tables are resolved by running the code that computes the target in unicorn, once per index value, from the
-bounds check (cmp + b.hi / b.ls) that guards it.
+bounds check (cmp + b.hi / b.ls) that guards it. A table is **proven** when a second run, with every other register
+holding a different value, gives the same targets: then they depend on the index and the module's own data only. A
+proven table's function needs no fallback; one that isn't proven gets it (emit.py).
 """
 import bisect
 import re
@@ -14,6 +16,8 @@ from analyze import eh_frame_functions
 from lifter import bits, sext
 
 SCRATCH_MEM = 0x7300000000
+# what the registers other than the index hold during the two runs (pointers into the scratch memory)
+FILLS = (SCRATCH_MEM + 0x80000, SCRATCH_MEM + 0x40000)
 
 
 def emu(m):
@@ -44,10 +48,15 @@ def jump_table(m, br_pc, entry, end):
     compiler's function (.eh_frame) holding the br is accepted; scan() makes those targets boundaries."""
     tlo, thi = true_function(m, br_pc)
     m._vlo, m._vhi = min(entry, tlo), max(end, thi)
-    r = _jump_table_fallthrough(m, br_pc, entry, end)
-    if r is None:
-        r = _jump_table_taken(m, br_pc, entry, end)
-    return r
+    for form in (_jump_table_fallthrough, _jump_table_taken):
+        r = form(m, br_pc, entry, end, FILLS[0])
+        if r is None:
+            continue
+        if form(m, br_pc, entry, end, FILLS[1]) != r:  # (the targets depend on something other than the index)
+            m.stats['tables_unproven'] += 1
+            continue
+        return r
+    return None
 
 
 def _index_regs(m, start, at, idx):
@@ -83,7 +92,7 @@ def _set_index(mu, regs, i):
         mu.reg_write(A.UC_ARM64_REG_X0 + r if r < 29 else A.UC_ARM64_REG_X29, i)
 
 
-def _emulate_table(m, br_pc, entry, end, start, idx, count, set_at):
+def _emulate_table(m, br_pc, entry, end, start, idx, count, set_at, fill):
     """Run start..br for each index value (set at address set_at), collect targets."""
     mu = emu(m)
     rn = bits(m.word(br_pc), 5, 5)
@@ -101,8 +110,8 @@ def _emulate_table(m, br_pc, entry, end, start, idx, count, set_at):
     try:
         for i in range(count):
             for r in range(29):
-                mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
-            mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
+                mu.reg_write(A.UC_ARM64_REG_X0 + r, fill)
+            mu.reg_write(A.UC_ARM64_REG_SP, fill)
             a2 = m._vlo
             while a2 < start:
                 w2 = m.word(a2)
@@ -124,7 +133,7 @@ def _emulate_table(m, br_pc, entry, end, start, idx, count, set_at):
     return sorted(set(targets))
 
 
-def _jump_table_taken(m, br_pc, entry, end):
+def _jump_table_taken(m, br_pc, entry, end, fill):
     """Form: cmp idx, #N ; b.ls/b.lo table ... table: <address math> ; br"""
     # start of the block holding the br
     s = br_pc
@@ -144,11 +153,11 @@ def _jump_table_taken(m, br_pc, entry, end):
         count = limit + 1 if bits(w, 0, 4) == 9 else limit
         if count <= 0 or count > 4096:
             continue
-        return _emulate_table(m, br_pc, entry, end, s, bits(cw, 5, 5), count, s)
+        return _emulate_table(m, br_pc, entry, end, s, bits(cw, 5, 5), count, s, fill)
     return None
 
 
-def _jump_table_fallthrough(m, br_pc, entry, end):
+def _jump_table_fallthrough(m, br_pc, entry, end, fill):
     rn = bits(m.word(br_pc), 5, 5)
     # find the guarding b.hi / b.hs and its cmp, scanning backwards
     a = br_pc - 4
@@ -204,8 +213,8 @@ def _jump_table_fallthrough(m, br_pc, entry, end):
     try:
         for i in range(count):
             for r in range(29):
-                mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
-            mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
+                mu.reg_write(A.UC_ARM64_REG_X0 + r, fill)
+            mu.reg_write(A.UC_ARM64_REG_SP, fill)
             # replay address materialization (ADRP/ADR/ADD-imm) from the function entry, so table
             # bases computed before loops or branches are known
             a2 = m._vlo
@@ -262,7 +271,7 @@ def jump_table_base(m, adr_pc, target):
 
 def scan(m, entry, end):
     """Labels, external entries and jump tables of the function entry..end: (labels, ext, tables). tables maps a br's
-    address to its sorted targets, or to 'all' (unresolved: the all-instruction fallback)."""
+    address to its sorted targets (a proven table), or to 'all' (unresolved: the all-instruction fallback)."""
     labels, ext, tables = {entry}, set(), {}
     terminated = False
     for a in range(entry, end, 4):
