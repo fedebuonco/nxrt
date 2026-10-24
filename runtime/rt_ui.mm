@@ -672,6 +672,10 @@ extern "C" void nxui_shader_prep_run(void) {
 }
 static void *prep_thread(void *) {
     nxui_shader_prep_run();
+    // (busy was set before this thread started: clear it however the run ended - it returns early with nothing to do,
+    // e.g. game files read from their package, with no romfs/ folder - or the start screen waits on it forever)
+    g_prep_frac.store(-1.f);
+    g_prep_busy.store(false);
     return NULL;
 }
 extern "C" void nxui_shader_prep_start(void) {
