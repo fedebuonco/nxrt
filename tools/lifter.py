@@ -718,7 +718,15 @@ def cond_expr(cond):
 
 
 def emit_asm_batch(batch):
-    """Emit one inline-asm block for a run of FP/SIMD instructions."""
+    """Emit one inline-asm block for a run of FP/SIMD instructions.
+
+    A run without loads or stores names exactly the Cpu fields it reads and writes as memory operands ("+Q"): clang then
+    keeps every other guest register it holds in a host register across the block (B6). A run that loads or stores guest
+    memory can't say where, so it keeps the "memory" clobber (and addresses the Cpu fields through %0), as before."""
+    if not any(is_ldst(a.word) for a in batch):
+        out = _asm_batch_operands(batch)
+        if out:
+            return out
     vregs = set()
     gmap = {}
     flags = False
@@ -766,3 +774,84 @@ def emit_asm_batch(batch):
     clob += ['"cc"', '"memory"']
     body = '\\n\\t'.join(lines)
     return f'__asm__ volatile("{body}" :: {", ".join(ins)} : {", ".join(clob)});'
+
+
+REG_OPERAND_VREGS = 12
+MEM_OPERAND_FIELDS = 16  # (more: the clobbering form - LAS had 22- and 24-field runs that couldn't be allocated)  # (each guest V register needs its operand register and its fixed one: 32 in all)
+
+
+def _asm_batch_operands(batch):
+    """emit_asm_batch for a run without memory accesses, nothing clobbered but the host registers it uses. The guest
+    registers it uses are register operands ("+r" for x / sp / nzcv, "+w" for v), moved into the fixed host registers
+    the instruction words name, so clang can keep guest registers in host registers across the block. A run with more V
+    registers than that leaves room for names its Cpu fields as memory operands ("+Q") instead. None if the run needs
+    more operands than an asm statement takes (the caller then emits the clobbering form)."""
+    vregs, gmap, consts, words, flags = set(), {}, [], [], False
+    for a in batch:
+        vregs |= a.vregs
+        flags |= a.flags
+        w = a.word
+        for pos, g in a.gprs:
+            if g not in gmap:
+                if len(gmap) + len(consts) >= len(SCRATCH):
+                    raise Unsupported('scratch exhausted')
+                gmap[g] = SCRATCH[len(gmap) + len(consts)]
+            w = (w & ~(31 << pos)) | (gmap[g] << pos)
+        for pos, val in a.consts:
+            s = SCRATCH[len(gmap) + len(consts)]
+            consts.append((s, val))
+            w = (w & ~(31 << pos)) | (s << pos)
+        words.append(w)
+    gfield = {g: ('c->sp' if g == 'sp' else f'c->x[{g}]') for g in gmap}
+    if len(vregs) > REG_OPERAND_VREGS:
+        return _asm_batch_memory_operands(gmap, gfield, consts, words, vregs, flags)
+    outs = [f'"+r"({gfield[g]})' for g in gmap] + [f'"+w"(c->v[{v}])' for v in sorted(vregs)]
+    if flags:
+        outs.append('"+r"(c->nzcv)')
+    if len(outs) + len(consts) > 30:
+        return None
+    gop = {g: i for i, g in enumerate(gmap)}
+    vop = {v: len(gmap) + i for i, v in enumerate(sorted(vregs))}
+    fop = len(gmap) + len(vregs)
+    ins = [f'"r"({hx(val)})' for _, val in consts]
+    lines = [f'mov x{s}, %{gop[g]}' for g, s in gmap.items()]
+    lines += [f'mov x{s}, %{len(outs) + i}' for i, (s, val) in enumerate(consts)]
+    lines += [f'mov v{v}.16b, %{vop[v]}.16b' for v in sorted(vregs)]
+    if flags:
+        lines.append(f'msr nzcv, %{fop}')
+    lines += [f'.inst 0x{x:08x}' for x in words]
+    if flags:
+        lines.append(f'mrs %{fop}, nzcv')
+    lines += [f'mov %{vop[v]}.16b, v{v}.16b' for v in sorted(vregs)]
+    lines += [f'mov %{gop[g]}, x{s}' for g, s in gmap.items()]
+    clob = [f'"v{v}"' for v in sorted(vregs)]
+    clob += [f'"x{s}"' for s in sorted(set(gmap.values()) | {s for s, _ in consts})]
+    clob += ['"cc"']
+    body = '\\n\\t'.join(lines)
+    return f'__asm__ volatile("{body}" : {", ".join(outs)} : {", ".join(ins)} : {", ".join(clob)});'
+
+
+def _asm_batch_memory_operands(gmap, gfield, consts, words, vregs, flags):
+    """A run without memory accesses that uses too many V registers for register operands: its Cpu fields as memory
+    operands ("+Q"). clang stores those fields before the block and reloads them after, but no others."""
+    fields = [gfield[g] for g in gmap] + [f'c->v[{v}]' for v in sorted(vregs)] + (['c->nzcv'] if flags else [])
+    if len(fields) + len(consts) > MEM_OPERAND_FIELDS:  # (each "+Q" operand takes an address register)
+        return None
+    op = {f: i for i, f in enumerate(fields)}
+    outs = [f'"+Q"({f})' for f in fields]
+    ins = [f'"r"({hx(val)})' for _, val in consts]
+    lines = [f'ldr x{s}, %{op[gfield[g]]}' for g, s in gmap.items()]
+    lines += [f'mov x{s}, %{len(fields) + i}' for i, (s, val) in enumerate(consts)]
+    lines += [f'ldr q{v}, %{op[f"c->v[{v}]"]}' for v in sorted(vregs)]
+    if flags:
+        lines += [f'ldr x16, %{op["c->nzcv"]}', 'msr nzcv, x16']
+    lines += [f'.inst 0x{x:08x}' for x in words]
+    if flags:
+        lines += ['mrs x16, nzcv', f'str x16, %{op["c->nzcv"]}']
+    lines += [f'str q{v}, %{op[f"c->v[{v}]"]}' for v in sorted(vregs)]
+    lines += [f'str x{s}, %{op[gfield[g]]}' for g, s in gmap.items()]
+    clob = [f'"v{v}"' for v in sorted(vregs)]
+    clob += [f'"x{s}"' for s in sorted(set(gmap.values()) | {s for s, _ in consts} | ({16} if flags else set()))]
+    clob += ['"cc"']
+    body = '\\n\\t'.join(lines)
+    return f'__asm__ volatile("{body}" : {", ".join(outs)} : {", ".join(ins)} : {", ".join(clob)});'
