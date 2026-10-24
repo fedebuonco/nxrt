@@ -126,12 +126,7 @@ static void *update_thread(void *) {
             p = c ? c + 1 : p + strlen(p);
         }
     } else {
-#ifdef _WIN32
-        const char *sr = getenv("SystemRoot");
-        std::string curl = std::string(sr ? sr : "C:\\Windows") + "\\System32\\curl.exe";
-#else
         std::string curl = "/usr/bin/curl";
-#endif
         std::string out = std::string(rt_data_root()) + "/cache/releases.json";
         mkdir((std::string(rt_data_root()) + "/cache").c_str(), 0755);
         if (!RELEASES_URL) return NULL;  // (the game has no release list)

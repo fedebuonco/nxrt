@@ -5,16 +5,8 @@
 #include "hle.h"
 #include "ipc.h"
 
-#ifdef __APPLE__
 extern const ServiceDef __start_services[] __asm__("section$start$__DATA$__services");
 extern const ServiceDef __stop_services[] __asm__("section$end$__DATA$__services");
-#elif defined(__linux__)
-extern const ServiceDef __start_services[], __stop_services[];  // (ELF: defined by the linker)
-#else
-// PE/COFF: .svc$a < .svc$m (entries, ipc.h) < .svc$z (the linker sorts by the text after '$')
-__attribute__((section(".svc$a"), used)) static const ServiceDef __start_services[1];
-__attribute__((section(".svc$z"), used)) static const ServiceDef __stop_services[1];
-#endif
 
 static void stub_handler(Service *s, IpcReq *req, IpcResp *resp) {
     LOG("[ipc] STUB %s cmd %u (in %u bytes, x%d a%d b%d c%d) -> ok\n", s->name, req->cmd, req->data_size, req->nx,

@@ -67,11 +67,7 @@ static KThread *g_syncwaiters;
 static KThread *g_main_thread;  // (g_klock) the boot's main thread: the hang watch reads its wait
 
 static void wake(KThread *t) {
-#ifdef _WIN32
-    plat_waiter_signal(t->precise_waiter);
-#else
     pthread_cond_signal(&t->cond);
-#endif
 }
 
 void kernel_signal(KObject *o) {
@@ -108,23 +104,6 @@ static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
     pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
     uint64_t t0 = plat_now_ns();
     bool r = true;
-#ifdef _WIN32
-    if (t_cur) {
-        int64_t remaining = -1;
-        if (timeout_ns >= 0) {
-            struct timespec now;
-            clock_gettime(CLOCK_REALTIME, &now);
-            remaining = (ts->tv_sec - now.tv_sec) * 1000000000ll + ts->tv_nsec - now.tv_nsec;
-            if (remaining < 0) remaining = 0;
-        }
-        // winpthreads timed waits can round 3 ms to 15.6 ms for an occluded
-        // Windows process. Wait on a signal and a high-resolution timer instead.
-        plat_waiter_reset(t_cur->precise_waiter);
-        pthread_mutex_unlock(&g_klock);
-        r = plat_waiter_wait(t_cur->precise_waiter, remaining);
-        pthread_mutex_lock(&g_klock);
-    } else
-#endif
     if (timeout_ns < 0) pthread_cond_wait(cv, &g_klock);
     else r = pthread_cond_timedwait(cv, &g_klock, ts) == 0;
     g_blocked_ns += plat_now_ns() - t0;
@@ -240,10 +219,6 @@ static void *thread_main(void *arg) {
 static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int prio, int core) {
     KThread *t = calloc(1, sizeof *t);
     pthread_cond_init(&t->cond, NULL);
-#ifdef _WIN32
-    t->precise_waiter = plat_waiter_create();
-    if (!t->precise_waiter) FATAL("cannot create guest thread waiter\n");
-#endif
     t->obj.type = KOBJ_THREAD;
     t->entry = entry;
     t->prio = prio;
@@ -999,9 +974,6 @@ void kernel_reset(void) {
     for (KThread *t = g_threads, *next; t; t = next) {
         next = t->anext;
         pthread_cond_destroy(&t->cond);
-#ifdef _WIN32
-        plat_waiter_destroy(t->precise_waiter);
-#endif
         free(t);
     }
     g_threads = NULL;

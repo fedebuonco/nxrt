@@ -27,16 +27,8 @@ static int override_count;
 
 // Host implementations registered by name (runtime/hle/*.c fill this via HLE_FUNC)
 typedef struct { const char *name; HostFn fn; } HleImpl;
-#ifdef __APPLE__
 extern const HleImpl __start_hle_impls[] __asm__("section$start$__DATA$__hle_impls");
 extern const HleImpl __stop_hle_impls[] __asm__("section$end$__DATA$__hle_impls");
-#elif defined(__linux__)
-extern const HleImpl __start_hle_impls[], __stop_hle_impls[];  // (ELF: defined by the linker)
-#else
-// PE/COFF: the linker sorts .hle$a < .hle$m (entries, hle.h) < .hle$z by the text after '$'.
-__attribute__((section(".hle$a"), used)) static const HleImpl __start_hle_impls[1];
-__attribute__((section(".hle$z"), used)) static const HleImpl __stop_hle_impls[1];
-#endif
 
 HostFn hle_lookup_impl(const char *name) {
     const char *skip = getenv("NXRT_HLE_SKIP");  // debugging: disable HLE for names containing this

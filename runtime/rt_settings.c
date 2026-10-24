@@ -30,7 +30,6 @@ Settings g_settings = {
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .frame_rate = 60,
     .hd_textures = true,
-    .reshade = true,
     .livesplit_host = "localhost",
     .livesplit_port = 16834,
 };
@@ -82,15 +81,6 @@ static const char *language_for_locale(const char *locale) {
 // LANG_AUTO: the host's own language - Linux: $LC_ALL / $LC_MESSAGES / $LANG; else (and when those are unset) the
 // system's preferred languages (SDL) - en-US when it is none of the game's.
 static const char *host_language(void) {
-#ifdef __linux__
-    const char *e = getenv("LC_ALL");
-    if (!e || !*e) e = getenv("LC_MESSAGES");
-    if (!e || !*e) e = getenv("LANG");
-    if (e && *e && strcmp(e, "C") && strcmp(e, "POSIX")) {
-        const char *code = language_for_locale(e);
-        return code ? code : "en-US";
-    }
-#endif
     int count = 0;
     SDL_Locale **locales = SDL_GetPreferredLocales(&count);
     const char *code = NULL;
@@ -148,7 +138,6 @@ static bool rt_key(const char *key, const char *val) {
         g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : !strcmp(val, "nis") ? UPSCALE_NIS : UPSCALE_SHARP;
     else if (!strcmp(key, "frame_rate")) g_settings.frame_rate = atoi(val) == 120 ? 120 : 60;
     else if (!strcmp(key, "hd_textures")) g_settings.hd_textures = atoi(val) != 0;
-    else if (!strcmp(key, "reshade")) g_settings.reshade = atoi(val) != 0;
     else if (!strcmp(key, "disabled_mods") || !strcmp(key, "mod_order")) mods_settings_load(key, val);
     else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;  // ("fxaa": SMAA now)
     else if (!strcmp(key, "language")) {  // ("auto" or one of the game's codes; anything else: auto)
@@ -181,7 +170,7 @@ static void rt_write(FILE *f) {
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" :
                                    g_settings.upscaler == UPSCALE_NIS ? "nis" : "bilinear");
-    fprintf(f, "frame_rate = %d\nhd_textures = %d\nreshade = %d\n", g_settings.frame_rate, g_settings.hd_textures, g_settings.reshade);
+    fprintf(f, "frame_rate = %d\nhd_textures = %d\n", g_settings.frame_rate, g_settings.hd_textures);
     mods_settings_save(f);
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");

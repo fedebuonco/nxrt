@@ -10,7 +10,6 @@ named here. Nothing in this repository includes Nintendo game code, fonts or key
 | Dear ImGui | [`third_party/imgui`](third_party/imgui) | MIT — [`LICENSE.txt`](third_party/imgui/LICENSE.txt), © 2014–2025 Omar Cornut |
 | SMAA | [`third_party/smaa`](third_party/smaa) | MIT — [`LICENSE.txt`](third_party/smaa/LICENSE.txt), © 2013 Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez |
 | xxHash | [`third_party/xxhash`](third_party/xxhash) | BSD 2-Clause — [`LICENSE`](third_party/xxhash/LICENSE), © 2012–2021 Yann Collet |
-| ReShade headers | [`third_party/reshade`](third_party/reshade) | BSD 3-Clause — [`LICENSE`](third_party/reshade/LICENSE), © 2014 Patrick Mours |
 | Baloo 2 font | [`third_party/fonts/Baloo2`](third_party/fonts/Baloo2) | SIL Open Font License 1.1 — [`OFL.txt`](third_party/fonts/Baloo2/OFL.txt), © 2019 The Baloo 2 Project Authors |
 
 ## Build and runtime dependencies

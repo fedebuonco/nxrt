@@ -8,9 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#ifndef _WIN32
 #include <signal.h>
-#endif
 
 #include "gamelib.h"
 #include "nxgame.h"
@@ -30,11 +28,7 @@
 #define GAMELIB_BASE_ID "dev"
 #endif
 
-#ifdef _WIN32
-#define SEP "\\"
-#else
 #define SEP "/"
-#endif
 
 // ------------------------------------------------------------------ child processes
 // Every one running, so that quitting mid-build ends them too (atexit) instead of leaving compilers behind.
@@ -109,10 +103,6 @@ typedef struct {
     char cc[1100];                     // compiler: zig (as `zig cc`), or NXRT_CC / clang
     bool zig;
     char inc[1100], entry[1100], hle[1100];  // headers the game code includes, tools/gamelib_entry.c, HLE names
-#ifdef _WIN32
-    char implib[1100];  // the .exe's import library (the runtime functions the game code calls)
-    char zig_rt[1100];  // the release's zig: its runtime built ahead of time (zig/rt, tools/zig_slim.sh), "" = none
-#endif
 } Tools;
 
 static char g_tools_why[256];  // what find_tools could not find (the setup shows it)
@@ -133,19 +123,13 @@ static bool find_tools(Tools *t) {
     e = getenv("NXRT_CC");
     if (e && *e) snprintf(t->cc, sizeof t->cc, "%s", e);
     else if (rt_resource("zig" SEP "zig" PLAT_EXE_SUFFIX, NULL, t->cc, sizeof t->cc)) t->zig = true;
-#ifndef _WIN32
     // (a source checkout, a packaged app, or a player without zig: the system compiler is enough)
     else if (file_exists("/usr/bin/clang")) snprintf(t->cc, sizeof t->cc, "/usr/bin/clang");
     else if (file_exists("/usr/local/bin/clang")) snprintf(t->cc, sizeof t->cc, "/usr/local/bin/clang");
     else if (file_exists("/usr/bin/cc")) snprintf(t->cc, sizeof t->cc, "/usr/bin/cc");
-#endif
     else {
         snprintf(g_tools_why, sizeof g_tools_why,
-#ifdef __APPLE__
                  "no C compiler was found: install the Xcode command line tools (xcode-select --install), or set NXRT_CC");
-#else
-                 "no C compiler was found: set NXRT_CC to one (the game code is compiled on this machine)");
-#endif
         return false;
     }
     if (!rt_resource("gamelib-src" SEP "cpu.h", NXRT_DEV "runtime/cpu.h", t->inc, sizeof t->inc) ||
@@ -155,16 +139,6 @@ static bool find_tools(Tools *t) {
     char *s = strrchr(t->inc, '/'), *b = strrchr(t->inc, '\\');
     if (b > s) s = b;
     if (s) *s = 0;
-#ifdef _WIN32
-    if (!rt_resource("lasrecomp.dll.a", "build/lasrecomp.dll.a", t->implib, sizeof t->implib)) return false;
-    t->zig_rt[0] = 0;
-    if (t->zig && rt_resource("zig" SEP "rt" SEP "link.rsp", NULL, t->zig_rt, sizeof t->zig_rt)) {
-        char *s = strrchr(t->zig_rt, '/'), *b = strrchr(t->zig_rt, '\\');
-        if (b > s) s = b;
-        if (s) *s = 0;
-        else t->zig_rt[0] = 0;
-    }
-#endif
     return true;
 }
 
@@ -175,13 +149,7 @@ bool gamebuild_available(void) {
 
 // zig cc on Linux: an explicit target, so it uses its own glibc headers and stubs instead of looking for the system's
 // (SteamOS and other systems without development packages have none: "failed to find libc installation", #181)
-#if defined(__linux__) && defined(__x86_64__)
-#define ZIG_TARGET "x86_64-linux-gnu"
-#elif defined(__linux__) && defined(__aarch64__)
-#define ZIG_TARGET "aarch64-linux-gnu"
-#else
 #define ZIG_TARGET ""
-#endif
 
 static void compiler(Args *a, const Tools *t) {
     add(a, t->cc);
@@ -242,7 +210,6 @@ static bool g_killed;
 static void helper_failed(const char *what, int r, const char *log, char *why, size_t why_size) {
     char last[300], how[120] = "";
     log_tail(log, last, sizeof last);
-#ifndef _WIN32
     if (r > PLAT_PROC_SIGNALED) {
         int sig = r - PLAT_PROC_SIGNALED;
         if (sig == SIGKILL) {
@@ -254,7 +221,6 @@ static void helper_failed(const char *what, int r, const char *log, char *why, s
         }
         g_killed = true;
     } else
-#endif
     if (!last[0]) {
         snprintf(how, sizeof how, "exit status %d", r);
     }
@@ -352,14 +318,14 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     char work[1100], tmp[1100];
     snprintf(work, sizeof work, "%s" SEP ".gamebuild", game_dir);
     snprintf(tmp, sizeof tmp, "%s" SEP "%s.tmp", work, nx_gamelib_name());
-    char input_paths[6][1100], spec[4096];
+    char input_paths[4][1100], spec[4096];
     snprintf(input_paths[0], sizeof input_paths[0], "%s" SEP "exefs" SEP "main", game_dir);
     snprintf(input_paths[1], sizeof input_paths[1], "%s" SEP "exefs" SEP "sdk", game_dir);
-    const char *headers[] = {"cpu.h", "simd.h", "simd_fp.h", "gamelib.h"};
-    for (int i = 0; i < 4; ++i) snprintf(input_paths[i+2], sizeof input_paths[i+2], "%s" SEP "%s", t.inc, headers[i]);
+    const char *headers[] = {"cpu.h", "gamelib.h"};
+    for (int i = 0; i < 2; ++i) snprintf(input_paths[i+2], sizeof input_paths[i+2], "%s" SEP "%s", t.inc, headers[i]);
     // Generator changes should rebuild only chunks whose C changed, as in the existing incremental builder.
     // Compiler/header/flag changes invalidate every object; entry always rebuilds because it embeds the library id.
-    const char *inputs[] = {input_paths[2], input_paths[3], input_paths[4], input_paths[5], t.cc};
+    const char *inputs[] = {input_paths[2], input_paths[3], t.cc};
     // The compiler's contents identify it, so relocating the app does not discard reusable objects.
     char layout[512] = "", genspec[640];  // the game's modules and where each is mapped (below, the generators too)
     for (int i = 0; i < nx_module_count() && i < NX_MAX_MODULES; i++) {
@@ -374,7 +340,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
              t.zig ? ZIG_TARGET : "");  // before it are rebuilt once)  NOLINT(bugprone-branch-clone)
     if (o->progress) o->progress(0, "Checking completed build files...");
     bool resuming = build_cache_resumable(game_dir);  // (a cancelled or interrupted build; read before open marks this one)
-    BuildCache *cache = build_cache_open(game_dir, spec, inputs, 5, why, why_size);
+    BuildCache *cache = build_cache_open(game_dir, spec, inputs, sizeof inputs / sizeof *inputs, why, why_size);
     if (!cache) return false;
     // an update keeps the last good build's objects (open drops them when compiler, headers or flags changed)
     bool update = false;
@@ -399,13 +365,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     if (t.zig) {  // keep its caches with this installation; the explicit Clear action removes them too
         char zc[1200];
         snprintf(zc, sizeof zc, "%s" SEP "zig-cache", work);
-#ifdef _WIN32
-        _putenv_s("ZIG_GLOBAL_CACHE_DIR", zc);
-        _putenv_s("ZIG_LOCAL_CACHE_DIR", zc);
-#else
         setenv("ZIG_GLOBAL_CACHE_DIR", zc, 1);
         setenv("ZIG_LOCAL_CACHE_DIR", zc, 1);
-#endif
     }
     LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
         t.cc, t.zig ? " cc" : "", o->jobs);
@@ -570,30 +531,12 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         Args a = {0};
         char at[1200];
         snprintf(at, sizeof at, "@%s", rsp);
-#ifdef _WIN32
-        if (t.zig_rt[0]) {  // the linker itself, with the runtime built ahead of time (its flags and libraries: link.rsp)
-            char opt[1200];
-            add(&a, t.cc);
-            add(&a, "lld-link");
-            snprintf(opt, sizeof opt, "@%s" SEP "link.rsp", t.zig_rt);
-            add(&a, opt);
-            snprintf(opt, sizeof opt, "-LIBPATH:%s", t.zig_rt);
-            add(&a, opt);
-            snprintf(opt, sizeof opt, "-OUT:%s", tmp);
-            add(&a, opt);
-            add(&a, at);
-            add(&a, t.implib);
-        } else
-#endif
         {
             compiler(&a, &t);
             add_split(&a, GAMELIB_SHARED);
             add(&a, "-o");
             add(&a, tmp);
             add(&a, at);
-#ifdef _WIN32
-            add(&a, t.implib);
-#endif
         }
         PlatProc p = f ? spawn(a.v, log) : 0;
         args_free(&a);

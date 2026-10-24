@@ -316,7 +316,7 @@ static id<MTLCommandBuffer> cb_hist[CB_HIST];
 // couldn't hold 60 kept the game in its 60 fps mode - slow motion at 30. Now the command buffer is split at each
 // counter (Apple GPUs have no timestamps inside a buffer), and once that's done the counter gets the GPU's time
 // there: the end of the buffer before it, or the start of the one after it if the GPU sat idle in between. Until
-// then the host clock (the game waits on its fence before reading them; resolved after each wait). As vulkan/exec.c.
+// then the host clock (the game waits on its fence before reading them; resolved after each wait).
 // NXRT_MTL_COUNTER=cpu: the host clock only.
 #define CTR_MAX 64
 static struct { uint64_t *out; const uint64_t *start; uint64_t before, after; } ctr_pend[CTR_MAX];

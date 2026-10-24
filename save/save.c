@@ -10,10 +10,6 @@
 #include "nx_settings.h"
 #include "platform.h"
 
-#ifdef _WIN32
-#include <direct.h>
-#define mkdir(p, m) _mkdir(p)
-#endif
 
 static const char *(*g_profile_dir)(void);
 void nx_save_set_profile_dir(const char *(*dir)(void)) { g_profile_dir = dir; }

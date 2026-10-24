@@ -6,13 +6,6 @@
 // queued, and while LiveSplit isn't there tries again every few seconds without a word (one log line per change).
 // The game thread only appends to a small queue under a mutex; commands queued while not connected are dropped, and
 // a new connection is brought up to date from the run's state instead (run_timer_livesplit_sync).
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-typedef SOCKET sock_t;
-#define BAD_SOCK INVALID_SOCKET
-#define sock_close closesocket
-#else
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -24,7 +17,6 @@ typedef SOCKET sock_t;
 typedef int sock_t;
 #define BAD_SOCK (-1)
 #define sock_close close
-#endif
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,13 +74,8 @@ static void parse_host(const char *s, char *host, size_t hn, char *port, size_t 
 }
 
 static void set_nonblocking(sock_t s, bool on) {
-#ifdef _WIN32
-    u_long v = on;
-    ioctlsocket(s, FIONBIO, &v);
-#else
     int f = fcntl(s, F_GETFL, 0);
     fcntl(s, F_SETFL, on ? f | O_NONBLOCK : f & ~O_NONBLOCK);
-#endif
 }
 
 // a connection within ~2 s, or BAD_SOCK
@@ -124,13 +111,8 @@ static sock_t try_connect(const char *setting) {
 #ifdef SO_NOSIGPIPE
         setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, (const char *)&one, sizeof one);
 #endif
-#ifdef _WIN32
-        DWORD to = 2000;
-        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&to, sizeof to);
-#else
         struct timeval to = {2, 0};
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&to, sizeof to);
-#endif
         fd = s;
     }
     freeaddrinfo(res);
@@ -179,10 +161,6 @@ static void wait_s(int secs) {
 
 static void *thread_main(void *arg) {
     (void)arg;
-#ifdef _WIN32
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
     Conn c = {BAD_SOCK, false};
     char host[sizeof g_settings.livesplit_host] = "", setting[sizeof g_settings.livesplit_host] = "";
     bool told_down = false;

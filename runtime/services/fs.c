@@ -10,12 +10,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifdef _WIN32
-#include <io.h>
-#include <windows.h>
-#undef IN   // (windows.h's empty parameter markers; ipc.h defines its own)
-#undef OUT
-#endif
 
 #include <pthread.h>
 
@@ -720,23 +714,14 @@ static void sync_dir_of(const char *path) {
     char *slash = strrchr(d, '/');
     if (!slash) return;
     *slash = 0;
-#ifndef _WIN32
     int fd = open(d, O_RDONLY);
     if (fd >= 0) { fsync(fd); close(fd); }
-#endif
 }
 
 // the working copy over the file in one step (Windows' rename doesn't replace an existing file; with the UTF-8
 // code page the A function takes our paths as they are)
 static int replace_file(const char *from, const char *to) {
-#ifdef _WIN32
-    if (MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return 0;
-    LOG("[save] replace %s failed (Windows error %lu)\n", to, (unsigned long)GetLastError());
-    errno = EIO;
-    return -1;
-#else
     return rename(from, to);
-#endif
 }
 
 // in -> out from the start (errno set on failure)
@@ -771,18 +756,11 @@ static bool copy_file(const char *from, const char *to) {
 static int scratch_copy(const char *from) {
     int in = open(from, O_RDONLY);
     if (in < 0) return -1;
-#ifdef _WIN32
-    char dir[MAX_PATH], name[MAX_PATH];
-    int fd = -1;
-    if (GetTempPathA(sizeof dir, dir) && GetTempFileNameA(dir, "las", 0, name))
-        fd = _open(name, _O_RDWR | _O_BINARY | _O_TEMPORARY);
-#else
     char name[1100];
     const char *dir = getenv("TMPDIR");
     snprintf(name, sizeof name, "%s/nxrt-save-XXXXXX", dir && *dir ? dir : "/tmp");
     int fd = mkstemp(name);
     if (fd >= 0) unlink(name);
-#endif
     if (fd >= 0 && !copy_fd(in, fd)) { close(fd); fd = -1; }
     close(in);
     return fd;
@@ -1003,14 +981,7 @@ static void directory(Service *s, IpcReq *req, IpcResp *resp) {
         struct dirent *e;
         while (n < max && (e = readdir(d->d))) {
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-#ifdef _WIN32  // no d_type
-            char full[2048];
-            struct stat es;
-            snprintf(full, sizeof full, "%s/%s", d->path, e->d_name);
-            bool isdir = !stat(full, &es) && S_ISDIR(es.st_mode);
-#else
             bool isdir = e->d_type == DT_DIR;
-#endif
             if ((isdir && !(d->mode & 1)) || (!isdir && !(d->mode & 2))) continue;
             uint8_t *ent = out + n * 0x310;
             memset(ent, 0, 0x310);

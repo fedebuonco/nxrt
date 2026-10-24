@@ -1,17 +1,14 @@
 """Generate C for a whole NSO module.
 
-Usage: gen.py <name> <nso> <base> <outdir> [--game DIR] [--hle hle_symbols.txt] [--chunk N] [--simd asm|c] [--shift N]
+Usage: gen.py <name> <nso> <base> <outdir> [--game DIR] [--hle hle_symbols.txt] [--chunk N]
 
 --game: the game's tools folder (games/<id>/tools): its patches.py has the game's own code changes (see load_game).
 
---simd: FP/SIMD/CRC32 as AArch64 inline asm (default on arm64 hosts) or portable C (default elsewhere).
---shift: the module runs N below <base> (runtime/cpu.h GUEST_SHIFT, 0x6000000000 on Android); functions, labels and
-         patches (tools/patches.py) keep the names and addresses of the unshifted layout.
+FP/SIMD/CRC32 instructions are emitted as AArch64 inline asm: the generated code is for Apple Silicon.
 """
 import argparse
 import bisect
 import os
-import platform
 import re
 import struct
 import sys
@@ -36,15 +33,12 @@ def sext26(w):
     return v - 0x04000000 if v & 0x02000000 else v
 
 
-SHIFT = 0  # --shift
-
-
 def fname(a):
-    return f'f_{a + SHIFT:x}'
+    return f'f_{a:x}'
 
 
 def label(a):
-    return f'L_{a + SHIFT:x}'
+    return f'L_{a:x}'
 
 
 def sanitize(sym):
@@ -52,7 +46,7 @@ def sanitize(sym):
 
 
 class Module:
-    def __init__(self, name, path, base, simd='asm'):
+    def __init__(self, name, path, base):
         self.name = name
         self.nso = Nso(path)
         self.base = base
@@ -60,7 +54,7 @@ class Module:
         self.lo = base + n.text[0]
         self.hi = base + n.text[0] + n.text[1]
         self.words = struct.unpack(f'<{n.text[1] // 4}I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
-        self.lifter = Lifter(base, simd)
+        self.lifter = Lifter(base)
         self.cache = {}
         self.stats = Counter()
         self.mu = None
@@ -454,9 +448,9 @@ class Module:
                 out.append('    else { ' + ' '.join(self.render_single(ins, a, jump, refs)) + ' } }')
                 last = 'op'
                 continue
-            if a + SHIFT in PATCHES:  # hand-written replacement for one instruction (the game's patches.py)
+            if a in PATCHES:  # hand-written replacement for one instruction (the game's patches.py)
                 flush()
-                out.append('    ' + PATCHES[a + SHIFT](self, a + SHIFT))
+                out.append('    ' + PATCHES[a](self, a))
                 last = 'op'
                 continue
             k = ins.kind
@@ -559,16 +553,11 @@ def main():
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
     ap.add_argument('--limit', type=int, default=0)
-    ap.add_argument('--simd', choices=('asm', 'c'),
-                    default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
-    ap.add_argument('--shift', type=lambda s: int(s, 0), default=0)
     args = ap.parse_args()
     load_game(args.game)
-    global SHIFT
-    SHIFT = args.shift
 
     t0 = time.time()
-    m = Module(args.name, args.nso, args.base - SHIFT, args.simd)
+    m = Module(args.name, args.nso, args.base)
     starts = m.boundaries()
     hle = {}
     if args.hle and os.path.exists(args.hle):
@@ -666,7 +655,7 @@ def main():
             if n > args.big_fn:
                 break
         path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
-        text = ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
+        text = ['#include "cpu.h"\n']
         text += [f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs)]
         text += [f'void {sanitize(hle[a])}(Cpu *c);\n' for a in sorted(set(hle) & set(fns))]
         text += ['\n'.join(body), '\n']

@@ -28,7 +28,7 @@ Copyright (c) 2026 Apolinario-coder               SkyRecomp    https://github.co
 Copyright (c) 2026 the EoWRecomp contributors     EoWRecomp    https://github.com/Nycolazs/EoWRecomp
 ```
 
-**Bundled components.** Dear ImGui, SMAA, xxHash, the ReShade headers and the Baloo 2 font keep their own licenses;
+**Bundled components.** Dear ImGui, SMAA, xxHash and the Baloo 2 font keep their own licenses;
 [THIRD_PARTY.md](THIRD_PARTY.md) lists every one.
 
 **Nothing of Nintendo's, and no ownership claimed.** nxrt contains no game code, game data, artwork, fonts or decryption

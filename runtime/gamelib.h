@@ -12,11 +12,7 @@
 #include "cpu.h"
 
 // (its file name: nx_gamelib_name(), runtime/nxgame.h)
-#if defined(_WIN32)
-#define GAMELIB_EXPORT __declspec(dllexport)
-#else
 #define GAMELIB_EXPORT __attribute__((visibility("default")))
-#endif
 
 // GAMELIB_ID (-D, from the Makefile): a hash of the generator and the headers the game code is compiled against. A
 // library built with another one is rebuilt, not loaded. A library's own id (its .id file, GameLibTables.id) is

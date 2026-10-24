@@ -53,7 +53,7 @@ typedef struct {
 
 // A view naming a texture (pool entry, render target, clear, copy): one in another format is told to the backend before
 // the texture is used through it.
-void backend_texture_view_format(NvnTexture *tex, uint32_t format);  // (runtime/nvn/metal.m, vulkan/textures.c)
+void backend_texture_view_format(NvnTexture *tex, uint32_t format);  // (runtime/nvn/metal.m)
 static inline void nvn_texture_note_view(NvnTexture *t, const NvnTextureView *v) {
     if (t && v && (v->setmask & 4) && v->format != t->format) backend_texture_view_format(t, v->format);
 }

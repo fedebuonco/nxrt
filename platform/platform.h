@@ -1,24 +1,16 @@
 // Host OS layer: everything the runtime needs that differs between macOS and Windows.
-// nx-platform (the lowest layer): platform/macos.c, linux.c, windows.c (nxrt.mk picks one), app.c.
+// nx-platform (the lowest layer): platform/macos.c (the one platform there is; this header is where another would plug
+// in), app.c.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef _WIN32
-#include "win_compat.h"
-#elif defined(__linux__)
-#include "linux_compat.h"
-#endif
 
 // The calling thread is one of the frame's critical threads: on Windows, no power throttling (EcoQoS) for it and, on a
 // hybrid CPU, a preference for the performance cores. Elsewhere a no-op.
 enum { PLAT_PERF_GAME, PLAT_PERF_RENDER, PLAT_PERF_VSYNC };
-#ifdef _WIN32
-void plat_thread_perf_core(int role);
-#else
 static inline void plat_thread_perf_core(int role) { (void)role; }
-#endif
 void plat_thread_guest(int prio);      // a guest thread's host scheduling class from its Switch priority
 uint64_t plat_thread_cpu_ns(void);     // the calling thread's CPU time so far (user + system; diagnostics)
 
@@ -39,9 +31,6 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi);
 // reset for the range. Returns the count (max: maybe more), or -1 where there is no tracking (macOS, older Linux).
 // Page size: *page.
 int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page);
-#ifdef __linux__
-void plat_write_tracking_off(const char *why);  // tracking off from now on (unless NXRT_WRITE_TRACKING=1)
-#endif
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
 int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 #define PLAT_PAGE 0x4000ull  // largest page size we deal with (macOS 16K; multiple of Windows' 4K)
@@ -50,15 +39,6 @@ int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 uint64_t plat_now_ns(void);                // monotonic
 void plat_sleep_until_ns(uint64_t t);      // precise wait for plat_now_ns() >= t
 void plat_thread_realtime(uint64_t period_ns);  // periodic timing thread (vsync): don't coalesce its timers
-#ifdef _WIN32
-// One waiter per guest thread. Reset while holding the kernel lock, then unlock
-// before waiting; signalers hold that same lock, so a wake cannot be lost.
-void *plat_waiter_create(void);
-void plat_waiter_destroy(void *waiter);
-void plat_waiter_reset(void *waiter);
-void plat_waiter_signal(void *waiter);
-bool plat_waiter_wait(void *waiter, int64_t timeout_ns);
-#endif
 void plat_thread_name(const char *name);       // the calling thread's name in profilers / top (15 chars at most)
 // Where the calling thread should run (phones: the game's main thread and the render thread on the big cores); a
 // no-op elsewhere
@@ -83,9 +63,6 @@ typedef struct {
 void plat_system_info(PlatSysInfo *si);
 bool plat_exe_path(char *buf, size_t size);
 void plat_exec(char *const argv[]);  // replace the process (NULL = same command line); returns only on failure
-#if defined(_WIN32) || defined(__linux__)
-void plat_terminate(void);  // end the process now, skipping DLL teardown (exit status 0)
-#endif
 
 // Child processes (seed generator, game-file extraction). stdout + stderr go to log_path (NULL = /dev/null).
 typedef intptr_t PlatProc;  // 0 = failed to start
@@ -96,13 +73,8 @@ void plat_proc_kill(PlatProc p);             // end it and what it started (then
 bool plat_remove_tree(const char *dir);      // rm -rf
 // dir is synced by OneDrive (Windows: under a OneDrive folder, or a cloud file); false on other systems
 bool plat_onedrive_synced(const char *dir);
-#ifdef _WIN32
-#define PLAT_EXE_SUFFIX ".exe"
-#define PLAT_VENV_PYTHON "venv/Scripts/python.exe"  // relative to the venv's parent
-#else
 #define PLAT_EXE_SUFFIX ""
 #define PLAT_VENV_PYTHON "venv/bin/python"
-#endif
 
 // ---- diagnostics
 // Name of the host function containing pc (guest functions are f_<addr>), NULL if unknown.

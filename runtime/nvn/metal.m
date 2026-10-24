@@ -630,7 +630,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
             free(lin);
             // the copy stays inside the texture's level: one allocated at the internal resolution (16:9, render
             // target sized - the save slots' screenshots on the title screen) can still be filled from the CPU, and its
-            // full-size data overran the scaled texture (a GPU fault on Windows: runtime/nvn/vulkan/textures.c)
+            // full-size data overran the scaled texture (a GPU fault)
             NSUInteger lw = MAX(b->tex.width >> lv, 1), lh = MAX(b->tex.height >> lv, 1), ld = MAX(b->tex.depth >> lv, 1);
             MTLSize size = MTLSizeMake(MIN((NSUInteger)l.w, lw), MIN((NSUInteger)l.h, lh), MIN((NSUInteger)l.d, ld));
             NSUInteger slice = layer;
@@ -946,7 +946,7 @@ static id<MTLTexture> metalfx_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> in
     }
     return g_fx && g_fx_out ? g_fx_out : nil;
 }
-// SMAA 1x (Video tab "Anti-aliasing"; third_party/smaa, MIT; as runtime/nvn/vulkan/shaders.c / exec.c): luma edges ->
+// SMAA 1x (Video tab "Anti-aliasing"; third_party/smaa, MIT): luma edges ->
 // blending weights -> neighbourhood blending, at the game image's size, before the present / MetalFX. The reference
 // SMAA.hlsl has no Metal mode: it is built through its SMAA_CUSTOM_SL porting macros, with a few textual fixes for
 // MSL (out / inout parameters and array parameters as references, no swizzles bound to them, no discard in a

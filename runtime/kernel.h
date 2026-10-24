@@ -4,7 +4,7 @@
 
 #include "rt.h"
 
-#define STACK_BASE GUEST(0x7200000000ull)
+#define STACK_BASE 0x7200000000ull
 #define STACK_SIZE 0x0040000000ull
 
 typedef enum { KOBJ_THREAD = 1, KOBJ_EVENT, KOBJ_SESSION, KOBJ_SHMEM, KOBJ_TMEM } KType;
@@ -21,11 +21,7 @@ typedef KObject KEvent;
 struct KThread {
     KObject obj;  // signaled when the thread exits
     Cpu cpu;
-#ifdef _WIN32
-    uintptr_t host;
-#else
     pthread_t host;
-#endif
     uint64_t entry, tlr, id;
     uint32_t handle;
     int prio, core;
@@ -39,9 +35,6 @@ struct KThread {
     KThread *wnext;
     KThread *snext;        // in WaitSynchronization (g_syncwaiters)
     pthread_cond_t cond;   // each thread sleeps on its own condition; wakers signal it directly
-#ifdef _WIN32
-    void *precise_waiter;
-#endif
     // in-place reboot (kernel_stop_threads): thread_main's setjmp point, where the thread unwinds to and ends
     jmp_buf unwind;
     bool started, finished;

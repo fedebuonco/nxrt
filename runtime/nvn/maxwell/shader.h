@@ -71,7 +71,7 @@ typedef struct {
     bool uses_gmem_map;     // (GLSL compute only) gmem loads look their address up in GMap (uniform, binding
                             // GMAP_BUFFER_INDEX) and read GFast (storage, GFAST_BUFFER_INDEX) - a device-local copy of the
                             // dispatch's storage buffers - when found, stores too (copied back after the dispatch).
-                            // runtime/nvn/vulkan/exec.c
+                            // the backend
     bool uses_gmem_store;   // writes global memory (STG)
     bool uses_tint;        // fragment: reads the per-draw tint (buffer 19, float4[4]) applied to color target 0
     uint16_t ssbo_read;     // storage buffer slots whose binding (address) the shader reads from the driver constants

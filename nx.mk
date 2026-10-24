@@ -14,14 +14,12 @@ ifeq ($(.DEFAULT_GOAL),)
 .DEFAULT_GOAL := all  # (not this file's first rule: the includer's `all`)
 endif
 
-ifndef PLATFORM
-ifneq ($(filter MINGW% MSYS% CYGWIN% Windows_NT,$(shell uname -s) $(OS)),)
-PLATFORM := windows
-else ifeq ($(shell uname -s),Linux)
-PLATFORM := linux
-else
-PLATFORM := macos
-endif
+# macOS on Apple Silicon only. PLATFORM / NXRT_BACKEND name the one platform and drawing backend there is, so the
+# places another one would plug in stay visible (platform/platform.h, ui/nx_ui.h NxUiBackend, runtime/nvn/renderer.h).
+PLATFORM     := macos
+NXRT_BACKEND ?= metal
+ifneq ($(NXRT_BACKEND),metal)
+$(error NXRT_BACKEND=$(NXRT_BACKEND): only metal exists)
 endif
 B     ?= build
 CLANG ?= clang
@@ -33,23 +31,17 @@ CXX := $(CLANG)++
 endif
 IMGUI ?= $(NXRT)/third_party/imgui
 
-ifeq ($(PLATFORM),macos)
 SDL ?= $(or $(DEPS),/opt/homebrew/opt/sdl3)
 NX_DEPINC  ?= -I$(SDL)/include
 NX_UIFLAGS ?= -fobjc-arc
 NX_LDFLAGS ?= -L$(SDL)/lib -lSDL3 -Wl,-rpath,$(SDL)/lib -framework Foundation -framework Metal -framework QuartzCore \
               -framework AppKit -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
-else
-NX_DEPINC  ?= $(if $(DEPS),-I$(DEPS)/include)
-NX_UIFLAGS ?= -x c++ $(OSFLAGS)
-NX_LDFLAGS ?= $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lpthread
-endif
 
 NX_PLATFORM_SRC := $(NXRT)/platform/app.c $(NXRT)/platform/paths.c $(NXRT)/platform/$(PLATFORM).c
 NX_SETTINGS_SRC := $(NXRT)/settings/settings.c
 NX_INPUT_SRC    := $(NXRT)/input/input.c $(NXRT)/input/bindings.c
 NX_SAVE_SRC     := $(NXRT)/save/save.c
-NX_UI_SRC       := $(wildcard $(NXRT)/ui/*.mm) $(if $(filter macos,$(PLATFORM)),$(NXRT)/ui/backends/metal.mm)
+NX_UI_SRC       := $(wildcard $(NXRT)/ui/*.mm) $(NXRT)/ui/backends/$(NXRT_BACKEND).mm
 INC_PLATFORM := -I$(NXRT)/platform
 INC_SETTINGS := $(INC_PLATFORM) -I$(NXRT)/settings
 INC_INPUT    := $(INC_SETTINGS) -I$(NXRT)/input
@@ -60,9 +52,9 @@ NX_HDRS      := $(wildcard $(NXRT)/platform/*.h $(NXRT)/settings/*.h $(NXRT)/inp
 NX_OBJ   := $(patsubst $(NXRT)/%.c,$(B)/nx/%.o,$(NX_PLATFORM_SRC) $(NX_SETTINGS_SRC) $(NX_INPUT_SRC) $(NX_SAVE_SRC)) \
             $(patsubst $(NXRT)/%.mm,$(B)/nx/%.o,$(NX_UI_SRC))
 NX_IMGUI_OBJ := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.o $(B)/imgui/imgui_widgets.o \
-                $(B)/imgui/imgui_impl_sdl3.o $(if $(filter macos,$(PLATFORM)),$(B)/imgui/imgui_impl_metal.o)
+                $(B)/imgui/imgui_impl_sdl3.o $(B)/imgui/imgui_impl_$(NXRT_BACKEND).o
 
-NXFLAGS = -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function $(NX_DEPINC) $(OSFLAGS)
+NXFLAGS = -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function $(NX_DEPINC)
 NXCXXFLAGS = -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends $(NX_DEPINC)
 
 $(B)/nx/platform/%.o: $(NXRT)/platform/%.c $(NX_HDRS)

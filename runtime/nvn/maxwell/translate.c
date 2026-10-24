@@ -11,9 +11,6 @@
 // are defined in the GLSL prelude, and the structurally different constructs (texture lookups, global memory,
 // half-float packing, subgroup shuffles, barriers, discard, declarations and entry point) are emitted per dialect.
 // The MSL text is byte-identical to the MSL-only translator (tools/test_translate.c checks it).
-#if defined(_WIN32)
-#include <malloc.h>  // alloca
-#endif
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,7 +21,7 @@
 
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // (Vulkan, shader.h) the chunked-heap controls of beta_5's translator: this translator binds the whole heap as one
-// buffer, so these stay at their defaults; they exist because runtime/nvn/vulkan/exec.c reads them.
+// buffer, so these stay at their defaults; they exist for a backend that reads them (the removed Vulkan one did).
 uint32_t maxwell_gmem_chunk_shift;
 bool maxwell_gmem_lazy;
 bool maxwell_gmem_fs_miss;

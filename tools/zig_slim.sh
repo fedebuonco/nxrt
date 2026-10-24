@@ -21,8 +21,8 @@ for f in "$@"; do
     case $f in -march=*) c=${f#-march=}; flags+=("-mcpu=${c//-/_}") ;; *) flags+=("$f") ;; esac
 done
 
-# 1. the headers: what the generated C (cpu.h, simd.h) and tools/gamelib_entry.c include
-printf '#include "cpu.h"\n#include "simd.h"\n' > $W/probe.c
+# 1. the headers: what the generated C (cpu.h) and tools/gamelib_entry.c include
+printf '#include "cpu.h"\n' > $W/probe.c
 $Z/zig.exe cc "${flags[@]}" -Iruntime -c $W/probe.c -o $W/probe.o -MD -MF $W/probe.d
 $Z/zig.exe cc "${flags[@]}" -Iruntime '-DGAMELIB_ID="0"' -c tools/gamelib_entry.c -o $W/entry.o -MD -MF $W/entry.d
 n=0

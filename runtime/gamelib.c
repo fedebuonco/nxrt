@@ -5,14 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <dlfcn.h>
-#endif
-#ifdef __ANDROID__
-#include <SDL3/SDL.h>  // (SDL_GetAndroidInternalStoragePath)
-#endif
 
 #include "paths.h"
 #include "rt.h"
@@ -46,13 +39,6 @@ static int candidates(const char *game_dir, char out[3][1100]) {
     int n = 0;
     const char *env = getenv("NXRT_GAME_LIB");
     if (env && *env) snprintf(out[n++], 1100, "%s", env);
-#ifdef __ANDROID__
-    (void)game_dir;
-    const char *internal = SDL_GetAndroidInternalStoragePath();
-    if (internal) snprintf(out[n++], 1100, "%s/%s", internal, GAMELIB_NAME);
-    snprintf(out[n++], 1100, "%s", GAMELIB_NAME);
-    return n;
-#endif
     char exe_side[1024];
     if (rt_resource(nx_gamelib_name(), NULL, exe_side, sizeof exe_side) && exists(exe_side))
         snprintf(out[n++], 1100, "%s", exe_side);
@@ -92,15 +78,9 @@ bool gamelib_present(const char *game_dir) {
 }
 
 static const GameLibTables *open_lib(const char *path, const char *want) {
-#ifdef _WIN32
-    HMODULE h = LoadLibraryA(path);
-    if (!h) { snprintf(g_error, sizeof g_error, "can't load %s (error %lu)", path, GetLastError()); return NULL; }
-    GameLibEntry entry = (GameLibEntry)(void *)GetProcAddress(h, GAMELIB_ENTRY);
-#else
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!h) { snprintf(g_error, sizeof g_error, "%s", dlerror()); return NULL; }
     GameLibEntry entry = (GameLibEntry)dlsym(h, GAMELIB_ENTRY);
-#endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
     if (!t || t->abi != GAMELIB_ABI || !t->id || !want || strcmp(t->id, want)) {

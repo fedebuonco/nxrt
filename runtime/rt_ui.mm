@@ -90,18 +90,6 @@ static bool tab_display(float) {
     }
 
     opt_section("Rendering");
-#ifndef __APPLE__
-    if (custom_tex_count())  // (texture packs in mods/<pack>/textures: nvn/custom_tex.c)
-        opt_toggle("Texture packs", &g_settings.hd_textures, true,
-                   "Uses the replacement textures of your texture packs (mods folder). Turn off for the game's own. "
-                   "Changes apply while playing.");
-#endif
-#ifdef _WIN32
-    if (opt_toggle("ReShade", &g_settings.reshade, true,
-                   "The ReShade effects that come with the app. Off disables them while playing and keeps ReShade from "
-                   "loading on the next launch."))
-        settings_save();
-#endif
     // display order -> RES_* (the ini / enum order predates the menu order)
     // (up to 4x: 7680 x 4320, 8K - more only ran out of GPU memory, and sat next to 75% in the list)
     // (Match display in the middle: left from it 75% / 50% / 25%, right Dynamic then 1x-4x; user 2026-10-11)
@@ -124,16 +112,9 @@ static bool tab_display(float) {
         if (opt_choice("Internal resolution", &ri, res, NRES, RES_MATCH_AT, d, false)) g_settings.res_mode = res_mode[ri];
     }
     {   // each OS's own upscaler next to bilinear (UPSCALE_SHARP: MetalFX on macOS, AMD FSR 1 on Windows)
-#ifdef __APPLE__
         static const char *ups[] = {"Bilinear", "MetalFX"};
         const char *ud = "How the image is scaled up to the window when it renders at a lower resolution. MetalFX: Apple's "
                          "upscaler, sharper. Bilinear: plain and soft.";
-#else
-        static const char *ups[] = {"Bilinear", "AMD FSR 1", "NVIDIA NIS"};
-        const char *ud = "How the image is scaled up to the window when it renders at a lower resolution. AMD FSR 1: "
-                         "AMD FidelityFX edge-aware upscaling and sharpening. NVIDIA NIS: NVIDIA Image Scaling with "
-                         "directional 6-tap filtering and adaptive sharpening. Bilinear: plain and soft.";
-#endif
         int ui = g_settings.upscaler == UPSCALE_BILINEAR ? 0 : g_settings.upscaler == UPSCALE_NIS ? 2 : 1;
         char udm[512];
         if (g_settings.res_mode == RES_MATCH) {  // (renders at the window's size: nothing to scale up)
@@ -141,12 +122,7 @@ static bool tab_display(float) {
             ud = udm;
             opt_disable_next();
         }
-#ifdef __APPLE__
         if (opt_choice("Upscaler", &ui, ups, 2, 1, ud)) g_settings.upscaler = ui ? UPSCALE_SHARP : UPSCALE_BILINEAR;
-#else
-        if (opt_choice("Upscaler", &ui, ups, 3, 1, ud))
-            g_settings.upscaler = ui == 2 ? UPSCALE_NIS : ui == 1 ? UPSCALE_FSR1 : UPSCALE_BILINEAR;
-#endif
     }
     static const char *aa[] = {"Off", "SMAA"};
     opt_choice("Anti-aliasing", &g_settings.antialias, aa, 2, AA_OFF,
@@ -770,13 +746,7 @@ static void prelaunch_tab(float sc) {
     }
     static double gb = -1;
     if (gb < 0) gb = rt_game_files_size(g_root.c_str()) / 1e9;
-#ifdef _WIN32
-    if (ImGui::Button("Show in Explorer")) reveal_folder(g_root);
-#elif defined(__linux__)
-    if (ImGui::Button("Open folder")) reveal_folder(g_root);
-#else
     if (ImGui::Button("Show in Finder")) reveal_folder(g_root);
-#endif
     ImGui::SameLine();
     static bool shot_del = getenv("NXRT_LAUNCHER_SHOT") && strstr(getenv("NXRT_LAUNCHER_SHOT"), ":askdelete");
     static int del_opened = -1;  // the frame the popup opened (ImGui can activate a default-focused button on that frame)

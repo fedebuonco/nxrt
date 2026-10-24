@@ -15,27 +15,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(__aarch64__)
 #include <arm_neon.h>
-#if defined(__linux__)
-#include <sys/auxv.h>
-#ifndef HWCAP_AES
-#define HWCAP_AES (1 << 3)
-#endif
-#endif
-#endif
 
-#ifdef __ANDROID__
-#include "platform/android.h"
-#endif
 
 #define WHY(...) (snprintf(why, why_size, __VA_ARGS__), false)
 
 // The package by path, or (Android) by the document URI the folder picker gave access to
 static int open_package(const char *path) {
-#ifdef __ANDROID__
-    if (!strncmp(path, "content://", 10)) return android_open_document(path);
-#endif
     return open(path, O_RDONLY);
 }
 
@@ -128,15 +114,8 @@ static void ctr_inc(uint8_t c[16]) {
     for (int i = 15; i >= 0 && !++c[i]; i--) {}
 }
 
-#if defined(__aarch64__)
 static bool have_arm_aes(void) {
-#if defined(__APPLE__)
     return true;  // every Apple Silicon CPU
-#elif defined(__linux__)
-    return (getauxval(AT_HWCAP) & HWCAP_AES) != 0;
-#else
-    return false;
-#endif
 }
 
 __attribute__((target("aes"))) static void ctr_arm(const uint8_t rk[176], uint8_t ctr[16], uint8_t *data, size_t len) {
@@ -157,17 +136,14 @@ __attribute__((target("aes"))) static void ctr_arm(const uint8_t rk[176], uint8_
         ctr_inc(ctr);
     }
 }
-#endif
 
 void nx_aes128_ctr(const uint8_t key[16], const uint8_t iv[16], uint8_t *data, size_t len) {
     uint8_t rk[176], ctr[16];
     aes_expand(key, rk);
     memcpy(ctr, iv, 16);
-#if defined(__aarch64__)
     static int arm = -1;
     if (arm < 0) arm = have_arm_aes();
     if (arm) { ctr_arm(rk, ctr, data, len); return; }
-#endif
     while (len) {
         uint8_t ks[16];
         memcpy(ks, ctr, 16);

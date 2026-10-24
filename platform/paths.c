@@ -8,13 +8,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <sys/utime.h>
-#else
 #include <sys/statvfs.h>
 #include <utime.h>
-#endif
 
 #include "paths.h"
 #include "nx_app.h"
@@ -22,35 +17,6 @@
 
 static char g_root[1024], g_start[1024], g_exe_dir[1024];
 
-#ifdef _WIN32
-#define SEP "\\"
-static bool is_link(const char *p) {  // symlink or junction
-    DWORD a = GetFileAttributesA(p);
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
-}
-// The final path, junctions and symlinks followed (GetFinalPathNameByHandle); _fullpath (lexical, as before) only
-// where the file system can't say
-static bool resolve(const char *p, char *out, size_t n) {
-    wchar_t w[1100], f[1100];
-    if (MultiByteToWideChar(CP_UTF8, 0, p, -1, w, 1100) > 0) {
-        HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-                               FILE_FLAG_BACKUP_SEMANTICS, NULL);  // (BACKUP_SEMANTICS: folders too)
-        if (h != INVALID_HANDLE_VALUE) {
-            DWORD k = GetFinalPathNameByHandleW(h, f, 1100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-            CloseHandle(h);
-            if (k && k < 1100) {
-                const wchar_t *s = f;
-                if (!wcsncmp(f, L"\\\\?\\UNC\\", 8)) s = f + 6, f[6] = L'\\';  // \\?\UNC\srv\share -> \\srv\share
-                else if (!wcsncmp(f, L"\\\\?\\", 4)) s = f + 4;                    // \\?\C:\... -> C:\...
-                return WideCharToMultiByte(CP_UTF8, 0, s, -1, out, (int)n, NULL, NULL) > 0;
-            }
-        }
-    }
-    return _fullpath(out, p, n) != NULL;
-}
-#define path_eq(a, b) (_stricmp(a, b) == 0)
-#define path_prefix(a, b, n) (_strnicmp(a, b, n) == 0)
-#else
 #define SEP "/"
 static bool is_link(const char *p) {
     struct stat st;
@@ -64,7 +30,6 @@ static bool resolve(const char *p, char *out, size_t n) {
 }
 #define path_eq(a, b) (strcmp(a, b) == 0)
 #define path_prefix(a, b, n) (strncmp(a, b, n) == 0)
-#endif
 
 static bool is_dir(const char *p) {
     struct stat st;
@@ -135,17 +100,8 @@ static void exe_dir(char *out, size_t n) {
 static void default_home(char *root, size_t n) {
     const char *t = getenv("NXRT_DATA_HOME");
     if (t && *t) { snprintf(root, n, "%s", t); return; }
-#ifdef _WIN32
-    exe_dir(root, n);
-#elif defined(__linux__)
-    // (the AppImage is read-only): $XDG_DATA_HOME/<app>, ~/.local/share/<app> by default
-    const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
-    if (xdg && *xdg == '/') snprintf(root, n, "%s/%s", xdg, nx_app.data_dir);
-    else snprintf(root, n, "%s/.local/share/%s", home && *home ? home : "/tmp", nx_app.data_dir);
-#else
     const char *home = getenv("HOME");
     snprintf(root, n, "%s/Library/Application Support/%s", home && *home ? home : "/tmp", nx_app.bundle_id);
-#endif
 }
 
 // A one-line file's line (no line end); false: no file, or empty
@@ -167,11 +123,7 @@ static bool write_line(const char *path, const char *line) {
     if (!f) return false;
     bool ok = fprintf(f, "%s\n", line) > 0 && fflush(f) == 0 && fsync(fileno(f)) == 0;
     ok &= fclose(f) == 0;
-#ifdef _WIN32
-    ok = ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-#else
     ok = ok && rename(tmp, path) == 0;
-#endif
     if (!ok) remove(tmp);
     return ok;
 }
@@ -198,20 +150,12 @@ static bool same_dir(const char *a, const char *b) {
 static bool in_app(const char *p) {
     char r[1100], app[1100];
     if (!resolve(p, r, sizeof r)) return false;
-#ifdef __APPLE__
     char e[1024];
     exe_dir(e, sizeof e);
     char *c = strstr(e, ".app/Contents/");
     if (!c) return false;
     c[4] = 0;
     return resolve(e, app, sizeof app) && within(r, app);
-#elif defined(__linux__)
-    const char *d = getenv("APPDIR");
-    return d && *d && resolve(d, app, sizeof app) && within(r, app);
-#else
-    (void)app;
-    return false;
-#endif
 }
 
 // The data folder a pointer file names (false: none, or it points into the app)
@@ -244,9 +188,6 @@ static bool remove_entries(const char *dir) {
         join(p, sizeof p, dir, data_entry(i));
         if (!is_link(p) && !exists(p)) continue;
         if (is_dir(p) && !is_link(p)) ok &= plat_remove_tree(p);
-#ifdef _WIN32
-        else if (is_dir(p)) ok &= RemoveDirectoryA(p) != 0;  // (a junction)
-#endif
         else ok &= remove(p) == 0;
     }
     return ok;
@@ -329,13 +270,7 @@ void rt_paths_init(void) {
     mkdirs(root);
     char msg[1400];
     if (!is_dir(root) || !writable(root) || chdir(root) != 0) {
-#ifdef _WIN32
-        snprintf(msg, sizeof msg, "%s can't write to its folder:\n%s\n\nIt keeps game files, saves and seeds "
-                 "next to the program. Move the \"%s\" folder somewhere you can write to (e.g. Documents or "
-                 "Desktop, not Program Files) and start it again.", app_title(), root, app_title());
-#else
         snprintf(msg, sizeof msg, "%s can't write to its data folder:\n%s", app_title(), root);
-#endif
         fail(msg);
     }
     if (!getcwd(g_root, sizeof g_root)) snprintf(g_root, sizeof g_root, "%s", root);
@@ -424,18 +359,7 @@ bool rt_remove_game_files(const char *game_dir) {
     return ok;
 }
 
-#ifdef _WIN32
-// Sizes skip only real links (symlinks, junctions): OneDrive's cloud files are reparse points too, but they're files
-static bool size_link(const char *p) {
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(p, &fd);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    FindClose(h);
-    return (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && IsReparseTagNameSurrogate(fd.dwReserved0);
-}
-#else
 #define size_link is_link
-#endif
 
 static unsigned long long tree_size(const char *p) {
     struct stat st;
@@ -501,13 +425,8 @@ static bool empty_dir(const char *dir) {
 }
 
 static unsigned long long free_space(const char *dir) {
-#ifdef _WIN32
-    ULARGE_INTEGER a;
-    return GetDiskFreeSpaceExA(dir, &a, NULL, NULL) ? a.QuadPart : 0;
-#else
     struct statvfs v;
     return statvfs(dir, &v) == 0 ? (unsigned long long)v.f_bavail * v.f_frsize : 0;
-#endif
 }
 
 static unsigned long long entries_size(const char *dir) {
@@ -578,28 +497,14 @@ static bool move_fail(Move *m, const char *what, const char *p) {
     return false;
 }
 
-#ifdef _WIN32
-static int lstat_(const char *p, struct stat *st) {
-    if (is_link(p)) { errno = EPERM; return -1; }  // (links in the data folder: not moved on Windows)
-    return stat(p, st);
-}
-#ifndef S_ISLNK
-#define S_ISLNK(m) 0
-#endif
-#else
 #define lstat_ lstat
-#endif
 
 #define MOVE_BUF (1u << 20)
 static bool copy_file(Move *m, const char *s, const char *d, const struct stat *st) {
     remove(d);
     static const char *no_links;  // (tests: NXRT_MOVE_NO_LINKS=1 copies as if to another drive)
     if (!no_links) no_links = getenv("NXRT_MOVE_NO_LINKS") ? "1" : "";
-#ifdef _WIN32
-    if (!*no_links && CreateHardLinkA(d, s, NULL)) { moved(m, st->st_size); return true; }  // (same volume: a second
-#else                                                                                       //  name, no copy)
     if (!*no_links && link(s, d) == 0) { moved(m, st->st_size); return true; }
-#endif
     FILE *in = fopen(s, "rb"), *out = in ? fopen(d, "wb") : NULL;
     bool ok = in && out;
     errno = 0;
@@ -621,14 +526,12 @@ static bool copy_tree(Move *m, const char *s, const char *d) {
     struct stat st;
     if (lstat_(s, &st) != 0) return move_fail(m, "Couldn't read", s);
     if (S_ISLNK(st.st_mode)) {
-#ifndef _WIN32
         char t[PATH_MAX];
         ssize_t k = readlink(s, t, sizeof t - 1);
         if (k < 0) return move_fail(m, "Couldn't read", s);
         t[k] = 0;
         remove(d);
         if (symlink(t, d) != 0) return move_fail(m, "Couldn't copy", s);
-#endif
         return true;
     }
     if (S_ISREG(st.st_mode)) return copy_file(m, s, d, &st);
@@ -670,20 +573,16 @@ static bool check_tree(Move *m, const char *s, const char *d) {
     if ((a.st_mode & S_IFMT) != (b.st_mode & S_IFMT)) return move_fail(m, "Differs in the copy:", d);
     if (S_ISREG(a.st_mode)) {
         if (a.st_size != b.st_size) return move_fail(m, "Differs in the copy:", d);
-#ifndef _WIN32
         if (a.st_dev == b.st_dev && a.st_ino == b.st_ino) { moved(m, a.st_size); return true; }  // (the same file)
-#endif
         errno = 0;
         return same_bytes(m, s, d) || move_fail(m, "Differs in the copy:", d);
     }
-#ifndef _WIN32
     if (S_ISLNK(a.st_mode)) {
         char ta[PATH_MAX] = {0}, tb[PATH_MAX] = {0};
         if (readlink(s, ta, sizeof ta - 1) < 0 || readlink(d, tb, sizeof tb - 1) < 0 || strcmp(ta, tb))
             return move_fail(m, "Differs in the copy:", d);
         return true;
     }
-#endif
     if (!S_ISDIR(a.st_mode)) return true;
     DIR *dir = opendir(s);
     if (!dir) return move_fail(m, "Couldn't read", s);

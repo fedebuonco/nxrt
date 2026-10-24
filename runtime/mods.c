@@ -6,10 +6,6 @@
 #include <dirent.h>
 #include <unistd.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <shellapi.h>
-#endif
 
 static ModEntry s_mods[MAX_MODS];
 static int s_mod_count = 0;
@@ -70,16 +66,8 @@ static bool is_mod_disabled(const char *name) {
 }
 
 void mods_open_folder(void) {
-#ifdef _WIN32
-    CreateDirectoryA("mods", NULL);
-    ShellExecuteA(NULL, "open", "mods", NULL, NULL, SW_SHOWNORMAL);
-#elif defined(__APPLE__)
     mkdir("mods", 0755);
     system("open mods &");
-#else
-    mkdir("mods", 0755);
-    system("xdg-open mods & >/dev/null 2>&1");
-#endif
 }
 
 void mods_rescan(void) {
@@ -99,11 +87,7 @@ void mods_rescan(void) {
     s_mod_count = 0;
 
     // Ensure mods/ directory exists
-#ifdef _WIN32
-    CreateDirectoryA("mods", NULL);
-#else
     mkdir("mods", 0755);
-#endif
 
     DIR *d = opendir("mods");
     if (!d) return;

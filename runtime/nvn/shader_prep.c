@@ -615,9 +615,6 @@ bool shader_cache_write(const char *path, const void *data, size_t n) {
     bool ok = fwrite(data, 1, n, f) == n;
     ok &= fclose(f) == 0;
     if (ok) {
-#ifdef _WIN32
-        remove(path);  // (rename doesn't replace on Windows; a crash here loses the cache, never corrupts it)
-#endif
         ok = rename(tmp, path) == 0;
     }
     if (!ok) remove(tmp);

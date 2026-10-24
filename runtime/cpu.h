@@ -33,13 +33,7 @@ typedef void (*GuestFn)(Cpu *);
 
 // What the game code library calls in the app. On Windows the .exe exports them (EOW_RUNTIME: compiling the app)
 // and the library imports them through tools/windows/eowrecomp.def; elsewhere the dynamic linker binds them.
-#if defined(_WIN32) && defined(EOW_RUNTIME)
-#define RT_API __declspec(dllexport)
-#elif defined(_WIN32)
-#define RT_API __declspec(dllimport)
-#else
 #define RT_API
-#endif
 
 // ---- runtime services (runtime/*.c)
 RT_API void rt_dispatch(Cpu *c);                 // call function at c->pc
@@ -48,31 +42,12 @@ RT_API void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 RT_API void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
 RT_API uint64_t rt_ticks(void);
 
-#if defined(__aarch64__)
 static inline uint64_t rt_get_fpcr(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }
 static inline uint64_t rt_get_fpsr(void) { uint64_t v; __asm__ volatile("mrs %0, fpsr" : "=r"(v)); return v; }
 static inline void rt_set_fpcr(uint64_t v) { __asm__ volatile("msr fpcr, %0" :: "r"(v)); }
 static inline void rt_set_fpsr(uint64_t v) { __asm__ volatile("msr fpsr, %0" :: "r"(v)); }
-#else
-// Host FP state is not the guest's here: code lifted with --simd=c keeps FPCR/FPSR in Cpu (c->fpcr, zeroed
-// with the Cpu), so the host-side reset in thread start-up has nothing to do.
-static inline uint64_t rt_get_fpcr(void) { return 0; }
-static inline uint64_t rt_get_fpsr(void) { return 0; }
-static inline void rt_set_fpcr(uint64_t v) { (void)v; }
-static inline void rt_set_fpsr(uint64_t v) { (void)v; }
-#endif
 
-// ---- memory: guest addresses are host addresses
-// Where the host can't give the guest the Switch-style window at 0x70_0000_0000 (Android: the zygote maps its
-// libraries and heaps there on 39-bit kernels), the whole guest layout sits GUEST_SHIFT lower. Recompiled functions and
-// labels keep their unshifted names (f_7000...), and so do patches and nx_game.info.modules: only the values move.
-// tools/gen.py --shift must match (as in LASRecomp-Android-Plus).
-#if defined(__ANDROID__)
-#define GUEST_SHIFT 0x6000000000ull
-#else
-#define GUEST_SHIFT 0ull
-#endif
-#define GUEST(a) ((uint64_t)(a) - GUEST_SHIFT)  // an address of the unshifted (Switch) layout
+// ---- memory: guest addresses are host addresses (the Switch layout at 0x70_0000_0000, as is)
 typedef uint16_t __attribute__((aligned(1), may_alias)) u16u;
 typedef uint32_t __attribute__((aligned(1), may_alias)) u32u;
 typedef uint64_t __attribute__((aligned(1), may_alias)) u64u;
@@ -285,9 +260,3 @@ static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
     if ((int32_t)a == INT32_MIN && (int32_t)b == -1) return a;
     return (uint32_t)((int32_t)a / (int32_t)b);
 }
-
-// Portable FP/SIMD helpers for code lifted with --simd=c (default off AArch64; gen.py includes simd.h itself
-// in that mode, so AArch64 hosts can build it too).
-#if !defined(__cplusplus) && !defined(__aarch64__)
-#include "simd.h"
-#endif

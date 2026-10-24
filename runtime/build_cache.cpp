@@ -13,23 +13,12 @@ const char *nx_module_name(int i);
 #include <memory>
 #include <sstream>
 #include <stdexcept>
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
-#endif
 namespace fs = std::filesystem;
 struct BuildCache {
     fs::path root;
-#ifdef _WIN32
-    HANDLE handle = INVALID_HANDLE_VALUE;
-    ~BuildCache() {
-        if (handle != INVALID_HANDLE_VALUE)
-            CloseHandle(handle);
-    }
-#else
     int handle = -1;
     ~BuildCache() {
         if (handle >= 0) {
@@ -37,7 +26,6 @@ struct BuildCache {
             close(handle);
         }
     }
-#endif
 };
 namespace {
 void need(bool ok, const char *why) {
@@ -49,17 +37,7 @@ void error(char *out, size_t cap, const std::exception &e) {
         snprintf(out, cap, "%s", e.what());
 }
 bool is_link(const fs::path &p) {
-#ifdef _WIN32
-    // Cloud placeholders also have REPARSE_POINT: only symlinks and junctions redirect the path.
-    WIN32_FIND_DATAW data;
-    HANDLE find = FindFirstFileW(p.c_str(), &data);
-    if (find == INVALID_HANDLE_VALUE) return false;
-    FindClose(find);
-    return (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-           (data.dwReserved0 == IO_REPARSE_TAG_SYMLINK || data.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
-#else
     return fs::is_symlink(fs::symlink_status(p));
-#endif
 }
 void plain(const fs::path &p) {
     fs::path part;
@@ -98,12 +76,7 @@ std::string read(const fs::path &p, uintmax_t limit = 1 << 20) {
 void replace(const fs::path &from, const fs::path &to) {
     plain(from);
     plain(to);
-#ifdef _WIN32
-    need(MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0,
-         "Cannot replace a build file.");
-#else
     fs::rename(from, to);
-#endif
 }
 void write(const fs::path &p, const std::string &data) {
     plain(p);
@@ -151,15 +124,9 @@ std::unique_ptr<BuildCache> acquire(const char *game_dir) {
     // Closing the OS handle releases ownership even when the application exits during a build.
     auto lock = c->root / ".lock";
     plain(lock);
-#ifdef _WIN32
-    c->handle =
-        CreateFileW(lock.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    need(c->handle != INVALID_HANDLE_VALUE, "This game folder is already being compiled by another process.");
-#else
     c->handle = open(lock.c_str(), O_CREAT | O_RDWR, 0600);
     need(c->handle >= 0 && flock(c->handle, LOCK_EX | LOCK_NB) == 0,
          "This game folder is already being compiled by another process.");
-#endif
     plain_tree(c->root);
     return c;
 }
