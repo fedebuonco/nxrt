@@ -662,6 +662,10 @@ extern "C" void nxui_shader_prep_run(void) {
     if (!prep_enabled()) return;
     std::string romfs = prep_romfs();
     if (romfs.empty()) return;  // (a package: its bytes are read through the runtime, not a folder to scan)
+    // (the RomFS index it reads comes from the file system, which learns the game's romfs/ folder at boot: on the start
+    // screen, before any boot, tell it here - boot() replaces it with the same folder)
+    extern const char *g_romfs_dir;
+    if (!g_romfs_dir) g_romfs_dir = strdup(romfs.c_str());
     g_prep_skip = 0;
     g_prep_frac.store(0.f);
     g_prep_busy.store(true);
