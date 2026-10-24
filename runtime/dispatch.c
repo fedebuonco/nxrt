@@ -186,6 +186,27 @@ __attribute__((noinline)) static void dispatch_miss(Cpu *c) {
     __attribute__((musttail)) return f(c);
 }
 
+// Inline caches (cpu.h NX_IC_*): a site's miss. The target as rt_dispatch finds it, stored into the site's cache c->ic
+// as one 16-byte pair (stp: single-copy atomic with FEAT_LSE2) unless it's an HLE function (those keep passing
+// dispatch_slow's reboot safe point). The epoch starts odd and changes on every reboot: no live key is 0 (an empty
+// site), and a reboot's new overrides are never shadowed by an old boot's cached target.
+uint64_t g_ic_epoch = 0x9E3779B97F4A7C15ull;
+RT_ON_RESET(ic_epoch_reset) { __atomic_fetch_add(&g_ic_epoch, 0x2000000000000000ull, __ATOMIC_RELAXED); }
+
+void rt_dispatch_ic(Cpu *c) {
+    uint64_t pc = c->pc;
+    NxIC *ic = (NxIC *)c->ic;
+    if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
+        GuestFn f = dispatch_slow(c);
+        __attribute__((musttail)) return f(c);
+    }
+    unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
+    GuestFn f = dcache[h].addr == pc && dcache[h].fn ? dcache[h].fn : dispatch_slow(c);
+    uint64_t key = pc ^ __atomic_load_n(&g_ic_epoch, __ATOMIC_RELAXED);
+    __asm__ volatile("stp %1, %2, %0" : "=Q"(*ic) : "r"(key), "r"(f));
+    __attribute__((musttail)) return f(c);
+}
+
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
     unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);

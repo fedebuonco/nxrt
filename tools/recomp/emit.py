@@ -2,7 +2,8 @@
 consecutive FP/SIMD instructions are batched into one asm block; the game's patches replace single instructions and
 its variants let the runtime pick an instruction (nx_code_variant).
 
-Branches inside the function are gotos, to other functions tail calls, anywhere else rt_dispatch. A proven jump table
+Branches inside the function are gotos, to other functions tail calls, anywhere else (indirect calls and jumps, jumps
+out of the module) through an inline cache at the site (cpu.h NX_IC_CALL / NX_IC_TAIL; misses go to rt_dispatch_ic). A proven jump table
 (cfg.py) is a `switch` over its targets. A `br` whose table couldn't be proven makes its function take the
 all-instruction fallback: a `switch (c->pc)` over every instruction, so any target still lands on the right one.
 """
@@ -49,11 +50,11 @@ def render_single(m, ins, a, jump, refs):
         if m.in_text(t):
             refs.add(t)
             return [f'c->x[30] = {hx(a + 4)}; {fname(t)}(c);']
-        return [f'c->x[30] = {hx(a + 4)}; c->pc = {hx(t)}; rt_dispatch(c);']
+        return [f'c->x[30] = {hx(a + 4)}; c->pc = {hx(t)}; NX_IC_CALL();']
     if k == 'blr':
-        return [f'c->pc = {ins.target}; c->x[30] = {hx(a + 4)}; rt_dispatch(c);']
+        return [f'c->pc = {ins.target}; c->x[30] = {hx(a + 4)}; NX_IC_CALL();']
     if k == 'br':
-        return [f'c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);']
+        return [f'c->pc = {ins.target}; NX_IC_TAIL();']
     if k == 'ret':
         return ['return;']
     raise Unsupported(k)
@@ -87,7 +88,7 @@ def emit_function(m, game, entry, end, labels, tables, hle):
         if entry <= t < end:
             return f'goto {label(t)};'
         if not m.in_text(t):
-            return f'c->pc = {hx(t)}; __attribute__((musttail)) return rt_dispatch(c);'
+            return f'c->pc = {hx(t)}; NX_IC_TAIL();'
         refs.add(t)
         return f'__attribute__((musttail)) return {fname(t)}(c);'
 
@@ -151,9 +152,9 @@ def emit_function(m, game, entry, end, labels, tables, hle):
                 refs.add(t)
                 out.append(f'    c->x[30] = {hx(a + 4)}; {fname(t)}(c);')
             else:
-                out.append(f'    c->x[30] = {hx(a + 4)}; c->pc = {hx(t)}; rt_dispatch(c);')
+                out.append(f'    c->x[30] = {hx(a + 4)}; c->pc = {hx(t)}; NX_IC_CALL();')
         elif k == 'blr':
-            out.append(f'    c->pc = {ins.target}; c->x[30] = {hx(a + 4)}; rt_dispatch(c);')
+            out.append(f'    c->pc = {ins.target}; c->x[30] = {hx(a + 4)}; NX_IC_CALL();')
         elif k == 'br':
             jt = tables.get(a)
             if jt == 'all':
@@ -169,7 +170,7 @@ def emit_function(m, game, entry, end, labels, tables, hle):
                 else:
                     out.append(f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
                 continue
-            out.append(f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
+            out.append(f'    c->pc = {ins.target}; NX_IC_TAIL();')
         elif k == 'ret':
             out.append('    return;')
         last = k

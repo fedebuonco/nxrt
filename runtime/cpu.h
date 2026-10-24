@@ -17,7 +17,8 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
     uint64_t excl_hi;        // 336: upper half of an exclusive pair (LDXP)
-    uint8_t _pad[512 - 344];
+    void *ic;                // 344: the call site's inline cache, for rt_dispatch_ic (NX_IC_CALL / NX_IC_TAIL)
+    uint8_t _pad[512 - 352];
     __uint128_t v[32];       // 512
 } Cpu;
 
@@ -27,6 +28,7 @@ _Static_assert(offsetof(Cpu, nzcv) == 272, "nzcv");
 _Static_assert(offsetof(Cpu, fpcr) == 320, "fpcr");
 _Static_assert(offsetof(Cpu, fpsr) == 328, "fpsr");
 _Static_assert(offsetof(Cpu, excl_hi) == 336, "excl_hi");
+_Static_assert(offsetof(Cpu, ic) == 344, "ic");
 _Static_assert(offsetof(Cpu, v) == 512, "v");
 
 typedef void (*GuestFn)(Cpu *);
@@ -41,6 +43,39 @@ RT_API void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 RT_API void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 RT_API void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
 RT_API uint64_t rt_ticks(void);
+
+// ---- inline caches at indirect call sites (tools/recomp/emit.py)
+// Each site remembers its last target as one {key, fn} pair, read (ldp) and written (stp, rt_dispatch_ic) as a single
+// 16-byte access - single-copy atomic on Apple Silicon (FEAT_LSE2) - so threads sharing a site never see one target's
+// address with another's function. key = guest address ^ g_ic_epoch: a reboot changes the epoch, which empties every
+// site at once. A hit is a load, a compare and a call: no TLS, no hash, no call into the app. HLE targets are never
+// cached (rt_dispatch_ic): their calls keep passing the dispatcher's reboot safe point.
+typedef struct __attribute__((aligned(16))) { uint64_t key; GuestFn fn; } NxIC;
+RT_API extern uint64_t g_ic_epoch;
+RT_API void rt_dispatch_ic(Cpu *c);  // call the function at c->pc, filling the site's cache c->ic when it can
+#define NX_IC_GET(ic, k, f) __asm__("ldp %0, %1, %2" : "=&r"(k), "=&r"(f) : "Q"(*(ic)))
+#define NX_IC_EPOCH __atomic_load_n(&g_ic_epoch, __ATOMIC_RELAXED)
+// c->pc set: call it (an indirect call: blr)
+#define NX_IC_CALL()                                                                         \
+    do {                                                                                     \
+        static NxIC ic_;                                                                     \
+        uint64_t k_;                                                                         \
+        GuestFn f_;                                                                          \
+        NX_IC_GET(&ic_, k_, f_);                                                             \
+        if (k_ == (c->pc ^ NX_IC_EPOCH) && f_) f_(c);                                         \
+        else { c->ic = &ic_; rt_dispatch_ic(c); }                                            \
+    } while (0)
+// c->pc set: jump to it (an indirect jump: br, a tail call out of the module)
+#define NX_IC_TAIL()                                                                         \
+    do {                                                                                     \
+        static NxIC ic_;                                                                     \
+        uint64_t k_;                                                                         \
+        GuestFn f_;                                                                          \
+        NX_IC_GET(&ic_, k_, f_);                                                             \
+        if (k_ == (c->pc ^ NX_IC_EPOCH) && f_) __attribute__((musttail)) return f_(c);        \
+        c->ic = &ic_;                                                                        \
+        __attribute__((musttail)) return rt_dispatch_ic(c);                                  \
+    } while (0)
 
 static inline uint64_t rt_get_fpcr(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }
 static inline uint64_t rt_get_fpsr(void) { uint64_t v; __asm__ volatile("mrs %0, fpsr" : "=r"(v)); return v; }
