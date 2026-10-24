@@ -187,6 +187,13 @@ gen:
 
 gen-objs: $(GEN_OBJ)
 
+# The lifter against this Mac's CPU (tools/test_lift.py), on every module of your own extracted/exefs
+# (TEST_LIFT_COUNT distinct instructions each)
+TEST_LIFT_COUNT ?= 5000
+test-lift:
+	$(foreach m,$(GAME_MODULES),$(PY) $(NXRT)/tools/test_lift.py extracted/exefs/$(firstword $(subst :, ,$(m))) \
+	    $(lastword $(subst :, ,$(m))) --count $(TEST_LIFT_COUNT) &&) true
+
 # Runtime + game objects only (no generated code, no link): quick compile check
 runtime-objs: $(NX_OBJ) $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(GAME_OBJ)
 
@@ -202,4 +209,4 @@ format-fix:
 tidy:
 	@$(NXRT)/tools/tidy.sh
 
-.PHONY: all gen venv gen-objs runtime-objs test format format-fix tidy
+.PHONY: all gen venv gen-objs test-lift runtime-objs test format format-fix tidy

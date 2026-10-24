@@ -5,8 +5,8 @@ to boot, draw and look like a proper app. Everything else is either opt-in (extr
 outside the library.
 
 **Status (branch `macos-core`):** A1 done (the other backends removed); B0's build profile done; B1 done (the
-generator split into stages, byte-identical output); B2 done for LAS and EoW (EoW's compile timing pending); B3 done (stable files). Everything else is still
-planned. File paths are `master`'s.
+generator split into stages, byte-identical output); B2 done for LAS and EoW (EoW's compile timing pending); B3 done (stable files); B4 done (the lifter tested against the CPU). Everything
+else is still planned. File paths are `master`'s.
 
 **Left over from A1:** the shader translator still has its GLSL output path and Vulkan-only parts (GMEM chunk bindings
 in `maxwell/shader.h`; `tools/test_translate.sh`'s GLSL mode), and the upscaler setting still lists FSR 1 and NIS,
@@ -313,6 +313,25 @@ That makes every improvement measurable per game.
   −7% / −10%, from fewer files (650 → 411), each paying a fixed cost. File counts: LAS 324 + 85, EoW 637 + 95 + 105 + 53.
 - **Not done:** an option to drop the kept objects (the 1.8 GB in the game folder) after a successful build.
 
+### B4 result (2026-10-24)
+
+- **How:** `tools/test_lift.py` (rewritten) with `tools/test_lift_harness.c` (new; the old Unicorn harness had gone
+  missing). Each case runs one instruction twice from the same random state: as its lifted C, and as itself on the
+  Mac's CPU, in a stub made at run time (`MAP_JIT`). Compared: x0-x30, sp, nzcv, v0-v31 and a 256 KiB memory buffer.
+  Faults in either run skip the case. `make test-lift` runs it on every module of a game's own files.
+- **Does it catch bugs?** Yes: three planted bugs (a register, a flag, a vector register) were caught in all 9 of
+  their cases.
+- **Result:** **no mismatch** in 30,000 distinct instructions (5,000 from each module of LAS and EoW), 90,000 cases.
+  One case was skipped (a native fault).
+- **Not covered:**
+  - **Position-dependent instructions:** branches, ADR / ADRP, literal loads (the native copy runs elsewhere).
+  - **System instructions.**
+  - **Instructions naming register 18:** reserved on macOS; about 3% of the distinct words.
+  - **More threads at once:** each case runs single-threaded. The lifted exclusive pairs (LDXR / STXR, emulated
+    with compare-and-swap) and the atomics are checked one step at a time, not under contention. That matters for
+    the EoW deadlock (a lost wakeup), which this test can't rule out.
+- **Not done:** running it in CI. It needs a game's files, which CI doesn't have.
+
 ### Steps
 
 Each step keeps the games working. The library's id covers the recompiler (see ARCHITECTURE.md), so each step that
@@ -324,7 +343,7 @@ changes the output makes players rebuild once. Bundle those steps into as few re
 | **B1. Restructure** ✅ | Split into the stages above, **with byte-identical C output** for LAS, Sky, EoW, Tunic and Dread (`--simd asm`, no shift). Drop `--simd c` and `--shift` here: they don't change the output of an Apple Silicon build | `diff` of the generated C against today's | The library id changes (new files are hashed), but the C is identical, so the app's build cache reuses every object: a relink, not a rebuild |
 | **B2. Jump tables** ✅ (LAS, EoW) | Real table recovery; the fallback only where unproven | Report: fallback functions down; games boot and play their known scenes; build time vs B0 | Yes |
 | **B3. Incremental builds** ✅ (stable files; dropping kept objects not done) | Builds on the existing build cache: **stable file assignment** (by address range, not packing order), so a changed function rebuilds only its own file; an option to drop the kept objects (1.8 GB) after a successful build | A one-instruction lifter change rebuilds only the affected files | Once (new layout) |
-| **B4. Differential testing** | Each lifted instruction run against the Mac's own ARM64 CPU, with random inputs; extends `test_lift.py` | Runs in CI; every mismatch is a bug found before a game shows it | No |
+| **B4. Differential testing** ✅ (CI not set up) | Each lifted instruction run against the Mac's own ARM64 CPU, with random inputs; extends `test_lift.py` | Runs in CI; every mismatch is a bug found before a game shows it | No |
 | **B5. Faster dispatch** | Calls between modules resolved ahead of time (imports are known after relocation), inline caches at indirect call sites | Run-time benchmark vs B0 | Yes |
 | **B6. Register caching** | Hot guest registers kept in C locals, written back only where a callee or the runtime can see them | Run-time benchmark vs B0; differential tests; games boot and play | Yes |
 | **B7. Profile-guided builds** | `NXRT_FNPROF` profiles feed clang: hot code at higher optimisation, cold code at `-O1` for faster builds | Build time and frame time vs B0 | Yes |
