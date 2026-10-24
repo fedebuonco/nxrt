@@ -1,6 +1,6 @@
 """Generate C for a whole NSO module.
 
-Usage: gen.py <name> <nso> <base> <outdir> [--game DIR] [--hle hle_symbols.txt] [--chunk N]
+Usage: gen.py <name> <nso> <base> <outdir> [--game DIR] [--hle hle_symbols.txt] [--span BYTES]
 
 --game: the game's tools folder (games/<id>/tools): its patches.py has the game's own code changes (see load_game).
 
@@ -50,9 +50,7 @@ def main():
     ap.add_argument('outdir')
     ap.add_argument('--hle')
     ap.add_argument('--game')
-    ap.add_argument('--chunk', type=int, default=1500)  # functions per file at most
-    ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
-    ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
+    ap.add_argument('--span', type=lambda s: int(s, 0), default=plan.SPAN)  # bytes of guest text per chunk file
     ap.add_argument('--limit', type=int, default=0)
     args = ap.parse_args()
     game = load_game(args.game)
@@ -64,8 +62,7 @@ def main():
     entries, rounds = discover.functions(m, discover.seed(m, starts))
     report.discovered(args.name, len(starts), len(entries), rounds, m.stats, time.time() - t0)
 
-    order, nchunks = plan.write_chunks(m, game, entries, hle, args.outdir, args.chunk, args.chunk_bytes,  # emit + plan
-                                       args.big_fn, args.limit)
+    order, nchunks = plan.write_chunks(m, game, entries, hle, args.outdir, args.span, args.limit)  # emit + plan
     plan.write_table(m, order, args.outdir)
     plan.write_build_id(m, args.outdir)
     report.finished(args.name, nchunks, time.time() - t0)

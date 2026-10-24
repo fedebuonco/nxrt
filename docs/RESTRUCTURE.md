@@ -5,8 +5,8 @@ to boot, draw and look like a proper app. Everything else is either opt-in (extr
 outside the library.
 
 **Status (branch `macos-core`):** A1 done (the other backends removed); B0's build profile done; B1 done (the
-generator split into stages, byte-identical output); B2 done for LAS and EoW (EoW's compile timing pending).
-Everything else is still planned. File paths are `master`'s.
+generator split into stages, byte-identical output); B2 done for LAS and EoW (EoW's compile timing pending); B3 done (stable files). Everything else is still
+planned. File paths are `master`'s.
 
 **Left over from A1:** the shader translator still has its GLSL output path and Vulkan-only parts (GMEM chunk bindings
 in `maxwell/shader.h`; `tools/test_translate.sh`'s GLSL mode), and the upscaler setting still lists FSR 1 and NIS,
@@ -292,6 +292,27 @@ That makes every improvement measurable per game.
 - **Found while testing (fixed separately):** the start screen waited forever on shader preparation for games set up
   from a package (no `romfs/` folder). Older than B2, and on `master` too.
 
+### B3 result (2026-10-24)
+
+- **The change:** chunk file `<module>_NNN.c` now holds exactly the functions whose entry is in the NNN-th 64 KiB of
+  the module's text. Every range gets its file, even an empty one, so an index never moves. The names stay
+  `<module>_NNN.c`, because the app's builder compiles files by index while generation runs. `--span` replaces
+  `--chunk` / `--chunk-bytes` / `--big-fn`. Big functions no longer get a file of their own.
+- **Same code:** every function's C is identical to B2's, in all six modules of LAS and EoW (LAS: 86,669 + 34,982;
+  EoW: 295,093 functions), and so are the address tables. Only the grouping changed.
+- **What a change rebuilds** (LAS `main`):
+
+  | Change | B2 (packed by size / count) | B3 (address ranges) |
+  |---|---|---|
+  | One function's C changes (a patch) | 1 of 499 files | 1 of 325 files |
+  | A new function is discovered | 6 of 499 files | 3 of 325 files |
+
+  B2's packing was already more stable than this plan assumed: its files are mostly size-limited, so a shift settles
+  again within a few files. B3 is strictly local, but the rebuild-time gain is modest.
+- **Full compile** (LAS, back to back, source on the SSD): **wall-clock 122 → 114 s, CPU 949 → 853 s**. That's
+  −7% / −10%, from fewer files (650 → 411), each paying a fixed cost. File counts: LAS 324 + 85, EoW 637 + 95 + 105 + 53.
+- **Not done:** an option to drop the kept objects (the 1.8 GB in the game folder) after a successful build.
+
 ### Steps
 
 Each step keeps the games working. The library's id covers the recompiler (see ARCHITECTURE.md), so each step that
@@ -302,7 +323,7 @@ changes the output makes players rebuild once. Bundle those steps into as few re
 | **B0. Baseline** ✅ build side done (above); run-time benchmark pending | Profile a full LAS build: time per compile unit, the slowest functions, how many go through the fallback; a run-time benchmark (fixed scene, frame time) | Numbers recorded in this doc | No |
 | **B1. Restructure** ✅ | Split into the stages above, **with byte-identical C output** for LAS, Sky, EoW, Tunic and Dread (`--simd asm`, no shift). Drop `--simd c` and `--shift` here: they don't change the output of an Apple Silicon build | `diff` of the generated C against today's | The library id changes (new files are hashed), but the C is identical, so the app's build cache reuses every object: a relink, not a rebuild |
 | **B2. Jump tables** ✅ (LAS, EoW) | Real table recovery; the fallback only where unproven | Report: fallback functions down; games boot and play their known scenes; build time vs B0 | Yes |
-| **B3. Incremental builds** | Builds on the existing build cache: **stable file assignment** (by address range, not packing order), so a changed function rebuilds only its own file; an option to drop the kept objects (1.8 GB) after a successful build | A one-instruction lifter change rebuilds only the affected files | Once (new layout) |
+| **B3. Incremental builds** ✅ (stable files; dropping kept objects not done) | Builds on the existing build cache: **stable file assignment** (by address range, not packing order), so a changed function rebuilds only its own file; an option to drop the kept objects (1.8 GB) after a successful build | A one-instruction lifter change rebuilds only the affected files | Once (new layout) |
 | **B4. Differential testing** | Each lifted instruction run against the Mac's own ARM64 CPU, with random inputs; extends `test_lift.py` | Runs in CI; every mismatch is a bug found before a game shows it | No |
 | **B5. Faster dispatch** | Calls between modules resolved ahead of time (imports are known after relocation), inline caches at indirect call sites | Run-time benchmark vs B0 | Yes |
 | **B6. Register caching** | Hot guest registers kept in C locals, written back only where a callee or the runtime can see them | Run-time benchmark vs B0; differential tests; games boot and play | Yes |

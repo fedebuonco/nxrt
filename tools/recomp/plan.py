@@ -1,9 +1,13 @@
 """Stage `plan`: the functions' C -> files on disk.
 
-Functions go into chunk files in address order, up to a count and a size each (even compile times); a big function
-gets a file of its own, so those compile in parallel. Then <name>_table.c (every function's address and pointer: the
-game code library's table for the dispatcher) and, for main, main_build_id.txt (part of the library's id).
-Files whose text is unchanged are left alone, so a rebuild recompiles only what changed.
+**Stable files:** chunk file <name>_NNN.c holds exactly the functions whose entry lies in the NNN-th `span` bytes of the
+module's text (64 KiB by default), and every range gets its file, empty or not. Which file a function is in depends only
+on its address, so a function that changes (a patch, a lifter fix, a new function found nearby) changes its own file
+and no other: the build cache (runtime/build_cache.*) reuses every other object. (The app's builder compiles the files
+by index while generation goes on, so the names stay <name>_NNN.c.)
+
+Then <name>_table.c (every function's address and pointer: the game code library's table for the dispatcher) and, for
+main, main_build_id.txt (part of the library's id). Files whose text is unchanged are left alone.
 """
 import io
 import os
@@ -26,47 +30,38 @@ def write_if_changed(path, text):
         f.write(text)
 
 
-def write_chunks(m, game, entries, hle, outdir, chunk=1500, chunk_bytes=1500000, big_fn=100000, limit=0):
-    """Emit every function into <name>_NNN.c files; returns (address order, chunk count)."""
+SPAN = 0x10000  # bytes of guest text per chunk file
+
+
+def write_chunks(m, game, entries, hle, outdir, span=SPAN, limit=0):
+    """Emit every function into the <name>_NNN.c file of its address range; returns (address order, chunk count)."""
     name = m.name
     os.makedirs(outdir, exist_ok=True)
     order = sorted(entries)
     if limit:
         order = order[:limit]
-    nchunks = 0
+    nchunks = (m.hi - m.lo + span - 1) // span
     ci = 0
-    pending = None  # (address, lines, refs) of a big function that starts the next file
-    while ci < len(order) or pending:
-        body, refs, size, fns = [], set(), 0, []
-        while (pending or ci < len(order)) and len(fns) < chunk and size < chunk_bytes:
-            if pending:
-                a, lines, r = pending
-                pending = None
-            else:
-                a = order[ci]
-                ci += 1
-                end, labels, tables = entries[a]
-                lines, r = emit.emit_function(m, game, a, end, labels, tables, hle)
-            n = sum(len(l) + 1 for l in lines)
-            if n > big_fn and fns:  # (a big function gets a file of its own: they compile in parallel)
-                pending = (a, lines, r)
-                break
+    for k in range(nchunks):
+        body, refs, fns = [], set(), []
+        hi = m.lo + (k + 1) * span
+        while ci < len(order) and order[ci] < hi:
+            a = order[ci]
+            ci += 1
+            end, labels, tables = entries[a]
+            lines, r = emit.emit_function(m, game, a, end, labels, tables, hle)
             body += lines
-            size += n
             fns.append(a)
             refs |= r
-            if n > big_fn:
-                break
-        path = os.path.join(outdir, f'{name}_{nchunks:03d}.c')
+        path = os.path.join(outdir, f'{name}_{k:03d}.c')
         text = ['#include "cpu.h"\n']
         text += [f'void {emit.fname(r)}(Cpu *c);\n' for r in sorted(refs)]
         text += [f'void {emit.sanitize(hle[a])}(Cpu *c);\n' for a in sorted(set(hle) & set(fns))]
         text += ['\n'.join(body), '\n']
         write_if_changed(path, ''.join(text))
-        nchunks += 1
-        report.progress(name, ci, len(order), nchunks)
+        report.progress(name, ci, len(order), k + 1)
     for fn in os.listdir(outdir):  # an earlier run's extra chunks
-        mm = re.fullmatch(re.escape(name) + r'_(\d{3})\.c', fn)
+        mm = re.fullmatch(re.escape(name) + r'_(\d{3,})\.c', fn)
         if mm and int(mm.group(1)) >= nchunks:
             os.remove(os.path.join(outdir, fn))
     return order, nchunks
