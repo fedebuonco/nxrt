@@ -530,6 +530,10 @@ static void bind_program(NvnProgram *p, uint32_t stages) {
 
 static void skip_note(int line) {
     stat_skipped++;
+    extern bool g_debug_frame;
+    if (g_debug_frame)
+        LOG("[skip] debug frame: site %d left out a draw (vs %llx fs %llx)\n", line, st.program ? st.program->stages[0].code_addr : 0,
+            st.program ? st.program->stages[1].code_addr : 0);
     static int on = -1;
     static uint32_t hits[8192];
     if (on < 0) on = getenv("NXRT_LOG_SKIPS") && atoi(getenv("NXRT_LOG_SKIPS"));

@@ -1495,6 +1495,17 @@ static void present_hooks(void) {
     if (debug_at < 0) { const char *e = getenv("NXRT_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
     level_change_check();
     extern volatile int g_debug_frame_request;
+    // NXRT_DUMP_TRIGGER=<path>: creating that file (touch) asks for the next frame as a debug frame - its draws, their
+    // shaders and textures, and the ones left out, in the log - and saves the window's image beside it (<path>.png)
+    static const char *trigger = (const char *)-1;
+    if (trigger == (const char *)-1) trigger = getenv("NXRT_DUMP_TRIGGER");
+    if (trigger && total_frames % 30 == 0 && access(trigger, F_OK) == 0) {
+        unlink(trigger);
+        g_debug_frame_request = 1;
+        LOG("[dump] trigger: frame %llu\n", (unsigned long long)total_frames + 1);
+        extern char g_window_shot_request[256];
+        snprintf(g_window_shot_request, sizeof g_window_shot_request, "%s.png", trigger);
+    }
     if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
     g_debug_frame = debug_at && total_frames == (uint64_t)debug_at;
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", total_frames);
