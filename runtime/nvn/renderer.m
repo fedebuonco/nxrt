@@ -1600,6 +1600,7 @@ static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey
     b = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (fkey->buffer_tex) { h ^= fkey->buffer_tex; h *= 0x100000001B3ull; }  // (0: the key as before)
     return h;
 }
 
@@ -1635,9 +1636,10 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     // (every byte of the keys, in hex: NSData's description shows only the first 16 and last 8 bytes of the 52-byte
     // key, so variants differing in attr_kind[16..], depth_minus_one, flip_y or a later field shared one entry -
     // whichever variant came first served the others)
-    char kb[2 * (sizeof *vkey + 8) + 1], *kp = kb;
+    char kb[2 * (sizeof *vkey + 8) + 10], *kp = kb;  // (+ "b%08x": buffer_tex)
     for (size_t i = 0; i < sizeof *vkey; i++) kp += snprintf(kp, 3, "%02x", vb[i]);
     for (int i = 0; i < 8; i++) kp += snprintf(kp, 3, "%02x", fkey->rt_kind[i]);
+    if (fkey->buffer_tex) kp += snprintf(kp, 10, "b%08x", fkey->buffer_tex);
     NSString *key = [NSString stringWithFormat:@"%llx/%llx/%s", p->stages[0].code_addr, p->stages[1].code_addr, kb];
     Prog *pr = cache[key];
     if (!pr) {  // prepared before the game (the same code and keys)
@@ -1764,6 +1766,7 @@ static MTLTextureType mtl_type_for(int t) {
     case TEXTYPE_2D_ARRAY: return MTLTextureType2DArray;
     case TEXTYPE_CUBE_ARRAY: return MTLTextureTypeCubeArray;
     case TEXTYPE_1D_ARRAY: return MTLTextureType1DArray;
+    case TEXTYPE_BUFFER: return MTLTextureTypeTextureBuffer;
     default: return MTLTextureType2D;
     }
 }
@@ -1850,6 +1853,10 @@ static id<MTLTexture> apply_swizzle(id<MTLTexture> tex, NvnTexture *t, const Nvn
 static id<MTLTexture> sampled_texture(NvnTexture *t, const NvnTextureView *v, bool has_view, int want_type) {
     // uploads (if the CPU-side contents changed) go into their own command buffer, committed before
     // the current one so they land first
+    if (t->target == 10) {  // a buffer texture: the view of guest memory itself (no format views or swizzles)
+        id<MTLTexture> b = renderer_texture(t, nil, false);
+        return b.textureType == MTLTextureTypeTextureBuffer ? b : nil;
+    }
     id<MTLTexture> tex = view_texture(t, v, has_view, false, nil);
     tex = apply_swizzle(tex, t, v, has_view);
     MTLTextureType want = mtl_type_for(want_type);
@@ -1894,6 +1901,17 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
     uint32_t tic = h & 0xFFFFF;
     if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) return NULL;
     return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+}
+
+// The texture handle slots (ShaderKey buffer_tex) of a stage's textures that are bound to buffer textures now
+static uint32_t buffer_tex_slots(int stage, ShaderInfo *si) {
+    uint32_t m = 0;
+    for (int i = 0; i < si->ntex; i++) {
+        NvnTexture *t = shader_texture_object(stage, &si->tex[i]);
+        int slot = ((int)si->tex[i].handle_offset - 0x20) / 8;
+        if (t && t->target == 10 && slot >= 0 && slot < 32) m |= 1u << slot;
+    }
+    return m;
 }
 
 static bool is_attachment(NvnTexture *t) {
@@ -2654,6 +2672,13 @@ static void draw(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
+    if (pr && pr->vi && pr->fi) {  // textures bound to buffer textures: the program's variant that reads them so
+        uint32_t vb = buffer_tex_slots(0, pr->vi), fb = buffer_tex_slots(1, pr->fi);
+        if (vb || fb) {
+            vkey.buffer_tex = vb, fkey.buffer_tex = fb;
+            pr = get_program(st.program, &vkey, &fkey);
+        }
+    }
     if (!pr || !pr->ready) {
         static int said;
         if (getenv("NXRT_LOG_SKIPS") && said < 6) {

@@ -47,6 +47,8 @@ typedef struct {
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint8_t alpha_func;     // Vulkan alpha test: 0/8 always, 1..7 NVN compare function; ref in rscale[65].y
     bool dual_source;       // Vulkan: colour outputs 0/1 are the two sources of attachment 0
+    uint32_t buffer_tex;    // texture handle slots (bit (offset - 0x20) / 8) bound to buffer textures: the shader can't
+                            // tell them from 1D textures, the bound texture does (texture_buffer, read by index)
 } ShaderKey;
 
 typedef struct {

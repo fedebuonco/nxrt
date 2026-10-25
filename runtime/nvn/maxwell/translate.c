@@ -461,16 +461,23 @@ static bool emit_half(Ctx *c, uint64_t w) {
     }
     // ---- HSETP2 / HSET2: reg forms (5d20 / 5d18) and immediate forms (7e0x / 7c0x). The immediate takes bits 20-38 and
     // 56 (himm), so the comparison moves to 49-52 and H_AND / BF to 53 (checked on Echoes of Wisdom's
-    // 7e0683bc0f071507: HSETP2.LE.AND P0, PT, R21.F32, 1.0, 1.0, PT). The cbuf forms (7e8x / 7c8x) aren't done.
+    // 7e0683bc0f071507: HSETP2.LE.AND P0, PT, R21.F32, 1.0, 1.0, PT). The cbuf forms (7e8x / 7c8x) keep the same layout,
+    // B from c[slot 34][offset 20] read as F32, NegB 56, AbsB 54 (as HADD2's cbuf form; Fire Emblem: Three Houses'
+    // 7e86838c00d70307: HSETP2.LE P0, PT, R3.F32, c[3][0x34], PT).
     bool himm_form = (op & 0xfe80) == 0x7e00 || (op & 0xfe80) == 0x7c00;
-    if ((op & 0xfff8) == 0x5d20 || (op & 0xfff8) == 0x5d18 || himm_form) {
-        bool setp = (op & 0xfff8) == 0x5d20 || (op & 0xfe80) == 0x7e00;
+    bool hcb_form = (op & 0xfe80) == 0x7e80 || (op & 0xfe80) == 0x7c80;
+    if ((op & 0xfff8) == 0x5d20 || (op & 0xfff8) == 0x5d18 || himm_form || hcb_form) {
+        bool setp = (op & 0xfff8) == 0x5d20 || (op & 0xfe80) == 0x7e00 || (op & 0xfe80) == 0x7e80;
         const char *x = HS(R(a), (int)bits(w, 47, 2), bits(w, 43, 1), bits(w, 44, 1));
         const char *y;
         int cop, bop = (int)bits(w, 45, 2), flag_bit;
         if (himm_form) {
             sprintf(ib, "0x%08xu", himm(w));
             y = HS(ib, 0, false, false);
+            cop = (int)bits(w, 49, 4);
+            flag_bit = 53;
+        } else if (hcb_form) {
+            y = HS(cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb), 1, bits(w, 56, 1), bits(w, 54, 1));
             cop = (int)bits(w, 49, 4);
             flag_bit = 53;
         } else {
@@ -506,6 +513,12 @@ static bool emit_half(Ctx *c, uint64_t w) {
 }
 
 // ------------------------------------------------------------------ textures
+// The texture at handle index `index` is bound to a buffer texture (ShaderKey buffer_tex, from the renderer).
+static bool key_buffer_tex(Ctx *c, uint32_t index) {
+    int slot = ((int)(index * 4) - 0x20) / 8;
+    return c->key && slot >= 0 && slot < 32 && ((c->key->buffer_tex >> slot) & 1);
+}
+
 static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
     if (index >= 8192) return 0;
     if (c->tex_slot[index]) {
@@ -523,6 +536,7 @@ static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
     }
     bool weak = type < 0;
     if (weak) type = TEXTYPE_2D;
+    if (key_buffer_tex(c, index)) type = TEXTYPE_BUFFER, weak = false;
     int s = c->info->ntex++;
     if (s >= 31) { fail(c, "too many textures"); return 0; }
     c->tex_slot[index] = s + 1;
@@ -537,6 +551,7 @@ static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
 
 static const char *tex_type_name(int t) {
     switch (t) {
+    case TEXTYPE_BUFFER: return "_buffer";
     case TEXTYPE_1D: return "1d";
     case TEXTYPE_3D: return "3d";
     case TEXTYPE_CUBE: return "cube";
@@ -791,7 +806,9 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
         case 0: slot = tex_slot(c, index, TEXTYPE_1D, false, false);
             sprintf(call, "t%d.read(uint(%s))", slot, A); break;
         case 1: slot = tex_slot(c, index, TEXTYPE_1D, false, false);
-            sprintf(call, "t%d.read(uint(%s), uint(%s))", slot, A, Bv); break;
+            if (c->info->tex[slot].type == TEXTYPE_BUFFER) sprintf(call, "t%d.read(uint(%s))", slot, A);  // (no levels)
+            else sprintf(call, "t%d.read(uint(%s), uint(%s))", slot, A, Bv);
+            break;
         case 2: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
             sprintf(call, "t%d.read(%s)", slot, RSC2(c, slot, "uint2(%s, %s)", A, Bv)); break;
         case 4: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
@@ -1060,6 +1077,12 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 sp(&c->body, "    { uint lv = %s; uvec4 q = uvec4(uint(tsize%d(int(lv)).x), uint(tsize%d(int(lv)).y), 1u, uint(textureQueryLevels(t%d)));\n",
                    R(a), slot, slot, slot);
             }
+            int n = 0;
+            for (int i = 0; i < 4; i++)
+                if (mask & (1u << i)) { c->reg_used[d + n] = 1; sp(&c->body, "      r%d = q[%d];\n", d + n, i); n++; }
+            sp(&c->body, "    }\n");
+        } else if (qt == 1 && c->info->tex[slot].type == TEXTYPE_BUFFER) {  // a buffer texture: its texel count
+            sp(&c->body, "    { uint4 q = uint4(t%d.get_width(), 1, 1, 1);\n", slot);
             int n = 0;
             for (int i = 0; i < 4; i++)
                 if (mask & (1u << i)) { c->reg_used[d + n] = 1; sp(&c->body, "      r%d = q[%d];\n", d + n, i); n++; }

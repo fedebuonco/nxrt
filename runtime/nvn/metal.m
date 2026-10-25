@@ -424,10 +424,29 @@ static void create_backend_texture(NvnTexture *t, TexBackend *b) {
         if (tw < 1) tw = 1;
         if (th < 1) th = 1;
     }
-    if (t->target == 10) {  // a buffer texture: not supported yet (a texture_buffer view of guest memory, and the
-                            // translator's buffer reads). A placeholder within Metal's limits so the game goes on.
+    if (t->target == 10) {  // a buffer texture: a texture_buffer view of the guest heap at its address (no copy, so
+                            // always current), read by index (the translator: ShaderKey buffer_tex)
+        const FormatInfo *fi = t->layout.fmt;
+        uint64_t off = t->addr - g_guest_buffer_base, bytes = (uint64_t)t->width * (fi ? fi->bpb : 4);
+        NSUInteger align = [dev minimumTextureBufferAlignmentForPixelFormat:mf.pf];
+        if (g_guest_buffer && fi && mf.pf != MTLPixelFormatInvalid && t->addr >= g_guest_buffer_base &&
+            off + bytes <= g_guest_buffer.length && !(off % align)) {
+            MTLTextureDescriptor *bd = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:mf.pf width:t->width
+                                         resourceOptions:g_guest_buffer.resourceOptions usage:MTLTextureUsageShaderRead];
+            id<MTLTexture> view = [g_guest_buffer newTextureWithDescriptor:bd offset:off bytesPerRow:(NSUInteger)bytes];
+            if (view) {
+                view.label = [NSString stringWithFormat:@"buffer tex %llx fmt%#x", (unsigned long long)t->addr, t->format];
+                b->tex = view;
+                CFBridgingRetain(view);  // (b->tex is unretained: as below)
+                b->gpu_owned = true;  // (its contents are the guest memory itself: nothing to upload)
+                g_tex_live++;
+                return;
+            }
+        }
         static int said;
-        if (said++ < 3) LOG("[metal] buffer texture (%u texels, format %#x) not supported yet: placeholder\n", t->width, t->format);
+        if (said++ < 5)
+            LOG("[metal] buffer texture at %llx (%u texels, format %#x, offset %% %lu = %llu): no view, a placeholder\n",
+                (unsigned long long)t->addr, t->width, t->format, (unsigned long)align, (unsigned long long)(off % align));
         tw = tw > 16384 ? 16384 : tw;
         th = 1;
     }
