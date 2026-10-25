@@ -29,6 +29,7 @@ static NSMutableDictionary<NSString *, id> *cache;
 // (stats) GPU wait time by cause: 0 = guest fence (nvnSyncWait), 1 = full flush (CPU reads GPU results / ring), 2 = sync all
 static uint64_t stat_wait_by[3], stat_wait_n[3];
 static uint64_t stat_clears_as_load, stat_clear_passes;  // (deferred clears)
+static uint64_t gp_draws_all;  // (NXRT_GPU_PASSES: draws so far, never reset like stat_draws)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static double stat_gpu_s;
 // GPU busy time (dynamic resolution: output_scale.c; the "gpu" of the [metal] stats line), ns so far: the game's
@@ -110,6 +111,8 @@ static inline double now_ms(void) { return (double)clock_gettime_nsec_np(CLOCK_U
 #define TIMED_COMPILE(expr) ({ double t0_ = now_ms(); __auto_type r_ = (expr); stat_compile_ms += now_ms() - t0_; stat_compiles++; \
                                slow_note_build("pipeline", (uint64_t)((now_ms() - t0_) * 1e6)); r_; })
 
+static bool gpu_passes(void);
+static void gp_log(void);
 static uint64_t stat_counters_gpu;  // timing counters given the GPU's time (the game's 30 / 60 fps choice)
 const char *renderer_stats(void) {
     static int dumps;
@@ -127,6 +130,7 @@ const char *renderer_stats(void) {
              stat_passes, stat_dispatches, stat_flushes, stat_gpu_s * 1000.0, (double)stat_wait_ns / 1e6 * 125.0 / 3.0, stat_compiles, stat_compile_ms, stat_feedback_copies,
              g_tex_live, g_tex_live_bytes / 1048576.0, g_views_live, (unsigned long)(g_snap_copies ? g_snap_copies.count : 0), foot / 1048576.0, stat_wait_by[0] / 24e3, (unsigned long long)stat_wait_n[0], stat_wait_by[1] / 24e3, (unsigned long long)stat_wait_n[1], stat_wait_by[2] / 24e3, (unsigned long long)stat_wait_n[2], (unsigned long long)stat_clears_as_load, (unsigned long long)stat_clear_passes,
              (unsigned long long)stat_counters_gpu, pace_is_slow() ? "30" : "60", (unsigned long long)pace_frames_over());
+    if (gpu_passes()) gp_log();
     stat_counters_gpu = 0;
     stat_compiles = 0;
     stat_feedback_copies = 0;
@@ -430,6 +434,50 @@ uint64_t renderer_gpu_busy(id<MTLCommandBuffer> done, bool win) {
     return ns;
 }
 
+// GPU time by kind of pass (NXRT_GPU_PASSES=1, profiling): every pass gets a command buffer of its own (the chunk size
+// becomes 1), labelled with its render target (physical size, format of color 0, attachments). Each buffer's share of
+// the GPU's busy time (renderer_gpu_busy) is added to its label's row; renderer_stats logs the top rows with the
+// rest of the 2-second stats line. Work encoded after a pass and before the next (compute, copies) counts with it.
+#define GP_MAX 256
+static struct { char key[64]; uint64_t ns, passes, draws; } gp_rows[GP_MAX];
+static int gp_n;
+static pthread_mutex_t gp_lock = PTHREAD_MUTEX_INITIALIZER;
+static char gp_cur[64];  // (render thread: the label of the pass the current command buffer holds)
+static uint64_t gp_draws0;
+static bool gpu_passes(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("NXRT_GPU_PASSES") && atoi(getenv("NXRT_GPU_PASSES"));
+    return on;
+}
+static void gp_add(const char *key, uint64_t ns, uint64_t draws) {
+    pthread_mutex_lock(&gp_lock);
+    int i = 0;
+    while (i < gp_n && strcmp(gp_rows[i].key, key)) i++;
+    if (i == gp_n && gp_n < GP_MAX) {
+        memset(&gp_rows[gp_n], 0, sizeof gp_rows[0]);
+        snprintf(gp_rows[gp_n++].key, sizeof gp_rows[0].key, "%s", key);
+    }
+    if (i < gp_n) gp_rows[i].ns += ns, gp_rows[i].passes++, gp_rows[i].draws += draws;
+    pthread_mutex_unlock(&gp_lock);
+}
+static void gp_log(void) {
+    pthread_mutex_lock(&gp_lock);
+    uint64_t total = 0;
+    for (int i = 0; i < gp_n; i++) total += gp_rows[i].ns;
+    for (int k = 0; k < 14 && total; k++) {
+        int best = -1;
+        for (int i = 0; i < gp_n; i++) if (gp_rows[i].ns && (best < 0 || gp_rows[i].ns > gp_rows[best].ns)) best = i;
+        if (best < 0) break;
+        LOG("[gpu-passes] %5.1f%% %7.1f ms  %5llu passes %7llu draws  %s\n", 100.0 * gp_rows[best].ns / total,
+            gp_rows[best].ns / 1e6, (unsigned long long)gp_rows[best].passes, (unsigned long long)gp_rows[best].draws,
+            gp_rows[best].key);
+        gp_rows[best].ns = 0;
+    }
+    if (total) LOG("[gpu-passes] total %.1f ms\n", total / 1e6);
+    gp_n = 0;
+    pthread_mutex_unlock(&gp_lock);
+}
+
 // Commit recorded work without waiting.
 void renderer_submit(void) {
     end_pass();
@@ -437,12 +485,19 @@ void renderer_submit(void) {
     if (cmdbuf) {
         id<MTLCommandBuffer> c = cmdbuf;
         cmdbuf = nil;
+        const char *key = NULL;  // (a copy the completion handler owns)
+        uint64_t draws = gp_draws_all - gp_draws0;
+        if (gpu_passes()) key = strdup(gp_cur[0] ? gp_cur : "(no pass: compute / copies)");
         [c addCompletedHandler:^(id<MTLCommandBuffer> done) {
-            stat_gpu_s += renderer_gpu_busy(done, false) / 1e9;
+            uint64_t ns = renderer_gpu_busy(done, false);
+            stat_gpu_s += ns / 1e9;
+            if (key) gp_add(key, ns, draws), free((void *)key);
             if (done.error) LOG("[metal] command buffer error: %s\n", done.error.localizedDescription.UTF8String);
         }];
         [c commit];
         g_passes_in_cb = 0;
+        gp_cur[0] = 0;
+        gp_draws0 = gp_draws_all;
         pthread_mutex_lock(&cb_lock);
         last_cb = c;
         submit_seq++;
@@ -787,8 +842,17 @@ static void begin_pass(void) {
     // buffer (2) both start the GPU soon enough: 2x 38.2 -> 49.0 fps, frames over 20 ms 56.8% -> 22.3%; 1x 57.5 ->
     // 59.1 fps, 4.3% -> 1.5% (1 measured 50.1/48.8 and 59.2: the same within noise, with twice the submissions).
     static int chunk = -1;
-    if (chunk < 0) { const char *e = ENV("NXRT_CHUNK_PASSES"); chunk = e ? atoi(e) : 2; }
+    if (chunk < 0) { const char *e = ENV("NXRT_CHUNK_PASSES"); chunk = gpu_passes() ? 1 : e ? atoi(e) : 2; }
     if (chunk > 0 && cmdbuf && ++g_passes_in_cb >= chunk) renderer_submit();
+    if (gpu_passes()) {
+        id<MTLTexture> t0 = rp.colorAttachments[0].texture, td = rp.depthAttachment.texture;
+        id<MTLTexture> any = t0 ? t0 : td;
+        int nc = 0;
+        for (int i = 0; i < 8; i++) nc += rp.colorAttachments[i].texture != nil;
+        snprintf(gp_cur, sizeof gp_cur, "%lux%lu fmt %lu x%d%s%s", any ? (unsigned long)any.width : 0,
+                 any ? (unsigned long)any.height : 0, t0 ? (unsigned long)t0.pixelFormat : 0, nc, td ? " +depth" : "",
+                 rp.colorAttachments[0].loadAction == MTLLoadActionClear ? " clear" : "");
+    }
     enc = [cb() renderCommandEncoderWithDescriptor:rp];
     opening_pass = false;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
@@ -3015,7 +3079,7 @@ static void draw(CmdRec *r, bool indexed) {
         }
     }
     }  // runs
-    stat_draws++;
+    stat_draws++, gp_draws_all++;
     if (dbg_this) {
         static int nlog;
         if (nlog++ < 4) {
