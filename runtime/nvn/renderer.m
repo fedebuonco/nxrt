@@ -783,8 +783,11 @@ static void begin_pass(void) {
     // game waits for its previous frame before it submits the next one, so with one command buffer per frame the
     // GPU sat idle during our encoding and a frame cost GPU + encoding time (5120x1440 with the GPU clocked down:
     // ~15.5 + a few ms -> missed vsync -> 30 fps). NXRT_CHUNK_PASSES=<n> (0 = one buffer per frame).
+    // 2 since 2026-10-25: measured with LAS on the same scripted walk, every pass in its own buffer (1) and two a
+    // buffer (2) both start the GPU soon enough: 2x 38.2 -> 49.0 fps, frames over 20 ms 56.8% -> 22.3%; 1x 57.5 ->
+    // 59.1 fps, 4.3% -> 1.5% (1 measured 50.1/48.8 and 59.2: the same within noise, with twice the submissions).
     static int chunk = -1;
-    if (chunk < 0) { const char *e = ENV("NXRT_CHUNK_PASSES"); chunk = e ? atoi(e) : 8; }
+    if (chunk < 0) { const char *e = ENV("NXRT_CHUNK_PASSES"); chunk = e ? atoi(e) : 2; }
     if (chunk > 0 && cmdbuf && ++g_passes_in_cb >= chunk) renderer_submit();
     enc = [cb() renderCommandEncoderWithDescriptor:rp];
     opening_pass = false;
