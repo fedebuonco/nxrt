@@ -227,6 +227,22 @@ static bool file_exists(const std::string &p) {
     return stat(p.c_str(), &st) == 0;
 }
 
+// exefs/main's build id (its first 8 bytes, offset 0x40) against nx_game.info.build_id. All zeros there: a port that
+// doesn't know its version yet (the template) accepts any, and logs the one found so it can be filled in.
+static bool build_id_matches(const uint8_t id[8]) {
+    static const uint8_t none[8] = {0};
+    if (!memcmp(nx_game.info.build_id, none, 8)) {
+        static bool said;
+        if (!said) {
+            said = true;
+            LOG("[launcher] build_id not set (nx_game.info): accepting %02x%02x%02x%02x%02x%02x%02x%02x\n", id[0], id[1],
+                id[2], id[3], id[4], id[5], id[6], id[7]);
+        }
+        return true;
+    }
+    return !memcmp(id, nx_game.info.build_id, 8);
+}
+
 // The copied game files alone ("" = there), without the game code built from them
 static std::string check_copied_files(const std::string &root) {
     struct stat st;
@@ -239,7 +255,7 @@ static std::string check_copied_files(const std::string &root) {
     fseek(f, 0x40, SEEK_SET);
     size_t n = fread(id, 1, 8, f);
     fclose(f);
-    if (n != 8 || memcmp(id, nx_game.info.build_id, 8)) return std::string("Wrong game version (needs v") + nx_game.info.game_version + ")";
+    if (n != 8 || !build_id_matches(id)) return std::string("Wrong game version (needs v") + nx_game.info.game_version + ")";
     if (file_exists(root + "/romfs.src")) return "";  // (the RomFS read from the game package in place)
     if (!file_exists(root + "/romfs/" + nx_game.info.romfs_probe)) return "Game data missing";
     return "";
@@ -340,7 +356,7 @@ static bool build_id_ok(const std::string &main_path) {
     fseek(f, 0x40, SEEK_SET);
     size_t n = fread(id, 1, 8, f);
     fclose(f);
-    return n == 8 && !memcmp(id, nx_game.info.build_id, 8);
+    return n == 8 && build_id_matches(id);
 }
 
 // progress (the overlay's bar): the romfs copy, then the image build - each about the size of romfs/

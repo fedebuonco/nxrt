@@ -87,6 +87,18 @@ def _index_regs(m, start, at, idx):
     return sorted(regs)
 
 
+def _index_reloaded(m, frm, to, regs):
+    """A load into the index on the way from where it is set to the br. The bounds check tests one copy and the lookup
+    uses a value reloaded from memory (`cmp w8, #0x18 ; b.hi ; ldr x8, [sp, #0x20]`): both runs then see the same
+    memory, every index gives one target, and the table would pass as proven (Fire Emblem: Three Houses, subsdk0
+    0x70080a6654: 25 entries, 1 found, a miss at run time). Such a table stays unresolved."""
+    for a in range(frm, to, 4):
+        w = m.word(a)
+        if bits(w, 27, 1) == 1 and bits(w, 25, 1) == 0 and bits(w, 22, 1) == 1 and (w & 31) in regs:
+            return True
+    return False
+
+
 def _set_index(mu, regs, i):
     for r in regs:
         mu.reg_write(A.UC_ARM64_REG_X0 + r if r < 29 else A.UC_ARM64_REG_X29, i)
@@ -106,6 +118,8 @@ def _emulate_table(m, br_pc, entry, end, start, idx, count, set_at, fill):
             pc = mu.reg_read(A.UC_ARM64_REG_PC)
         return False
 
+    if _index_reloaded(m, set_at, br_pc, [idx]):
+        return None
     targets = []
     try:
         for i in range(count):
@@ -197,6 +211,8 @@ def _jump_table_fallthrough(m, br_pc, entry, end, fill):
     while start - 4 >= entry and cmp - (start - 4) <= 4 * 12 and m.lift(start - 4).kind in ('op', 'asm'):
         start -= 4
     idx_regs = _index_regs(m, start, cmp, idx)
+    if _index_reloaded(m, cmp, br_pc, idx_regs):
+        return None
     mu = emu(m)
     targets = []
 

@@ -60,6 +60,10 @@ HLE_FUNC("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", vi_create_layer) 
 
 HLE_FUNC("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", vi_destroy_layer) { (void)c; }
 HLE_FUNC("_ZN2nn2vi12SetLayerCropEPNS0_5LayerEiiii", vi_set_layer_crop) { c->x[0] = 0; }
+// How the layer is scaled to the screen (Fire Emblem: Three Houses sets it at boot): the window image is placed by
+// the renderer (runtime/nvn/output_scale.c), so it only succeeds. (Run as the SDK's own code it asks the display
+// service for a session object the runtime doesn't model, and gets null.)
+HLE_FUNC("_ZN2nn2vi19SetLayerScalingModeEPNS0_5LayerENS0_11ScalingModeE", vi_set_layer_scaling_mode) { c->x[0] = 0; }
 
 HLE_FUNC("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", vi_get_native_window) {
     if (!g_native_window) g_native_window = (uint64_t)hle_alloc(0x100);

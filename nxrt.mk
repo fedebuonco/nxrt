@@ -91,13 +91,19 @@ $(B)/obj/%.o: $(GEN)/%.c $(RT)/cpu.h
 	@mkdir -p $(dir $@)
 	@$(CC) $(GENFLAGS) -c $< -o $@
 
-$(B)/obj/gamelib_entry.o: $(NXRT)/tools/gamelib_entry.c $(GAMELIB_SRCS) $(NXRT)/nxrt.mk $(wildcard $(GEN)/main/main_build_id.txt)
+# The id also depends on what isn't a file (the flags, the game's GAME_MODULES in its own Makefile): written to a stamp
+# that changes only when the id does, so what embeds the id is rebuilt then (a port that set GAME_MODULES after its first
+# build kept an app expecting the old id: "built for another version").
+GAMELIB_STAMP := $(B)/gamelib.id
+$(shell mkdir -p $(B) && [ "$$(cat $(GAMELIB_STAMP) 2>/dev/null)" = "$(GAMELIB_FULL_ID)" ] || echo '$(GAMELIB_FULL_ID)' > $(GAMELIB_STAMP))
+
+$(B)/obj/gamelib_entry.o: $(NXRT)/tools/gamelib_entry.c $(GAMELIB_SRCS) $(NXRT)/nxrt.mk $(GAMELIB_STAMP) $(wildcard $(GEN)/main/main_build_id.txt)
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_FULL_ID)"' -DNX_MODULES='$(NX_MODULES_X)' -c $< -o $@
-$(B)/rt/gamelib.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk  # (the id comes from there: a rule change is a new id)
+$(B)/rt/gamelib.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk $(GAMELIB_STAMP)  # (the id comes from there: a rule change is a new id)
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
 # the start screen's build of it (runtime/gamebuild.c) uses the same flags
-$(B)/rt/gamebuild.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk
+$(B)/rt/gamebuild.o: $(GAMELIB_SRCS) $(NXRT)/nxrt.mk $(GAMELIB_STAMP)
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_CFLAGS='"$(strip $(filter-out -I$(RT),$(GENFLAGS)))"' \
                                 -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"'
 
