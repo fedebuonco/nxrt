@@ -2015,6 +2015,31 @@ static int sampler_slots(int n, __strong id<MTLSamplerState> *smp, NvnSamplerDes
     return ns;
 }
 
+// (NXRT_DUMP_TRIGGER) each texture sampled in the captured frames, saved once: <dir>/<guest addr>_<w>x<h>_f<format>.png
+// (the draw log's [dtex] lines name textures by the same address)
+char g_capture_dir[512];
+static void capture_texture(NvnTexture *t, id<MTLTexture> tex) {
+    static NSMutableSet *saved;
+    if (!saved) saved = [NSMutableSet new];
+    NSNumber *k = @(t->addr ^ ((uint64_t)t->format << 56));
+    if ([saved containsObject:k] || saved.count >= 400) return;
+    [saved addObject:k];
+    if (tex.textureType == MTLTextureTypeTextureBuffer || tex.width > 4096 || tex.height > 4096) return;
+    char path[700];
+    snprintf(path, sizeof path, "%s/%llx_%ux%u_f%x.png", g_capture_dir, (unsigned long long)t->addr, t->width, t->height, t->format);
+    renderer_save_texture(tex, path);  // (its own command buffer: the contents as the GPU last left them)
+    // and its alpha as grey (text is often in alpha only, the colour plain white): through a swizzled view, so
+    // compressed formats work too
+    MTLTextureSwizzleChannels sw = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleAlpha, MTLTextureSwizzleAlpha,
+                                                                 MTLTextureSwizzleAlpha, MTLTextureSwizzleOne);
+    id<MTLTexture> av = tex.textureType == MTLTextureType2D ?
+        [tex newTextureViewWithPixelFormat:tex.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:sw] : nil;
+    if (av) {
+        snprintf(path, sizeof path, "%s/%llx_%ux%u_f%x_alpha.png", g_capture_dir, (unsigned long long)t->addr, t->width, t->height, t->format);
+        renderer_save_texture(av, path);
+    }
+}
+
 static void bind_textures(int stage, ShaderInfo *si) {
     if (stage == 1) {
     }
@@ -2033,6 +2058,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            if (e->tex && tex && g_debug_frame && g_capture_dir[0]) capture_texture(e->tex, tex);
             else if (e->dead_format) nvn_dead_slot_sampled(e, tic);
             if (e->tex && stage == 1 && NX_HOOK(tex_replace)) {
                 extern int renderer_texpatch_of(NvnTexture *t);
@@ -2354,6 +2380,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            if (e->tex && tex && g_debug_frame && g_capture_dir[0]) capture_texture(e->tex, tex);
             else if (e->dead_format) nvn_dead_slot_sampled(e, tic);
             if (e->tex && i < 64) { renderer_texture_scale(e->tex, &tex_sc[0][i][0], &tex_sc[0][i][1]); renderer_texture_fraction(e->tex, &tex_fr[0][i][0], &tex_fr[0][i][1]); }
             for (int k = 0; k < nfeedback; k++)
@@ -3921,12 +3948,17 @@ void renderer_reset(void) {
     st_defaults();
 }
 
-uint64_t g_debug_exec_frame;  // (NXRT_DUMP_TRIGGER) the frame to dump, as the render thread translates it (0: none)
+uint64_t g_debug_exec_frame, g_debug_exec_end;  // (NXRT_DUMP_TRIGGER) the frames to dump [start, end), as the render
+                                                 // thread translates them (0: none)
+extern char g_capture_dir[512];  // (NXRT_DUMP_TRIGGER) where the textures sampled in those frames are saved
 void backend_execute(uint64_t handle) {
     @autoreleasepool {
         // a trigger's debug frame is the frame whose commands run here: the presenting thread's flag covers only the
         // commands that happen to run while it presents (a partial frame)
-        if (g_debug_exec_frame) g_debug_frame = renderer_exec_frame() == g_debug_exec_frame;
+        if (g_debug_exec_frame) {
+            uint64_t f = renderer_exec_frame();
+            g_debug_frame = f >= g_debug_exec_frame && f < (g_debug_exec_end ? g_debug_exec_end : g_debug_exec_frame + 1);
+        }
         exec_list(handle, 0);
         static int sync_submit = -1;
         if (sync_submit < 0) sync_submit = getenv("NXRT_SYNC_SUBMIT") ? 1 : 0;

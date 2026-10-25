@@ -1501,9 +1501,14 @@ static void present_hooks(void) {
     if (trigger == (const char *)-1) trigger = getenv("NXRT_DUMP_TRIGGER");
     if (trigger && total_frames % 30 == 0 && access(trigger, F_OK) == 0) {
         unlink(trigger);
-        extern uint64_t g_debug_exec_frame;
+        extern uint64_t g_debug_exec_frame, g_debug_exec_end;
+        extern char g_capture_dir[512];
         g_debug_exec_frame = renderer_exec_frame() + 2;  // (two frames on: the render thread hasn't started it)
-        LOG("[dump] trigger: frame %llu\n", (unsigned long long)g_debug_exec_frame);
+        g_debug_exec_end = g_debug_exec_frame + 30;      // 30 frames: a layer drawn now and then is caught too
+        snprintf(g_capture_dir, sizeof g_capture_dir, "%s-tex", trigger);
+        mkdir(g_capture_dir, 0755);
+        LOG("[dump] trigger: frames %llu-%llu, sampled textures -> %s\n", (unsigned long long)g_debug_exec_frame,
+            (unsigned long long)g_debug_exec_end - 1, g_capture_dir);
         extern char g_window_shot_request[256];
         snprintf(g_window_shot_request, sizeof g_window_shot_request, "%s.png", trigger);
     }

@@ -429,7 +429,10 @@ PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
 NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
 NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { (void)c; }
 NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferDrawTexture) { (void)c; }
+NVN(nvnCommandBufferDrawTexture) {  // (not implemented yet: count the calls)
+    static uint64_t n;
+    if ((++n & (n - 1)) == 0) LOG("[nvn] DrawTexture call %llu (not implemented)\n", (unsigned long long)n);
+}
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
 PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
 NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; }
