@@ -299,15 +299,25 @@ static void end_pass(void) {
     if (enc) {
         [enc endEncoding];
         enc = nil;
-        if (g_debug_frame && !g_capture_dir[0] && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {  // (not
-            id<MTLTexture> t = renderer_texture(st.rt.color[0], nil, true);                                    //  in a capture)
+        // each pass's colour target as it ends: a debug frame, or a capture's first frame (in a capture, 30 frames of
+        // this stalled the game: one frame is a few seconds) - into the capture folder, named by pass and target
+        extern uint64_t g_debug_exec_frame;
+        bool snap = g_debug_frame && (!g_capture_dir[0] || renderer_exec_frame() == g_debug_exec_frame);
+        if (snap && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+            id<MTLTexture> t = renderer_texture(st.rt.color[0], nil, true);
             id<MTLCommandBuffer> c = cmdbuf;
             cmdbuf = nil;
             [c commit];
             [c waitUntilCompleted];
-            char path[256], apath[256];
-            snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no);
-            snprintf(apath, sizeof apath, "build/pass_%03d_a.png", debug_pass_no++);
+            char path[700], apath[700];
+            if (g_capture_dir[0]) {
+                snprintf(path, sizeof path, "%s/pass_%03d_%llx.png", g_capture_dir, debug_pass_no, (unsigned long long)st.rt.color[0]->addr);
+                snprintf(apath, sizeof apath, "%s/pass_%03d_%llx_a.png", g_capture_dir, debug_pass_no++, (unsigned long long)st.rt.color[0]->addr);
+                LOG("[pass] snapshot %s\n", path);
+            } else {
+                snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no);
+                snprintf(apath, sizeof apath, "build/pass_%03d_a.png", debug_pass_no++);
+            }
             renderer_save_game_texture(st.rt.color[0], t, path, apath);  // (the part the pass drew: Dynamic resolution)
         }
     }
