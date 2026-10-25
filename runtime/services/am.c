@@ -110,23 +110,42 @@ static void generic_ok(Service *s, IpcReq *req, IpcResp *resp) {
 // On the console a library applet is a process of its own (the "attach the straps" guide, the controller-support
 // dialog, the software keyboard). There is none here: the accessor says it started and completed at once, so a game
 // that opens one before its first scene (Sky's strap guide) carries on instead of waiting, or asserting that the
-// creation returned no accessor.
+// creation returned no accessor. What the applet hands back (PopOutData) is what it would on a console where the
+// player accepted at once: the controller-support applet (Skyward Sword HD at boot) one player on controller 1.
+enum { APPLET_CONTROLLER = 0x0C };
+typedef struct { uint32_t id; bool popped; } AppletAcc;
+
+static Service *new_am_storage(const void *data, uint64_t size);  // (below: IStorage)
+
 static void library_applet_accessor(Service *s, IpcReq *req, IpcResp *resp) {
-    (void)s;
-    LOG("[am] ILibraryAppletAccessor cmd %u\n", req->cmd);
+    AppletAcc *a = s->state;
+    LOG("[am] ILibraryAppletAccessor cmd %u (applet %#x)\n", req->cmd, a ? a->id : 0);
     switch (req->cmd) {
-    case 0:  // GetAppletStateChangedEvent
+    case 0:    // GetAppletStateChangedEvent
+    case 105:  // GetPopOutDataEvent
+    case 106:  // GetPopInteractiveOutDataEvent
         resp->copy_handles[resp->ncopy++] = new_signaled_event();
         break;
     case 1:  // IsCompleted
         OUT(uint8_t, 0) = 1;
         resp_size(resp, 1);
         break;
-    case 10:  // GetResult
-        OUT(uint32_t, 0) = 0;
-        resp_size(resp, 4);
+    case 10: case 20: case 25:  // Start / RequestExit / Terminate
+    case 30:  // GetResult: success
+    case 100: case 102: case 103:  // PushInData / PushExtraStorage / PushInteractiveInData (taken, not read)
         break;
-    case 20: case 21: case 22:  // Start / RequestExit / Terminate
+    case 101:  // PopOutData: the applet's result, once
+        if (a && a->id == APPLET_CONTROLLER && !a->popped) {
+            // ControllerSupportResultInfo: player count (s8, 3 pad), selected Npad id (No1 = 0), result (0: accepted)
+            uint8_t info[0xC] = {1};
+            a->popped = true;
+            ipc_return_object(resp, new_am_storage(info, sizeof info));
+        } else {
+            resp->result = AM_NO_DATA;  // (nothing more: as an applet that pushed nothing)
+        }
+        break;
+    case 104:  // PopInteractiveOutData
+        resp->result = AM_NO_DATA;
         break;
     default:
         LOG("[am] ILibraryAppletAccessor cmd %u (ok)\n", req->cmd);
@@ -134,14 +153,16 @@ static void library_applet_accessor(Service *s, IpcReq *req, IpcResp *resp) {
     }
 }
 
-static Service *new_am_storage(const void *data, uint64_t size);  // (below: IStorage)
-
 static void library_applet_creator(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 0:  // CreateLibraryApplet(appletId, mode): an accessor that is already done
         LOG("[am] CreateLibraryApplet id %u mode %u\n", (unsigned)IN(uint32_t, 0), (unsigned)IN(uint32_t, 4));
-        ipc_return_object(resp, service_new("ILibraryAppletAccessor", library_applet_accessor, NULL));
+        {
+            AppletAcc *acc = calloc(1, sizeof *acc);
+            if (acc) acc->id = IN(uint32_t, 0);
+            ipc_return_object(resp, service_new("ILibraryAppletAccessor", library_applet_accessor, acc));
+        }
         break;
     case 1:  // CreateStorage(size)
         LOG("[am] CreateStorage %llu bytes\n", (unsigned long long)IN(uint64_t, 0));
