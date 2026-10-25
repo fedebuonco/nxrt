@@ -596,6 +596,68 @@ static bool write_file(const char *path, int fd, uint64_t nca_base, const Sectio
     return fclose(f) == 0 && ok;
 }
 
+// The package's files (an NSP's PFS0, an XCI's secure partition, or a bare NCA as one file). false: why.
+static bool package_files(int fd, Entries *files, char *why, size_t why_size) {
+    struct stat sb;
+    if (fstat(fd, &sb)) return WHY("can't open the game package");
+    uint8_t head[0x200];
+    if (!pread_all(fd, head, sizeof head, 0)) return WHY("the game package is too small");
+    if (!memcmp(head, "PFS0", 4)) {  // NSP
+        if (!read_fs0(fd, 0, files)) return WHY("bad NSP");
+    } else if (!memcmp(head + 0x100, "HEAD", 4)) {  // XCI: the root HFS0's "secure" partition
+        uint64_t root;
+        memcpy(&root, head + 0x130, 8);
+        Entries parts = {0};
+        if (!read_fs0(fd, root, &parts)) return WHY("bad XCI");
+        for (int i = 0; i < parts.n; i++)
+            if (!strcmp(parts.e[i].name, "secure")) read_fs0(fd, parts.e[i].off, files);
+        free(parts.e);
+        if (!files->n) return WHY("XCI without a secure partition");
+    } else {
+        entries_add(files, "program.nca", 0, (uint64_t)sb.st_size);  // a bare NCA
+    }
+    for (int i = 0; i < files->n; i++)
+        if (files->e[i].off + files->e[i].size > (uint64_t)sb.st_size)
+            return WHY("the game package is incomplete (%llu MB missing): copy it again",
+                       (unsigned long long)((files->e[i].off + files->e[i].size - (uint64_t)sb.st_size) >> 20));
+    return true;
+}
+
+// The first NCA of the package with this content type (0 program, 2 control), its header decrypted. false: none (*any:
+// whether any NCA's header decrypted at all - wrong keys otherwise).
+static bool find_nca(int fd, const Entries *files, const Keys *ks, int type, Nca *nca, bool *any) {
+    for (int i = 0; i < files->n; i++) {
+        size_t l = strlen(files->e[i].name);
+        if (l < 4 || strcmp(files->e[i].name + l - 4, ".nca")) continue;
+        if (!nca_header(fd, files->e[i].off, ks, nca)) continue;
+        if (any) *any = true;
+        if (nca->hdr[0x205] == type) return true;
+    }
+    return false;
+}
+
+// The NCA's section key (AES-CTR) into nca->ctr_key: its title key (a ticket in the NSP, or title.keys beside the
+// keys file) or its key area. false: why.
+static bool nca_key(Nca *nca, int fd, const Entries *files, const Keys *ks, const char *keys_path, char *why, size_t why_size) {
+    int gen = nca->hdr[0x206] > nca->hdr[0x220] ? nca->hdr[0x206] : nca->hdr[0x220];
+    int keygen = gen ? gen - 1 : 0;
+    static const uint8_t zero[16];
+    if (memcmp(nca->hdr + 0x230, zero, 16)) {
+        if (!title_key(nca, fd, files, ks, keys_path, keygen, nca->ctr_key))
+            return WHY("the package needs a title key (no ticket in it, none in title.keys)");
+        return true;
+    }
+    char kn[48];
+    snprintf(kn, sizeof kn, "key_area_key_application_%02x", keygen);
+    const uint8_t *kaek = key_get(ks, kn, 16);
+    if (!kaek) return WHY("the keys file has no %s (keys from an older system?)", kn);
+    uint8_t area[0x40];
+    memcpy(area, nca->hdr + 0x300, 0x40);
+    nx_aes128_ecb_decrypt(kaek, area, 0x40);
+    memcpy(nca->ctr_key, area + 0x20, 16);  // index 2: AES-CTR
+    return true;
+}
+
 bool nx_setup(const char *package, const char *keys_path, const char *out_dir, uint64_t *title_id, char *why,
               size_t why_size) {
     Keys ks = {0};
@@ -605,60 +667,17 @@ bool nx_setup(const char *package, const char *keys_path, const char *out_dir, u
     int fd = open_package(package);
     struct stat sb;
     if (fd < 0 || fstat(fd, &sb)) { WHY("can't open the game package"); goto out; }
-    uint8_t head[0x200];
-    if (!pread_all(fd, head, sizeof head, 0)) { WHY("the game package is too small"); goto out; }
-    if (!memcmp(head, "PFS0", 4)) {  // NSP
-        if (!read_fs0(fd, 0, &files)) { WHY("bad NSP"); goto out; }
-    } else if (!memcmp(head + 0x100, "HEAD", 4)) {  // XCI: the root HFS0's "secure" partition
-        uint64_t root;
-        memcpy(&root, head + 0x130, 8);
-        Entries parts = {0};
-        if (!read_fs0(fd, root, &parts)) { WHY("bad XCI"); goto out; }
-        for (int i = 0; i < parts.n; i++)
-            if (!strcmp(parts.e[i].name, "secure")) read_fs0(fd, parts.e[i].off, &files);
-        free(parts.e);
-        if (!files.n) { WHY("XCI without a secure partition"); goto out; }
-    } else {
-        entries_add(&files, "program.nca", 0, (uint64_t)sb.st_size);  // a bare NCA
-    }
-    for (int i = 0; i < files.n; i++)
-        if (files.e[i].off + files.e[i].size > (uint64_t)sb.st_size) {
-            WHY("the game package is incomplete (%llu MB missing): copy it again",
-                (unsigned long long)((files.e[i].off + files.e[i].size - (uint64_t)sb.st_size) >> 20));
-            goto out;
-        }
+    if (!package_files(fd, &files, why, why_size)) goto out;
     Nca nca;
-    bool found = false;
     bool any_nca = false;
-    for (int i = 0; i < files.n && !found; i++) {
-        size_t l = strlen(files.e[i].name);
-        if (l < 4 || strcmp(files.e[i].name + l - 4, ".nca")) continue;
-        if (!nca_header(fd, files.e[i].off, &ks, &nca)) continue;
-        any_nca = true;
-        found = nca.hdr[0x205] == 0;  // content type: program
+    if (!find_nca(fd, &files, &ks, 0, &nca, &any_nca)) {  // content type 0: the program
+        WHY(any_nca ? "no game program in the package" : "can't decrypt the package (wrong or old keys?)");
+        goto out;
     }
-    if (!found) { WHY(any_nca ? "no game program in the package" : "can't decrypt the package (wrong or old keys?)"); goto out; }
     uint64_t tid;
     memcpy(&tid, nca.hdr + 0x210, 8);
     if (title_id) *title_id = tid;
-    int gen = nca.hdr[0x206] > nca.hdr[0x220] ? nca.hdr[0x206] : nca.hdr[0x220];
-    int keygen = gen ? gen - 1 : 0;
-    static const uint8_t zero[16];
-    if (memcmp(nca.hdr + 0x230, zero, 16)) {
-        if (!title_key(&nca, fd, &files, &ks, keys_path, keygen, nca.ctr_key)) {
-            WHY("the package needs a title key (no ticket in it, none in title.keys)");
-            goto out;
-        }
-    } else {
-        char kn[48];
-        snprintf(kn, sizeof kn, "key_area_key_application_%02x", keygen);
-        const uint8_t *kaek = key_get(&ks, kn, 16);
-        if (!kaek) { WHY("the keys file has no %s (keys from an older system?)", kn); goto out; }
-        uint8_t area[0x40];
-        memcpy(area, nca.hdr + 0x300, 0x40);
-        nx_aes128_ecb_decrypt(kaek, area, 0x40);
-        memcpy(nca.ctr_key, area + 0x20, 16);  // index 2: AES-CTR
-    }
+    if (!nca_key(&nca, fd, &files, &ks, keys_path, why, why_size)) goto out;
     Section exefs, romfs;
     if (!section_info(&nca, 0, &exefs) || !section_info(&nca, 1, &romfs) || exefs.fs_type != 1) {
         WHY("unexpected program layout");
@@ -835,4 +854,110 @@ static ssize_t pkg_rd(void *rc, void *dst, uint64_t n, uint64_t off) { return nx
 bool nx_romfs_find(NxRomfs *r, const char *path, uint64_t *off, uint64_t *size) { return nx_romtab_find(pkg_rd, r, path, off, size); }
 int nx_romfs_walk(NxRomfs *r, void (*fn)(const char *path, uint64_t off, uint64_t size, void *ctx), void *ctx) {
     return nx_romtab_walk(pkg_rd, r, fn, ctx);
+}
+
+// ------------------------------------------------------------------ what a package is: its program and control data
+typedef struct { int fd; uint64_t base; const Section *s; const uint8_t *key; } SecRd;
+static ssize_t sec_rd(void *rc, void *dst, uint64_t n, uint64_t off) {
+    const SecRd *r = rc;
+    if (off > r->s->data_size || n > r->s->data_size - off) return -1;
+    return section_read(r->fd, r->base, r->s, r->key, dst, r->s->data_off + off, (size_t)n) ? (ssize_t)n : -1;
+}
+
+typedef struct { char best[64]; } IconPick;
+static void pick_icon(const char *path, uint64_t off, uint64_t size, void *c) {
+    (void)off, (void)size;
+    IconPick *p = c;
+    if (strncmp(path, "icon_", 5) || strchr(path, '/')) return;
+    if (!p->best[0] || !strcmp(path, "icon_AmericanEnglish.dat")) snprintf(p->best, sizeof p->best, "%s", path);
+}
+
+static void nacp_text(char *out, size_t cap, const uint8_t *src, size_t n) {
+    size_t k = 0;
+    for (; k < n && k + 1 < cap && src[k]; k++) out[k] = (char)src[k];
+    out[k] = 0;
+}
+
+bool nx_package_info(const char *package, const char *keys_path, NxPackageInfo *out, char *why, size_t why_size) {
+    memset(out, 0, sizeof *out);
+    Keys ks = {0};
+    if (!keys_load(keys_path, &ks)) return WHY("can't read the keys file");
+    bool ok = false;
+    Entries files = {0};
+    int fd = open_package(package);
+    if (fd < 0) { WHY("can't open the game package"); goto out; }
+    if (!package_files(fd, &files, why, why_size)) goto out;
+    Nca prog, ctl;
+    bool any = false;
+    if (!find_nca(fd, &files, &ks, 0, &prog, &any)) {
+        WHY(any ? "no game program in the package (an update or DLC?)" : "can't decrypt the package (wrong or old keys?)");
+        goto out;
+    }
+    memcpy(&out->title_id, prog.hdr + 0x210, 8);
+    // the main NSO's build id, from the program's ExeFS
+    if (nca_key(&prog, fd, &files, &ks, keys_path, why, why_size)) {
+        Section exefs;
+        uint8_t h[16];
+        if (section_info(&prog, 0, &exefs) && exefs.fs_type == 1 &&
+            section_read(fd, prog.base, &exefs, prog.ctr_key, h, exefs.data_off, 16) && !memcmp(h, "PFS0", 4)) {
+            uint32_t n, strsz;
+            memcpy(&n, h + 4, 4), memcpy(&strsz, h + 8, 4);
+            size_t meta = 16 + (size_t)n * 0x18 + strsz;
+            uint8_t *m = n <= 4096 && strsz <= (1u << 20) ? malloc(meta) : NULL;
+            if (m && section_read(fd, prog.base, &exefs, prog.ctr_key, m, exefs.data_off, meta))
+                for (uint32_t i = 0; i < n; i++) {
+                    uint64_t off;
+                    uint32_t no;
+                    memcpy(&off, m + 16 + i * 0x18, 8), memcpy(&no, m + 32 + i * 0x18, 4);
+                    if (no >= strsz || strncmp((const char *)m + 16 + n * 0x18 + no, "main", strsz - no) ||
+                        ((const char *)m)[16 + n * 0x18 + no + 4] != 0)
+                        continue;
+                    uint8_t nso[0x48];
+                    if (section_read(fd, prog.base, &exefs, prog.ctr_key, nso, exefs.data_off + meta + off, sizeof nso) &&
+                        !memcmp(nso, "NSO0", 4))
+                        memcpy(out->build_id, nso + 0x40, 8), out->has_build_id = true;
+                    break;
+                }
+            free(m);
+        }
+    }
+    // the control data: names, version, icon (control.nacp and icon_<language>.dat in the control NCA's RomFS)
+    why[0] = 0;
+    if (find_nca(fd, &files, &ks, 2, &ctl, NULL) && nca_key(&ctl, fd, &files, &ks, keys_path, why, why_size)) {
+        Section rs;
+        if (section_info(&ctl, 0, &rs) && !rs.comp_size) {
+            SecRd rd = {fd, ctl.base, &rs, ctl.ctr_key};
+            uint64_t off, size;
+            if (nx_romtab_find(sec_rd, &rd, "control.nacp", &off, &size) && size >= 0x3070) {
+                uint8_t *nacp = malloc(0x3070);
+                if (nacp && sec_rd(&rd, nacp, 0x3070, off) == 0x3070) {
+                    for (int lang = 0; lang < 16 && !out->name[0]; lang++) {  // AmericanEnglish first, then the others
+                        nacp_text(out->name, sizeof out->name, nacp + lang * 0x300, 0x200);
+                        nacp_text(out->publisher, sizeof out->publisher, nacp + lang * 0x300 + 0x200, 0x100);
+                    }
+                    nacp_text(out->version, sizeof out->version, nacp + 0x3060, 0x10);
+                }
+                free(nacp);
+            }
+            IconPick ip = {{0}};
+            nx_romtab_walk(sec_rd, &rd, pick_icon, &ip);
+            if (ip.best[0] && nx_romtab_find(sec_rd, &rd, ip.best, &off, &size) && size > 0 && size < (4u << 20)) {
+                out->icon = malloc(size);
+                if (out->icon && sec_rd(&rd, out->icon, size, off) == (ssize_t)size) out->icon_size = (size_t)size;
+                else free(out->icon), out->icon = NULL;
+            }
+        }
+    }
+    why[0] = 0;
+    ok = true;
+out:
+    if (fd >= 0) close(fd);
+    free(files.e);
+    free(ks.k);
+    return ok;
+}
+
+void nx_package_info_free(NxPackageInfo *i) {
+    free(i->icon);
+    i->icon = NULL, i->icon_size = 0;
 }

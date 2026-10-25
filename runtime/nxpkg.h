@@ -17,6 +17,19 @@ extern "C" {
 // title_id: the program's, out (may be NULL). false = failed (why: a short message for the player).
 bool nx_setup(const char *package, const char *keys, const char *out_dir, uint64_t *title_id, char *why, size_t why_size);
 
+// What a game package is, without setting it up: its program's title id and main build id, and from its control data
+// the game's name, publisher, version and icon (a JPEG). keys: the player's prod.keys (title.keys beside it).
+typedef struct {
+    uint64_t title_id;
+    uint8_t build_id[8];   // exefs/main's (the first 8 bytes): which game version, as NxGameInfo.build_id
+    bool has_build_id;
+    char name[0x201], publisher[0x101], version[0x11];  // (empty: no control data)
+    uint8_t *icon;         // JPEG, malloc'd (nx_package_info_free), NULL: none
+    size_t icon_size;
+} NxPackageInfo;
+bool nx_package_info(const char *package, const char *keys, NxPackageInfo *out, char *why, size_t why_size);
+void nx_package_info_free(NxPackageInfo *info);
+
 typedef struct NxRomfs NxRomfs;
 // From a romfs.src written by nx_setup. NULL = missing / the package moved or changed (why).
 NxRomfs *nx_romfs_open(const char *src_path, char *why, size_t why_size);

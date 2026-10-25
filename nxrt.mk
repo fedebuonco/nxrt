@@ -76,9 +76,9 @@ RT_OBJ   := $(patsubst $(RT)/%.c,$(B)/rt/%.o,$(patsubst $(RT)/%.cpp,$(B)/rt/%.o,
 RTINC    := -I$(RT) -I$(RT)/nvn $(INC_UI)
 # Where a source checkout's app finds the recompiler and the game-code headers (runtime/gamebuild.c, NXRT_DEV): NXRT
 # as this Makefile spelled it, so the same relative path works from the project root and from build/ (the exe's
-# folder is searched too). An absolute NXRT leaves it empty: a copy built that way can't rebuild the game code in
-# place, which is what a packaged app does anyway (it ships nxgen or zig).
-NXRT_DEV := $(if $(filter /% %:%,$(NXRT)),,$(NXRT)/)
+# folder is searched too); an absolute NXRT is used as it is (platform/paths.c rt_resource), so such a build can
+# rebuild its game code from wherever it is started. A packaged app finds what it ships (nxgen, zig) first.
+NXRT_DEV := $(NXRT)/
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -DNXRT_DEV='"$(NXRT_DEV)"' $(RTINC) $(DEPINC)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends $(RTINC) $(DEPINC)
 # the game's sources include the runtime's headers as their own folder's ("hle.h", "../settings.h" from hle/ or ui/)

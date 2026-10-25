@@ -339,7 +339,9 @@ static void layers_init(void) {
 int main(int argc, char **argv) {
     // --describe: the game, as JSON, and exit (a manager reads it: nxrt-frontend); --status: the game files and code too
     extern void rt_print_describe(void), rt_print_status(void);
+    extern int rt_run_setup(const char *src, const char *mode);
     bool status_only = false;
+    const char *setup_src = NULL, *setup_mode = "all";  // --setup <folder or package> ("": the game code only) ...
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--describe")) { rt_print_describe(); return 0; }
         if (!strcmp(argv[i], "--status")) status_only = true;
@@ -354,6 +356,10 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
         else if (!strcmp(argv[i], "--status")) {}
+        else if (!strcmp(argv[i], "--setup")) setup_src = i + 1 < argc ? argv[++i] : "";
+        else if (!strcmp(argv[i], "--setup-files")) setup_src = i + 1 < argc ? argv[++i] : "", setup_mode = "files";
+        else if (!strcmp(argv[i], "--generate")) setup_src = "", setup_mode = "generate";
+        else if (!strcmp(argv[i], "--compile")) setup_src = "", setup_mode = "compile";
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
@@ -366,6 +372,7 @@ int main(int argc, char **argv) {
     else if (g_settings.game_dir[0]) rt_game_dir_set(g_settings.game_dir, !g_settings.game_in_place);
     { extern void rt_ui_register(void); rt_ui_register(); }
     if (status_only) { rt_print_status(); return 0; }
+    if (setup_src) return rt_run_setup(setup_src, setup_mode);
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen (nx-ui launcher.mm): game files setup, profile choice, settings
             extern void ui_window_init(void);

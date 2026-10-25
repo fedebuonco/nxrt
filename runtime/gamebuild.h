@@ -15,6 +15,9 @@ typedef struct {
     void (*progress)(double fraction, const char *step);
     int jobs;  // compiler processes at once (>= 1)
     bool (*cancelled)(void);  // optional, polled on this thread; completed objects stay reusable
+    // only the generator: the game's code translated to C and kept in .gamebuild (a manager's "Generate" step); the
+    // next full build reuses it and only compiles
+    bool generate_only;
 } GameBuildOpts;
 
 // Builds it (a few minutes). false: why says what went wrong (details in the log).

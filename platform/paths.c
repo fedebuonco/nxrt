@@ -286,7 +286,9 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) {
         snprintf(c[0], sizeof c[0], "%s" SEP "%s", g_exe_dir, name);
         snprintf(c[1], sizeof c[1], "%s" SEP ".." SEP "Resources" SEP "%s", g_exe_dir, name);  // .app/Contents/Resources
     }
-    if (dev_rel) {
+    if (dev_rel && (dev_rel[0] == '/' || dev_rel[0] == '\\' || (dev_rel[0] && dev_rel[1] == ':'))) {
+        snprintf(c[2], sizeof c[2], "%s", dev_rel);  // (an absolute NXRT: nxrt.mk NXRT_DEV)
+    } else if (dev_rel) {
         snprintf(c[2], sizeof c[2], "%s" SEP "%s", g_start, dev_rel);
         snprintf(c[3], sizeof c[3], "%s" SEP ".." SEP "%s", g_exe_dir, dev_rel);  // build/<exe> -> repo root
     }

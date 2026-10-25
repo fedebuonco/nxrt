@@ -63,6 +63,42 @@ bool nxm_package_setup(const char *package, const char *keys, const char *out_di
     return nx_setup(package, keys, out_dir, title_id, why, why_size);
 }
 
+bool nxm_package_info(const char *package, const char *keys, NxmPackage *out, char *why, size_t why_size) {
+    NxPackageInfo i;
+    memset(out, 0, sizeof *out);
+    if (!nx_package_info(package, keys, &i, why, why_size)) return false;
+    out->title_id = i.title_id;
+    memcpy(out->build_id, i.build_id, 8);
+    out->has_build_id = i.has_build_id;
+    memcpy(out->name, i.name, sizeof out->name);
+    memcpy(out->publisher, i.publisher, sizeof out->publisher);
+    memcpy(out->version, i.version, sizeof out->version);
+    out->icon = i.icon, out->icon_size = i.icon_size;  // (handed over)
+    return true;
+}
+
+void nxm_package_free(NxmPackage *p) {
+    free(p->icon);
+    p->icon = NULL, p->icon_size = 0;
+}
+
+bool nxm_find_keys(const char *package, char *out, size_t out_size) {
+    char dir[1100];
+    snprintf(dir, sizeof dir, "%s", package);
+    char *sl = strrchr(dir, '/');
+    if (sl) *sl = 0;
+    else snprintf(dir, sizeof dir, ".");
+    snprintf(out, out_size, "%s/prod.keys", dir);
+    if (is_file(out)) return true;
+    const char *home = getenv("HOME");
+    if (home) {
+        snprintf(out, out_size, "%s/.switch/prod.keys", home);
+        if (is_file(out)) return true;
+    }
+    out[0] = 0;
+    return false;
+}
+
 // ------------------------------------------------------------------ RomFS: a folder, or the package read in place
 struct NxmRomfs {
     char *dir;    // romfs/ (a folder game), or NULL

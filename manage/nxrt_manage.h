@@ -36,6 +36,21 @@ bool nxm_nso_build_id(const char *path, uint8_t out[8]);
 bool nxm_package_setup(const char *package, const char *keys, const char *out_dir, uint64_t *title_id, char *why,
                        size_t why_size);
 
+// ------------------------------------------------------------------ a game package (.nsp / .xci / program .nca)
+typedef struct {
+    uint64_t title_id;
+    uint8_t build_id[8];  // exefs/main's: which version of the game (NxGameInfo.build_id)
+    bool has_build_id;
+    char name[0x201], publisher[0x101], version[0x11];  // from its control data ("" when it has none)
+    uint8_t *icon;  // JPEG (nxm_package_free), NULL: none
+    size_t icon_size;
+} NxmPackage;
+// What the package is, without setting it up (reads only its headers and control data). false: why.
+bool nxm_package_info(const char *package, const char *keys, NxmPackage *out, char *why, size_t why_size);
+void nxm_package_free(NxmPackage *p);
+// The keys file for a package: prod.keys beside it, else ~/.switch/prod.keys. false: none found.
+bool nxm_find_keys(const char *package, char *out, size_t out_size);
+
 // ------------------------------------------------------------------ the RomFS of a game folder
 typedef struct NxmRomfs NxmRomfs;
 // romfs/ or romfs.src, whichever the folder has. NULL: neither (why).

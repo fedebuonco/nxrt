@@ -378,10 +378,16 @@ static float extract_progress(void) {
     return f < 0 ? 0 : f > 0.99f ? 0.99f : f;
 }
 
+// What the setup goes as far as (rt_run_setup: a manager's steps; the start screen always does all of it)
+enum { BUILD_ALL, BUILD_NONE, BUILD_GENERATE };
+static int g_build_mode = BUILD_ALL;
+
 // Builds the game code from the copied files (a few minutes); false = failed (the job line says so)
 static bool build_game_code(void) {
+    if (g_build_mode == BUILD_NONE) return true;  // (the files only)
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
     GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
+    o.generate_only = g_build_mode == BUILD_GENERATE;
     char why[256] = "";
     g_build_frac = 0;
     bool ok = gamebuild_run(g_root.c_str(), &o, why, sizeof why);
@@ -459,7 +465,16 @@ static void *extract_thread(void *) {
         goto check;
     }
     set_job("Looking for the game files...");
-    find_game(src, 0, exefs, romfs, package, package_size, keys, unusable);
+    if (struct stat st; !stat(src.c_str(), &st) && S_ISREG(st.st_mode)) {  // a package itself (a manager picked it)
+        package = src;
+        std::string dir = src.substr(0, src.find_last_of("/\\") == std::string::npos ? 0 : src.find_last_of("/\\"));
+        const char *home = getenv("HOME");
+        if (const char *k = getenv("NXRT_KEYS")) keys = k;
+        else if (file_exists(dir + "/prod.keys")) keys = dir + "/prod.keys";
+        else if (home && file_exists(std::string(home) + "/.switch/prod.keys")) keys = std::string(home) + "/.switch/prod.keys";
+    } else {
+        find_game(src, 0, exefs, romfs, package, package_size, keys, unusable);
+    }
     if ((exefs.empty() || romfs.empty()) && !package.empty()) {  // the game package: ExeFS out, RomFS read in place
         if (!package_setup(package, keys)) goto done;
         if (!build_game_code()) goto done;
@@ -519,13 +534,14 @@ rt_remove_game_files(g_root.c_str());  // (what an earlier setup built here: the
     }
 check:
     {
-        std::string why = check_game_files(g_root);
+        // (the files only, or generated: the game code isn't there yet, and isn't expected to be)
+        std::string why = g_build_mode == BUILD_ALL ? check_game_files(g_root) : check_copied_files(g_root);
         if (why.empty()) {
-            if (!prep_romfs().empty()) {
+            if (g_build_mode == BUILD_ALL && !prep_romfs().empty()) {
                 set_job("Preparing shaders (Skip to play now)...");
                 nxui_shader_prep_run();
             }
-            set_job("Game files ready.");
+            set_job(g_build_mode == BUILD_NONE ? "Game files set up." : g_build_mode == BUILD_GENERATE ? "Game code generated." : "Game files ready.");
             // remembered: the next start uses this game folder ("" = the default, extracted/ in the data root)
             bool chosen = g_root != "extracted";
             snprintf(g_settings.game_dir, sizeof g_settings.game_dir, "%s", chosen ? g_root.c_str() : "");
@@ -1114,6 +1130,54 @@ extern "C" void rt_print_status(void) {
     json_kv(f, "status", status.c_str()), json_kv(f, "code_id", have_id ? want : "");
     fprintf(f, "\"files_ready\":%s,\"code_ready\":%s,\"ready\":%s,\"builder\":%s}\n", files.empty() ? "true" : "false",
             code ? "true" : "false", status.empty() ? "true" : "false", gamebuild_available() ? "true" : "false");
+}
+
+// --setup <folder or package> (main.c): the start screen's setup without the start screen - the files copied or the
+// package read in place, then the game code built - with progress as JSON lines on stdout ({"nxrt_progress":1, ...}),
+// then one {"nxrt_setup":1, ...} result. "" = the files there already: only the game code (re)built. Returns the exit
+// code (0: done). mode: "all" (--setup), "files" (--setup-files: no game code), "generate" (--generate: the C only,
+// kept for the next build), "compile" (--compile: the full build, which reuses what --generate made).
+extern "C" int rt_run_setup(const char *src, const char *mode) {
+    g_build_mode = !strcmp(mode, "files") ? BUILD_NONE : !strcmp(mode, "generate") ? BUILD_GENERATE : BUILD_ALL;
+    pthread_mutex_lock(&g_lock);
+    g_src = src ? src : "";
+    g_busy = true;
+    pthread_mutex_unlock(&g_lock);
+    pthread_t t;
+    pthread_create(&t, NULL, extract_thread, NULL);
+    std::string last;
+    float last_f = -1;
+    for (;;) {
+        pthread_mutex_lock(&g_lock);
+        bool busy = g_busy;
+        std::string job = g_job;
+        pthread_mutex_unlock(&g_lock);
+        float f = extract_progress();
+        if (job != last || f - last_f >= 0.005f || !busy) {
+            fprintf(stdout, "{\"nxrt_progress\":1,\"fraction\":%.4f,", f);
+            json_kv(stdout, "step", job.c_str(), true);
+            fputs("}\n", stdout);
+            fflush(stdout);
+            last = job, last_f = f;
+        }
+        if (!busy) break;
+        usleep(200 * 1000);
+    }
+    pthread_join(t, NULL);
+    pthread_mutex_lock(&g_lock);
+    std::string job = g_job, hint = g_job_hint;
+    bool failed = g_job_failed;
+    pthread_mutex_unlock(&g_lock);
+    std::string status = check_game_files(g_root);
+    bool ok = (g_build_mode == BUILD_ALL ? status.empty() : check_copied_files(g_root).empty()) && !failed;
+    fputs("{\"nxrt_setup\":1,", stdout);
+    json_kv(stdout, "mode", mode);
+    fprintf(stdout, "\"ok\":%s,\"builder\":%s,", ok ? "true" : "false", gamebuild_available() ? "true" : "false");
+    json_kv(stdout, "step", job.c_str()), json_kv(stdout, "hint", hint.c_str()), json_kv(stdout, "status", status.c_str());
+    json_kv(stdout, "game_dir", g_root.c_str(), true);
+    fputs("}\n", stdout);
+    fflush(stdout);
+    return ok ? 0 : 1;
 }
 
 extern "C" void rt_ui_register(void) {

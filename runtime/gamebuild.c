@@ -465,7 +465,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
 
         // compiles
-        while (nrun < jobs && next < units.n) {
+        while (!o->generate_only && nrun < jobs && next < units.n) {
             Unit *u = &units.u[next];
             int cached = build_cache_object(cache, u->stem, u->src, u->source_hash);
             if (cached < 0) { snprintf(why, why_size, "A generated source file is missing or unreadable."); ok = false; break; }
@@ -494,7 +494,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             run[k--] = run[--nrun];
         }
         if (!ok) break;
-        if (gens_done && next == units.n && nrun == 0) break;
+        if (gens_done && (o->generate_only || (next == units.n && nrun == 0))) break;
 
         // progress: the generator's share (its functions written), the compiler's (bytes of C compiled, of an
         // estimate of all of it while the generator still writes)
@@ -502,19 +502,21 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         double comp_frac = est_total > 0 ? (double)done_bytes / est_total : 0;
         if (comp_frac > 1) comp_frac = 1;
         // (an update that keeps the last build's pieces compiles little: generating the C is most of its time)
-        double f = update ? 0.85 * gen_frac + 0.1 * comp_frac : 0.2 * gen_frac + 0.75 * comp_frac;
+        double f = o->generate_only ? 0.98 * gen_frac : update ? 0.85 * gen_frac + 0.1 * comp_frac : 0.2 * gen_frac + 0.75 * comp_frac;
         double secs = (double)(plat_now_ns() - t0) / 1e9;
         if (gen_frac == 0) f = 0.05 * (secs / (secs + 20));  // (the generator's first pass: no count yet)
         if (f > shown) shown = f;
-        if (o->progress) o->progress(shown, gen_frac < 1 && !gens_done ? "Reading the game code..." : resuming ? "Resuming compilation..." : "Recompiling...");
+        if (o->progress)
+            o->progress(shown, o->generate_only ? "Generating C from the game code..." : gen_frac < 1 && !gens_done ? "Reading the game code..."
+                               : resuming ? "Resuming compilation..." : "Recompiling...");
         sleep_ms(50);
     }
     for (int k = 0; k < nrun; k++) stop(run[k].p);  // (a failure: the rest is of no use - the failure shows at once)
     for (int i = 0; i < 2; i++)
         if (gens[i].p && gens[i].exit < 0) stop(gens[i].p);
 
-    // 2. link
-    if (ok) {
+    // 2. link (not for generate_only: the generated C is kept, the next build compiles it)
+    if (ok && !o->generate_only) {
         if (o->progress) o->progress(shown > 0.95 ? shown : 0.95, "Finishing...");
         char rsp[1100], log[1100];
         snprintf(rsp, sizeof rsp, "%s" SEP "link.rsp", work);
@@ -559,13 +561,14 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             ok = false;
         }
     }
-    if (ok) ok = build_cache_publish(cache, nx_gamelib_name(), g_full_id, why, why_size);
+    if (ok && !o->generate_only) ok = build_cache_publish(cache, nx_gamelib_name(), g_full_id, why, why_size);
     bool cancelled = !ok && o->cancelled && o->cancelled();
     if (!ok && !cancelled) build_cache_failed(cache);
     free(units.u);
     build_cache_close(cache);
     LOG("[gamebuild] reused %d objects, compiled %d objects\n", reused, compiled);
-    LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : cancelled ? "cancelled" : "failed", (double)(plat_now_ns() - t0) / 1e9);
+    LOG("[gamebuild] %s%s in %.0fs\n", o->generate_only ? "generation " : "", ok ? "done" : cancelled ? "cancelled" : "failed",
+        (double)(plat_now_ns() - t0) / 1e9);
     if (ok && o->progress) o->progress(1, "Finishing...");
     return ok;
 }
