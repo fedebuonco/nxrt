@@ -733,3 +733,106 @@ out:
     free(ks.k);
     return ok;
 }
+
+// ------------------------------------------------------------------ the RomFS's own tables: paths -> file data
+// Header: ten u64 (header size, dir hash off/size, dir meta off/size, file hash off/size, file meta off/size, data off).
+// Directory entry: parent, sibling, first child dir, first file, hash next, name length (u32 each), name. File entry:
+// parent, sibling (u32), data offset, size (u64), hash next, name length (u32), name. Offsets of entries in their table;
+// 0xFFFFFFFF ends a list.
+typedef struct { uint64_t h[10]; uint8_t *dirs, *files; } RomTables;
+
+static bool rom_tables(NxRomRead rd, void *rc, RomTables *t) {
+    memset(t, 0, sizeof *t);
+    if (rd(rc, t->h, sizeof t->h, 0) != (ssize_t)sizeof t->h) return false;
+    if (t->h[4] > (64u << 20) || t->h[8] > (256u << 20)) return false;  // (a corrupt header: not GBs of tables)
+    t->dirs = malloc(t->h[4] + 1), t->files = malloc(t->h[8] + 1);
+    if (!t->dirs || !t->files || rd(rc, t->dirs, t->h[4], t->h[3]) != (ssize_t)t->h[4] ||
+        rd(rc, t->files, t->h[8], t->h[7]) != (ssize_t)t->h[8]) {
+        free(t->dirs), free(t->files);
+        return false;
+    }
+    return true;
+}
+
+static uint32_t rom_u32(const uint8_t *tab, uint64_t size, uint64_t o) {
+    uint32_t v = 0xFFFFFFFFu;
+    if (o + 4 <= size) memcpy(&v, tab + o, 4);
+    return v;
+}
+
+// the entry's name (at name_at in it, its length just before), if it fits the table
+static bool rom_name(const uint8_t *tab, uint64_t size, uint64_t o, uint64_t name_at, const char **name, uint32_t *len) {
+    if (o + name_at > size) return false;
+    memcpy(len, tab + o + name_at - 4, 4);
+    if (o + name_at + *len > size) return false;
+    *name = (const char *)tab + o + name_at;
+    return true;
+}
+
+bool nx_romtab_find(NxRomRead rd, void *rc, const char *path, uint64_t *off, uint64_t *size) {
+    RomTables t;
+    if (!rom_tables(rd, rc, &t)) return false;
+    bool found = false;
+    uint32_t dir = 0;  // (the root)
+    for (const char *p = path; !found;) {
+        const char *slash = strchr(p, '/');
+        size_t n = slash ? (size_t)(slash - p) : strlen(p);
+        const char *name;
+        uint32_t len;
+        if (!slash) {  // the file, among the directory's files
+            for (uint32_t f = rom_u32(t.dirs, t.h[4], (uint64_t)dir + 12); f != 0xFFFFFFFFu; f = rom_u32(t.files, t.h[8], (uint64_t)f + 4))
+                if (rom_name(t.files, t.h[8], f, 0x20, &name, &len) && len == n && !memcmp(name, p, n)) {
+                    memcpy(off, t.files + f + 8, 8), memcpy(size, t.files + f + 0x10, 8);
+                    *off += t.h[9];
+                    found = true;
+                    break;
+                }
+            break;
+        }
+        uint32_t d = rom_u32(t.dirs, t.h[4], (uint64_t)dir + 8);
+        while (d != 0xFFFFFFFFu && !(rom_name(t.dirs, t.h[4], d, 0x18, &name, &len) && len == n && !memcmp(name, p, n)))
+            d = rom_u32(t.dirs, t.h[4], (uint64_t)d + 4);
+        if (d == 0xFFFFFFFFu) break;
+        dir = d;
+        p = slash + 1;
+    }
+    free(t.dirs), free(t.files);
+    return found;
+}
+
+static int rom_walk_dir(RomTables *t, uint32_t dir, char *path, size_t at, size_t cap, int depth,
+                        void (*fn)(const char *, uint64_t, uint64_t, void *), void *ctx) {
+    int count = 0;
+    const char *name;
+    uint32_t len;
+    for (uint32_t f = rom_u32(t->dirs, t->h[4], (uint64_t)dir + 12); f != 0xFFFFFFFFu; f = rom_u32(t->files, t->h[8], (uint64_t)f + 4)) {
+        if (!rom_name(t->files, t->h[8], f, 0x20, &name, &len) || at + len + 1 > cap) continue;
+        memcpy(path + at, name, len), path[at + len] = 0;
+        uint64_t off, size;
+        memcpy(&off, t->files + f + 8, 8), memcpy(&size, t->files + f + 0x10, 8);
+        fn(path, off + t->h[9], size, ctx);
+        count++;
+    }
+    if (depth > 64) return count;  // (a looping table)
+    for (uint32_t d = rom_u32(t->dirs, t->h[4], (uint64_t)dir + 8); d != 0xFFFFFFFFu; d = rom_u32(t->dirs, t->h[4], (uint64_t)d + 4)) {
+        if (!rom_name(t->dirs, t->h[4], d, 0x18, &name, &len) || at + len + 2 > cap) continue;
+        memcpy(path + at, name, len), path[at + len] = '/', path[at + len + 1] = 0;
+        count += rom_walk_dir(t, d, path, at + len + 1, cap, depth + 1, fn, ctx);
+    }
+    return count;
+}
+
+int nx_romtab_walk(NxRomRead rd, void *rc, void (*fn)(const char *path, uint64_t off, uint64_t size, void *ctx), void *ctx) {
+    RomTables t;
+    if (!rom_tables(rd, rc, &t)) return -1;
+    char path[1024] = "";
+    int n = rom_walk_dir(&t, 0, path, 0, sizeof path, 0, fn, ctx);
+    free(t.dirs), free(t.files);
+    return n;
+}
+
+static ssize_t pkg_rd(void *rc, void *dst, uint64_t n, uint64_t off) { return nx_romfs_pread((NxRomfs *)rc, dst, n, off); }
+bool nx_romfs_find(NxRomfs *r, const char *path, uint64_t *off, uint64_t *size) { return nx_romtab_find(pkg_rd, r, path, off, size); }
+int nx_romfs_walk(NxRomfs *r, void (*fn)(const char *path, uint64_t off, uint64_t size, void *ctx), void *ctx) {
+    return nx_romtab_walk(pkg_rd, r, fn, ctx);
+}

@@ -24,6 +24,14 @@ uint64_t nx_romfs_size(const NxRomfs *r);
 // pread of the RomFS image; thread-safe. Returns size, or -1 (an I/O error / corrupt package).
 ssize_t nx_romfs_pread(NxRomfs *r, void *dst, uint64_t size, uint64_t off);
 void nx_romfs_close(NxRomfs *r);
+// A file of the RomFS by its path ("nx/movie/jpn/MV_OP.webm"): where its data is in the image and its size.
+bool nx_romfs_find(NxRomfs *r, const char *path, uint64_t *off, uint64_t *size);
+// Every file of the RomFS, depth first: fn(path, image offset, size, ctx); returns the count, -1 on a read error.
+int nx_romfs_walk(NxRomfs *r, void (*fn)(const char *path, uint64_t off, uint64_t size, void *ctx), void *ctx);
+// The same over any RomFS image: rd(ctx, dst, n, off) reads n bytes of it at off (returns n, or < 0).
+typedef ssize_t (*NxRomRead)(void *ctx, void *dst, uint64_t n, uint64_t off);
+bool nx_romtab_find(NxRomRead rd, void *rc, const char *path, uint64_t *off, uint64_t *size);
+int nx_romtab_walk(NxRomRead rd, void *rc, void (*fn)(const char *path, uint64_t off, uint64_t size, void *ctx), void *ctx);
 
 // (tests) the AES / LZ4 primitives
 void nx_aes128_ecb_decrypt(const uint8_t key[16], uint8_t *data, size_t len);

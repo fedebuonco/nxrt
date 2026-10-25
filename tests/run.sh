@@ -43,7 +43,7 @@ export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
 
 CFLAGS="-std=c11 -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations -fno-omit-frame-pointer $SANFLAGS"
 CXXFLAGS="-std=c++17 -O1 -g -Wall -Wextra -fno-omit-frame-pointer $SANFLAGS"
-INC="-I$ROOT/tests -I$ROOT/runtime -I$ROOT/runtime/nvn -I$ROOT/runtime/hle -I$ROOT/platform -I$ROOT/settings \
+INC="-I$ROOT/tests -I$ROOT/manage -I$ROOT/runtime -I$ROOT/runtime/nvn -I$ROOT/runtime/hle -I$ROOT/platform -I$ROOT/settings \
      -I$ROOT/save -I$ROOT/input"
 
 # ---- optional dependencies
@@ -159,6 +159,7 @@ run_c test_aes tests/test_aes.c runtime/nxpkg.c runtime/lz4_block.c -- -pthread
 run_c test_nxpkg tests/test_nxpkg.c runtime/nxpkg.c runtime/lz4_block.c -- -pthread
 run_c test_tegra tests/test_tegra.c runtime/nvn/tegra.c runtime/nvn/formats.c
 run_c test_romfs tests/test_romfs.c runtime/romfs_build.c
+run_c test_manage tests/test_manage.c manage/nxrt_manage.c runtime/nxpkg.c runtime/lz4_block.c runtime/romfs_build.c -- -pthread
 run_c test_hle_libc tests/test_hle_libc.c runtime/hle/libc.c
 run_c test_gamelib_id tests/test_gamelib_id.c
 

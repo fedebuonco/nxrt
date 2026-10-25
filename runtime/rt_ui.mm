@@ -600,8 +600,8 @@ static void remove_fonts() {
 
 // ------------------------------------------------------------------ background: a still of the game's title movie
 // The movie is a file in a folder setup's romfs/, or read from the game package in place (romfs.src: a package setup
-// has no RomFS on disk - FE3H's nx/movie/jpn/MV_OP.webm): found through the RomFS image's own directory tables and
-// handed to ffmpeg through a custom reader.
+// has no RomFS on disk - FE3H's nx/movie/jpn/MV_OP.webm): found through the RomFS image's own tables (nx_romfs_find)
+// and handed to ffmpeg through a custom reader.
 typedef struct { NxRomfs *r; uint64_t off, size, pos; } PkgFile;
 
 static int pkg_read(void *opaque, uint8_t *buf, int n) {
@@ -623,44 +623,6 @@ static int64_t pkg_seek(void *opaque, int64_t off, int whence) {
     return (int64_t)f->pos;
 }
 
-// Where rel is in the package's RomFS image (its data, from the image's start). Directory entry: parent, sibling,
-// first child dir, first file, hash next, name length, name; file entry: parent, sibling, data offset (u64), size
-// (u64), hash next, name length, name (the RomFS layout, as runtime/services/fs.c reads it).
-static bool pkg_find(NxRomfs *r, const char *rel, uint64_t *off, uint64_t *size) {
-    uint64_t h[10];
-    if (nx_romfs_pread(r, h, sizeof h, 0) != (ssize_t)sizeof h) return false;
-    std::vector<uint8_t> dirs(h[4]), files(h[8]);
-    if (nx_romfs_pread(r, dirs.data(), h[4], h[3]) != (ssize_t)h[4] || nx_romfs_pread(r, files.data(), h[8], h[7]) != (ssize_t)h[8])
-        return false;
-    auto u32 = [](const std::vector<uint8_t> &t, uint64_t o) { uint32_t v = 0xFFFFFFFFu; if (o + 4 <= t.size()) memcpy(&v, &t[o], 4); return v; };
-    auto named = [](const std::vector<uint8_t> &t, uint64_t o, uint64_t name_at, const std::string &want) {
-        uint32_t nl = 0;
-        if (o + name_at - 4 + 4 > t.size()) return false;
-        memcpy(&nl, &t[o + name_at - 4], 4);
-        return nl == want.size() && o + name_at + nl <= t.size() && !memcmp(&t[o + name_at], want.data(), nl);
-    };
-    std::string path = rel;
-    uint32_t dir = 0;  // (the root)
-    for (size_t at = 0;;) {
-        size_t slash = path.find('/', at);
-        std::string part = path.substr(at, slash == std::string::npos ? std::string::npos : slash - at);
-        if (slash == std::string::npos) {  // the file, among the directory's files
-            for (uint32_t f = u32(dirs, (uint64_t)dir + 12); f != 0xFFFFFFFFu; f = u32(files, (uint64_t)f + 4))
-                if (named(files, f, 0x20, part)) {
-                    memcpy(off, &files[f + 8], 8), memcpy(size, &files[f + 0x10], 8);
-                    *off += h[9];
-                    return true;
-                }
-            return false;
-        }
-        uint32_t d = u32(dirs, (uint64_t)dir + 8);
-        while (d != 0xFFFFFFFFu && !named(dirs, d, 0x18, part)) d = u32(dirs, (uint64_t)d + 4);
-        if (d == 0xFFFFFFFFu) return false;
-        dir = d;
-        at = slash + 1;
-    }
-}
-
 static bool load_background(uint8_t **out, int *ow, int *oh) {
     if (!nx_game.info.title_movie) return false;
     std::string path = g_root + "/romfs/" + nx_game.info.title_movie;
@@ -672,7 +634,7 @@ static bool load_background(uint8_t **out, int *ow, int *oh) {
         fmt = NULL;
         char why[256];
         pkg = file_exists(g_root + "/romfs.src") ? nx_romfs_open((g_root + "/romfs.src").c_str(), why, sizeof why) : NULL;
-        if (!pkg || !pkg_find(pkg, nx_game.info.title_movie, &pf.off, &pf.size)) { if (pkg) nx_romfs_close(pkg); return false; }
+        if (!pkg || !nx_romfs_find(pkg, nx_game.info.title_movie, &pf.off, &pf.size)) { if (pkg) nx_romfs_close(pkg); return false; }
         pf.r = pkg;
         const int bs = 1 << 16;
         io = avio_alloc_context((unsigned char *)av_malloc(bs), bs, 0, &pf, pkg_read, NULL, pkg_seek);
@@ -1103,6 +1065,57 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
 RT_ON_RESET(rt_menu_reset) { menu_reset(); }
 
 // ------------------------------------------------------------------ registration (runtime/main.c, once)
+// ------------------------------------------------------------------ for a manager (nxrt-frontend): who this is, how it stands
+// --describe / --status print one JSON object on stdout and exit (main.c): a manager learns the game from the app itself,
+// and whether its game code is current from the one thing that knows the id it wants - this build.
+static void json_str(FILE *f, const char *s) {
+    fputc('"', f);
+    for (; s && *s; s++) {
+        unsigned char ch = (unsigned char)*s;
+        if (ch == '"' || ch == '\\') fputc('\\', f), fputc(ch, f);
+        else if (ch < 0x20) fprintf(f, "\\u%04x", ch);
+        else fputc(ch, f);
+    }
+    fputc('"', f);
+}
+static void json_kv(FILE *f, const char *k, const char *v, bool last = false) {
+    json_str(f, k), fputc(':', f), json_str(f, v ? v : ""), fputs(last ? "" : ",", f);
+}
+
+// (gamelib.c, built with this app's GAMELIB_ID; declared here rather than in gamelib.h, which the game code's id hashes)
+extern "C" const char *gamelib_build_id(void);
+extern "C" bool gamelib_wanted_id(const char *game_dir, char *out, size_t size);
+
+extern "C" void rt_print_describe(void) {
+    const NxGameInfo *g = &nx_game.info;
+    char bid[17] = "";
+    for (int i = 0; i < 8; i++) snprintf(bid + 2 * i, 3, "%02x", g->build_id[i]);
+    char tid[17];
+    snprintf(tid, sizeof tid, "%016llx", (unsigned long long)g->title_id);
+    FILE *f = stdout;
+    fputs("{\"nxrt_describe\":1,", f);
+    json_kv(f, "id", g->id), json_kv(f, "exe", g->exe), json_kv(f, "title", g->title), json_kv(f, "game_name", g->game_name);
+    json_kv(f, "game_version", g->game_version), json_kv(f, "title_id", tid), json_kv(f, "build_id", bid);
+    json_kv(f, "bundle_id", g->bundle_id), json_kv(f, "data_dir", g->data_dir), json_kv(f, "ini", g->ini);
+    json_kv(f, "version", g->version), json_kv(f, "headline", g->headline), json_kv(f, "title_movie", g->title_movie);
+    json_kv(f, "gamelib_id", gamelib_build_id(), true);
+    fputs("}\n", f);
+}
+
+extern "C" void rt_print_status(void) {
+    std::string files = check_copied_files(g_root);
+    char want[GAMELIB_FULL_ID_SIZE] = "";
+    bool have_id = gamelib_wanted_id(g_root.c_str(), want, sizeof want);
+    bool code = files.empty() && gamelib_present(g_root.c_str());
+    std::string status = check_game_files(g_root);
+    FILE *f = stdout;
+    fputs("{\"nxrt_status\":1,", f);
+    json_kv(f, "data_root", rt_data_root()), json_kv(f, "game_dir", g_root.c_str()), json_kv(f, "files", files.c_str());
+    json_kv(f, "status", status.c_str()), json_kv(f, "code_id", have_id ? want : "");
+    fprintf(f, "\"files_ready\":%s,\"code_ready\":%s,\"ready\":%s,\"builder\":%s}\n", files.empty() ? "true" : "false",
+            code ? "true" : "false", status.empty() ? "true" : "false", gamebuild_available() ? "true" : "false");
+}
+
 extern "C" void rt_ui_register(void) {
     g_root = rt_game_dir();
     g_keep = !g_settings.game_dir[0] ? KEEP_APP : g_settings.game_in_place ? KEEP_IN_PLACE : KEEP_FOLDER;

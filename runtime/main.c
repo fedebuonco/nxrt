@@ -337,6 +337,13 @@ static void layers_init(void) {
 }
 
 int main(int argc, char **argv) {
+    // --describe: the game, as JSON, and exit (a manager reads it: nxrt-frontend); --status: the game files and code too
+    extern void rt_print_describe(void), rt_print_status(void);
+    bool status_only = false;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--describe")) { rt_print_describe(); return 0; }
+        if (!strcmp(argv[i], "--status")) status_only = true;
+    }
     layers_init();
     plat_init();
     plat_thread_name("nx-main");
@@ -346,6 +353,7 @@ int main(int argc, char **argv) {
     static char arg_root[4096];  // (realpath: PATH_MAX)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        else if (!strcmp(argv[i], "--status")) {}
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
@@ -357,6 +365,7 @@ int main(int argc, char **argv) {
                                                                                      //  the app builds there may go)
     else if (g_settings.game_dir[0]) rt_game_dir_set(g_settings.game_dir, !g_settings.game_in_place);
     { extern void rt_ui_register(void); rt_ui_register(); }
+    if (status_only) { rt_print_status(); return 0; }
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen (nx-ui launcher.mm): game files setup, profile choice, settings
             extern void ui_window_init(void);

@@ -61,6 +61,12 @@ static bool lib_usable(const char *path, const char *want) {
     return false;  // (loads, but holds no recompiled code)
 }
 
+// (--status: rt_ui.mm. Not in gamelib.h: that header is part of the game code's id, nxrt.mk GAMELIB_SRCS)
+const char *gamelib_build_id(void);
+bool gamelib_wanted_id(const char *game_dir, char *out, size_t size);
+const char *gamelib_build_id(void) { return GAMELIB_ID; }
+bool gamelib_wanted_id(const char *game_dir, char *out, size_t size) { return gamelib_full_id(game_dir, out, size); }
+
 bool gamelib_present(const char *game_dir) {
     if (g_tables) return true;
     char c[3][1100], want[GAMELIB_FULL_ID_SIZE];
