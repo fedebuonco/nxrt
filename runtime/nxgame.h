@@ -154,6 +154,13 @@ typedef struct NxGameHooks {
     bool (*instances_tinted)(void);                     // any instance may be tinted this frame
     bool (*instance_tint)(const float *model, float tint[16]);  // true = this instance is tinted (ltint[0..1] filled, rest 0)
     bool box_depth_draws;  // widescreen: depth-tested draws into the window image are boxed into 16:9 like the UI
+    // Renderer features only some games need: off unless the game asks, so no other game pays for them. (The per-draw
+    // tint is on only for a game with draw_tint or instance_tint: without either, no translated shader gets its
+    // binding and branch. scene_fresh_targets above: the level clears.)
+    bool scene_targets_fresh;  // screen-sized targets start transparent black at their first use each frame (a game
+                               // whose scenes leave parts undrawn, which would show older frames: LAS's pits)
+    bool frame_rate_hold;      // runtime/nvn/pace.c: hold the game's own 30 fps mode when frames don't fit 60 (LAS's
+                               // frame controller), with the timing counters it reads
     bool late_module_init;  // the modules but sdk start after the SDK's heap is up, main last (default: all but main first)
     // graphics: presenting (render thread)
     bool (*present_wide)(void);            // the scene may be shown wider than 16:9 (unlocked aspect)

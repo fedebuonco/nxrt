@@ -56,7 +56,8 @@
 //   spawned, a render scale change; or a frame over 100 ms) frames are left out of the count, late or busy;
 // - the frames over must be spread through the window (some in each quarter of it: 15 frames, 1/4 s at 60), not
 //   bunched as after a hitch nothing signalled.
-// NXRT_PACE=0: off (the game's own choice, flips and all).
+// Only for a game that asks (nx_game hook frame_rate_hold): it is built around LAS's frame controller. Off, the game
+// keeps its own choice and its timing counters are passed through as measured. NXRT_PACE=0: off for any game.
 #define PACE_SLOW_NS 20000000ull
 #define PACE_GPU_MS 15.0  // (16.7 ms a frame at 60, less some for the window image and jitter)
 // A hold that frames shown late started (see pace_frame): the GPU's own time must leave room for the window's image and
@@ -177,7 +178,7 @@ static uint64_t pace_scene(void) {
 void pace_frame(void) {
     spike_test();
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NXRT_PACE"); on = !e || atoi(e) != 0; }
+    if (on < 0) { const char *e = getenv("NXRT_PACE"); on = NX_HOOK(frame_rate_hold) && (!e || atoi(e) != 0); }
     static uint64_t last, last_wait;
     static uint8_t over[60];  // (bit 0: over - busy or late; bit 1: over by busy time)
     static float recent[60];  // the last 60 frames' cost (ms at 60 fps)

@@ -28,6 +28,7 @@ bool maxwell_gmem_fs_miss;
 // Iteration limit of a branching shader's dispatch loop (a mistranslated branch can't hang the GPU forever).
 // NXRT_SHADER_GUARD overrides it (backends read it): a small one shows which shaders loop.
 uint32_t maxwell_loop_guard = 100000;
+bool maxwell_draw_tint = true;  // fragment shaders get the per-draw tint (the renderer: off for a game without one)
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -2065,7 +2066,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
            (key && key->flip_x) || alpha_test ? 66 : 65);  // [65]: mirror width and alpha reference
         info->uses_rscale = true;
     }
-    bool tint = stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 && (!key || key->rt_kind[0] == 0);
+    bool tint = maxwell_draw_tint && stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 &&
+                (!key || key->rt_kind[0] == 0);
     if (tint) {
         sp(&s, "layout(std140, set = %d, binding = 19) uniform Tint { vec4 ltint[4]; };\n", set);
         info->uses_tint = true;
@@ -2440,7 +2442,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     }
     // Runtime highlight (e.g. golden unchecked pots): fragment shaders writing a float color target 0 get a
     // per-draw tint, float4 [0] = colour.rgb + strength, [1] = added glow.rgb (strength 0 = untouched).
-    bool tint = stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 && (!key || key->rt_kind[0] == 0);
+    bool tint = maxwell_draw_tint && stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 &&
+                (!key || key->rt_kind[0] == 0);
     if (tint) {
         sp(&args, ", constant float4 *ltint [[buffer(19)]]");
         info->uses_tint = true;

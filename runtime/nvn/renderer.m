@@ -157,6 +157,13 @@ static void st_defaults(void) {
     for (int i = 0; i < 8; i++) { st.blend[i][1] = 2; st.blend[i][2] = 1; st.blend[i][3] = 2; st.blend[i][4] = 1; st.blend[i][5] = 1; st.blend[i][6] = 1; }
 }
 
+// The per-draw tint (maxwell/translate.c): only for a game that tints draws or instances. Set before anything is
+// translated (shader preparation runs on the start screen, before renderer_init): nx_game is static data.
+__attribute__((constructor)) static void tint_for_game(void) {
+    extern bool maxwell_draw_tint;
+    maxwell_draw_tint = NX_HOOK(draw_tint) || NX_HOOK(instance_tint);
+}
+
 void renderer_init(id<MTLDevice> d) {
     dev = d;
     if (!cache) cache = [NSMutableDictionary new];  // (kept: shader preparation may have run on the start screen)

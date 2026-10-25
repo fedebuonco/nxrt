@@ -4,6 +4,11 @@
 to boot, draw and look like a proper app. Everything else is either opt-in (extras) or the game's own work, which lives
 outside the library.
 
+**The plan forward (decided 2026-10-25): Part C only.** A game pays only for the features it declares, and nothing
+LAS-specific runs, or is compiled into shaders, for other games; then the GPU pipeline is tuned to its best. Every
+remaining step of Parts A and B is parked: A2-A6, B6 (step 1 in, opt-in), B7, EoW's compile timing. They stay below
+as a record, and are picked up again only when Part C needs them (C3 takes the draw actions from A2).
+
 **Status (branch `macos-core`):** A1 done (the other backends removed); B0's build profile done; B1 done (the
 generator split into stages, byte-identical output); B2 done for LAS and EoW (EoW's compile timing pending); B3 done (stable files); B4 done (the lifter tested against the CPU); B5 done (inline caches).
 Everything else is still planned. File paths are `master`'s.
@@ -426,7 +431,7 @@ quickest wins for every game. B6 is the big performance project, and should only
 
 ---
 
-## Part C: games pay only for what they use, then the GPU pipeline at its best
+## Part C: games pay only for what they use, then the GPU pipeline at its best (the plan forward)
 
 **The goal:** a game pays, in CPU time, GPU time and shader size, only for the features it declares. With that
 cleared away, the GPU pipeline is tuned to the most it can do on Apple Silicon.
@@ -520,7 +525,8 @@ for A.
 | 5 | **Move the extras** behind `NXRT_FEATURES`, one at a time | **B4** differential testing |
 | 6 | **Move dev tooling**; update the docs to the new layout | **B5** dispatch, then **B6** registers, then **B7** profiles |
 
-Part C runs after Part A's step 2 (draw actions): C1-C2 any time, C3 after A2, C4-C8 after C2.
+**Superseded (2026-10-25):** only Part C goes forward (see the top of this document). C1-C2 first; C3 brings in
+what it needs of A2 (draw actions); C4-C8 after C2.
 
 ## Risks
 

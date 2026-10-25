@@ -256,26 +256,26 @@ bool renderer_texture_first_write(NvnTexture *t) {
 }
 
 // A new level gets fresh render-target memory on the Switch (black); ours keep the previous level's pixels, which
-// show wherever a level never draws (the phone booth's surroundings). Render targets are cleared at their first
-// use after a level change (NXRT_KEEP_TARGETS=1 disables).
+// show wherever a level never draws. A game names those scenes (nx_game hook scene_fresh_targets); their render
+// targets are cleared at their first use (NXRT_KEEP_TARGETS=1 disables). A game without the hook pays nothing.
 static uint32_t g_level_gen = 1;
 static void level_change_check(void) {
     static char last[64];
+    if (!NX_HOOK(scene_fresh_targets) && !getenv("NXRT_CLEAR_ALL_LEVELS")) return;
     const char *lv = NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "";
     if (strncmp(lv, last, sizeof last - 1) != 0) {
         strlcpy(last, lv, sizeof last);
         // only levels that never draw their surroundings: clearing everywhere also wipes targets other rooms
         // carry over (a house lost a band of its walls)
-        if (!strncmp(lv, "TelephoneBox", 12) || getenv("NXRT_CLEAR_ALL_LEVELS")) g_level_gen++;
+        if ((NX_HOOK(scene_fresh_targets) && NX_HOOK(scene_fresh_targets)(lv)) || getenv("NXRT_CLEAR_ALL_LEVELS")) g_level_gen++;
     }
 }
-// Scene render targets are cleared to transparent black at their first use in each frame (NXRT_NO_FRAME_CLEAR=1
-// disables): pixels a frame never draws (inside pits, around generated rooms) otherwise keep older frames' content
-// and smear (moving enemies over a pit left trails, the pit rim repeated downwards). Verified 2026-10-08 on
-// rando/DevGen3 Tail Cave 07D: clean dark pit, no trails; overworld / dungeon rooms otherwise unchanged.
+// Scene render targets are cleared to transparent black at their first use in each frame, for a game that asks
+// (nx_game hook scene_targets_fresh; NXRT_NO_FRAME_CLEAR=1 disables): pixels a frame never draws otherwise keep older
+// frames' content and smear (LAS: moving enemies over a pit left trails, the pit rim repeated downwards).
 bool renderer_texture_frame_fresh(NvnTexture *t) {
     static int on = -1;
-    if (on < 0) on = getenv("NXRT_NO_FRAME_CLEAR") == NULL;
+    if (on < 0) on = NX_HOOK(scene_targets_fresh) && getenv("NXRT_NO_FRAME_CLEAR") == NULL;
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     if (!on || !b || !b->scalable || b->frame_cleared == renderer_exec_frame() + 1) return false;
     b->frame_cleared = renderer_exec_frame() + 1;
@@ -288,7 +288,7 @@ bool renderer_texture_level_fresh(NvnTexture *t) {
     if (keep < 0) keep = getenv("NXRT_KEEP_TARGETS") != NULL;
     if (!b || keep || b->level_gen == g_level_gen) return false;
     if (!b->scalable) { b->level_gen = g_level_gen; return false; }  // scene buffers only: UI textures the game draws once
-                                                                       // and reuses (rupee counter) must keep their contents
+                                                                       // and reuses (a HUD counter) must keep their contents
     bool fresh = b->level_gen != 0;  // first use ever: nothing stale to hide
     b->level_gen = g_level_gen;
     if (fresh && getenv("NXRT_LOG_LEVELCLEAR"))
