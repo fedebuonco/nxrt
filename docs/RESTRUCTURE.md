@@ -355,6 +355,17 @@ That makes every improvement measurable per game.
   addresses, with the same idle workers. That's EoW's existing deadlock, not a new one. Whether B5's timing makes it
   come sooner, three runs can't tell.
 
+### B6 (parked, 2026-10-25)
+
+- **Step 1 is in** (`3d1516b`): FP/SIMD runs without memory accesses name their exact operands instead of clobbering
+  all memory. Runs of up to 12 V registers use register operands, bigger ones memory operands (up to 16 fields), and
+  everything else keeps the old form.
+- **Checked:** the CPU test (90,000 cases) matches. LAS and EoW build (the 16-field cap fixed the two files that
+  failed register allocation). LAS played 98 s with no faults at ~59 fps. SIMD-heavy files: up to −27% instructions
+  and −44% loads/stores; ordinary files within about ±3%.
+- **Not done:** LAS's CPU use vs B5; an EoW run; step 2 (guest registers in C locals across functions).
+- **Parked** to work on frame rate (the GPU / render side) first.
+
 ### Steps
 
 Each step keeps the games working. The library's id covers the recompiler (see ARCHITECTURE.md), so each step that
@@ -368,7 +379,7 @@ changes the output makes players rebuild once. Bundle those steps into as few re
 | **B3. Incremental builds** ✅ (stable files; dropping kept objects not done) | Builds on the existing build cache: **stable file assignment** (by address range, not packing order), so a changed function rebuilds only its own file; an option to drop the kept objects (1.8 GB) after a successful build | A one-instruction lifter change rebuilds only the affected files | Once (new layout) |
 | **B4. Differential testing** ✅ (CI not set up) | Each lifted instruction run against the Mac's own ARM64 CPU, with random inputs; extends `test_lift.py` | Runs in CI; every mismatch is a bug found before a game shows it | No |
 | **B5. Faster dispatch** ✅ (inline caches; no separate pre-resolution needed) | Calls between modules resolved ahead of time (imports are known after relocation), inline caches at indirect call sites | Run-time benchmark vs B0 | Yes |
-| **B6. Register caching** | Hot guest registers kept in C locals, written back only where a callee or the runtime can see them | Run-time benchmark vs B0; differential tests; games boot and play | Yes |
+| **B6. Register caching** ⏸ (step 1 in, parked) | Hot guest registers kept in C locals, written back only where a callee or the runtime can see them | Run-time benchmark vs B0; differential tests; games boot and play | Yes |
 | **B7. Profile-guided builds** | `NXRT_FNPROF` profiles feed clang: hot code at higher optimisation, cold code at `-O1` for faster builds | Build time and frame time vs B0 | Yes |
 
 B1 comes first because it carries no risk (identical output) and makes all the others easier. B2 and B3 give the
