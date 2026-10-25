@@ -233,9 +233,28 @@ static void icmp_expr(char *out, int op, const char *a, const char *b, bool is_s
 // ------------------------------------------------------------------ attributes
 // Maxwell attribute space: 0x70 position, 0x80 + 16*i generic attribute i, 0x2F8 instance id,
 // 0x2FC vertex id, 0x3FC front facing, 0x6C point size.
+// A fragment input read at a run-time address (IPA / ALD with an index register: idx + addr, bytes). Every input the
+// vertex shader provides is declared, and the attribute picked by index (an address outside them reads 0); the
+// component and the interpolation as for a fixed address.
+static void attr_load_indexed(Ctx *c, int dst, uint32_t addr, const char *idx) {
+    if (c->stage != STAGE_FRAGMENT || c->glsl) { fail(c, "indexed attribute load outside a fragment shader"); return; }
+    uint32_t avail = c->key ? c->key->vs_out_mask : 0;
+    if (!avail) { fail(c, "indexed attribute load without the vertex shader's outputs"); return; }
+    c->in_attr_mask |= avail;
+    char mul[64] = "";
+    if (c->ipa_mode == 0) strcpy(mul, " * in.pos.w");
+    else if (c->ipa_mode == 1 && c->ipa_mul != RZ) { char mb[16]; sprintf(mul, " * in.pos.w * as_type<float>(%s)", reg(c, c->ipa_mul, mb)); }
+    sp(&c->body, "    { uint ia_ = %s + %uu, at_ = (ia_ - 0x80u) >> 4, cp_ = (ia_ >> 2) & 3u; float4 iv_ = float4(0);\n", idx, addr);
+    for (int a = 0; a < 32; a++)
+        if (avail & (1u << a)) sp(&c->body, "      if (at_ == %du) iv_ = in.v%d;\n", a, a);
+    c->reg_used[dst] = 1;
+    if (dst != RZ) sp(&c->body, "      r%d = (ia_ >= 0x80u && ia_ < 0x280u) ? as_type<uint>(iv_[cp_]%s) : 0u;\n", dst, mul);
+    sp(&c->body, "    }\n");
+}
+
 static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
     char e[256];
-    if (idx) { fail(c, "indexed attribute load"); return; }
+    if (idx) { attr_load_indexed(c, dst, addr, idx); return; }
     if (c->stage == STAGE_VERTEX) {
         if (addr >= 0x80 && addr < 0x280) {
             int a = (addr - 0x80) >> 4, comp = (addr >> 2) & 3;
@@ -1022,22 +1041,30 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         bool idx = bits(w, 38, 1);
         uint32_t addr = (uint32_t)bits(w, 28, 10);
         int mode = (int)bits(w, 54, 2);  // 0 pass, 1 multiply, 2 constant, 3 sc
-        if (idx) { fail(c, "ipa idx"); }
-        if (addr >= 0x80 && addr < 0x280) {
+        char ib[16];
+        const char *ix = idx ? reg(c, a, ib) : NULL;  // (indexed: the address is Ra + addr)
+        if (addr >= 0x80 && addr < 0x280 && !idx) {
             int at = (addr - 0x80) >> 4;
             if (mode == 2) c->flat_mask |= 1u << at;
         }
         c->ipa_mode = mode;
         c->ipa_mul = (int)bits(w, 20, 8);
-        attr_load(c, d, addr, NULL);
+        attr_load(c, d, addr, ix);
         c->ipa_mode = -1;
         if (bits(w, 51, 1) && d != RZ) sp(&c->body, "    r%d = as_type<uint>(saturate(as_type<float>(r%d)));\n", d, d);
     } else if (OPM(0xefd8000000000000ull, 0xfff8000000000000ull)) {  // LD attribute
         int n = 1 + (int)bits(w, 47, 2);
         uint32_t addr = (uint32_t)bits(w, 20, 10);
         int ia = (int)bits(w, 8, 8);
-        if (ia != RZ) { fail(c, "indexed ld a[]"); }
-        for (int i = 0; i < n; i++) attr_load(c, d + i, addr + 4 * i, NULL);
+        char ib[16];
+        const char *ix = ia != RZ ? reg(c, ia, ib) : NULL;
+        for (int i = 0; i < n; i++) attr_load(c, d + i, addr + 4 * i, ix);
+    } else if (OPM(0xefa0000000000000ull, 0xfff8000000000000ull)) {  // AL2P: attribute address, logical to physical
+        // Rd = Ra + Imm11 (20-30): attributes sit at the same addresses here (Ryujinx InstAl2p; FE3H's efa010000a07060b:
+        // AL2P R11, R6, 0xa0). Feeds IPA / ALD with an index register.
+        char t2[96], ab[16];
+        sprintf(t2, "(%s + %uu)", reg(c, a, ab), (uint32_t)bits(w, 20, 11));
+        set_reg(c, d, t2);
     } else if (OPM(0xeff0000000000000ull, 0xfff8000000000000ull)) {  // ST attribute
         int n = 1 + (int)bits(w, 47, 2);
         uint32_t addr = (uint32_t)bits(w, 20, 10);
@@ -1064,6 +1091,29 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_tex(c, w, false);
     } else if (OPM(0xdeb8000000000000ull, 0xfff8000000000000ull)) {  // TEX.B (bindless)
         emit_tex(c, w, true);
+    } else if (OPM(0xde38000000000000ull, 0xfff8000000000000ull)) {  // TXD: sample with explicit gradients
+        // Fields as yuzu's TXD: Rd 0-7, coordinates from 8-15 (the array layer after them), gradients from 20-27
+        // interleaved per dimension (dx0, dy0, dx1, dy1), type 28-30 (0 1D, 1 1D array, 2 2D, 3 2D array, 4 3D,
+        // 6 cube, 7 cube array), mask 31-34, handle 36-48, AOFFI 35. FE3H's de3800a3b0071010: TXD.2D_ARRAY R16, R16,
+        // R0, 0xa, RGB.
+        int type = (int)bits(w, 28, 3), cr = a, gr = (int)bits(w, 20, 8);
+        uint32_t index = (uint32_t)bits(w, 36, 13), mask = (uint32_t)bits(w, 31, 4);
+        if (bits(w, 35, 1) || c->glsl || (type != 2 && type != 3 && type != 0)) { fail(c, "txd type %d", type); return; }
+        bool array = type == 3;
+        int slot = tex_slot(c, index, type == 0 ? TEXTYPE_1D : array ? TEXTYPE_2D_ARRAY : TEXTYPE_2D, false, array);
+        char call[1024], F0[16], F1[16], G0[16], G1[16], G2[16], G3[16];
+        if (type == 0) {
+            sprintf(call, "t%d.sample(s%d, as_type<float>(%s))", slot, slot, reg(c, cr, F0));  // (Metal: no 1D gradients)
+        } else {
+            reg(c, cr, F0), reg(c, cr + 1, F1);
+            reg(c, gr, G0), reg(c, gr + 1, G1), reg(c, gr + 2, G2), reg(c, gr + 3, G3);
+            char layer[96] = "";
+            if (array) { char L[16]; reg(c, cr + 2, L); sprintf(layer, ", min(%s, t%d.get_array_size() - 1u)", L, slot); }
+            sprintf(call, "t%d.sample(s%d, float2(as_type<float>(%s), as_type<float>(%s))%s, gradient2d(float2(as_type<float>(%s), "
+                          "as_type<float>(%s)), float2(as_type<float>(%s), as_type<float>(%s))))",
+                    slot, slot, F0, F1, layer, G0, G2, G1, G3);
+        }
+        write_tex_result(c, slot, call, mask, d, RZ, false, false);
     } else if (OPM(0xdf48000000000000ull, 0xfff8000000000000ull)) {  // TXQ
         uint32_t index = (uint32_t)bits(w, 36, 13);
         int qt = (int)bits(w, 22, 6);

@@ -1570,7 +1570,7 @@ static bool translate_program(Prog *pr, const uint8_t *vcode, size_t vmax, const
     }
     fkey->vs_out_mask = pr->vi->out_mask;
     pr->fi = slow_translate(fcode, fmax, STAGE_FRAGMENT, fkey);
-    if (!pr->fi->msl) { LOG("[shader] FS translate failed: %s\n", pr->fi->error); pr->failed = true; return false; }
+    if (!pr->fi->msl) { LOG("[shader] FS translate failed: %s (code %llx)\n", pr->fi->error, faddr); pr->failed = true; return false; }
     if (getenv("NXRT_SAVE_MSL") && vaddr) {
         mkdir("build/msl", 0755);
         char path[256];
@@ -2688,9 +2688,13 @@ static void draw(CmdRec *r, bool indexed) {
         }
     }
     if (!pr || !pr->ready) {
-        static int said;
-        if (getenv("NXRT_LOG_SKIPS") && said < 6) {
-            said++;
+        static uint64_t said[64];  // (each program once: its stages and why)
+        static int nsaid;
+        uint64_t k = st.program->stages[0].code_addr ^ (st.program->stages[1].code_addr << 1) ^ (pr ? 1 : 0);
+        bool seen = false;
+        for (int i = 0; i < nsaid; i++) seen |= said[i] == k;
+        if (getenv("NXRT_LOG_SKIPS") && !seen && nsaid < 64) {
+            said[nsaid++] = k;
             LOG("[skip] program vs %llx fs %llx: %s\n", st.program->stages[0].code_addr, st.program->stages[1].code_addr,
                 !pr ? "none (translation failed or no program)" : "not compiled yet");
         }
