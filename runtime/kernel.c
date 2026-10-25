@@ -367,9 +367,16 @@ static uint32_t block_current(int64_t timeout_ns) {
             t->wait_result = R_CANCELLED;
             break;
         }
+        // A timeout counts only if nobody completed the wait meanwhile: a waker that ran just before the deadline
+        // (a condvar signal that took the mutex for this thread, a mutex handed over) already set wait_kind to
+        // WAIT_NONE and wait_result to R_OK, and pthread_cond_timedwait still reports the timeout. Overwritten with
+        // R_TIMEOUT, the thread went on to reacquire a mutex the kernel had already given it, and waited for itself as
+        // the owner forever (FE3H at boot: TimedWaitEvent -> Enter, the mutex word naming its own handle; main behind it).
         if (!kwait(timeout_ns, &ts)) {
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_TIMEOUT;
+            if (t->wait_kind != WAIT_NONE) {
+                t->wait_kind = WAIT_NONE;
+                t->wait_result = R_TIMEOUT;
+            }
             break;
         }
     }
@@ -411,6 +418,11 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     pthread_mutex_lock(&g_klock);
     KThread *t = t_cur;
     uint32_t mbefore = rdw(mutex), kbefore = rdw(key);
+    // The key says "a thread waits here" before the mutex is let go: the game's signal reads it in user space and
+    // skips svcSignalProcessWideKey when it's 0. Set after the release, a thread could take the freed mutex (no
+    // kernel call), change the state, read 0 and not signal, and this thread then slept on a wakeup that never came
+    // (EoW: every worker and the main thread in condvar waits, all mutexes free).
+    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     mutex_release(mutex);
     bool traced = !kt_timed_key(key, timeout >= 0);
     if (traced) kt(KT_WAIT, key, mutex, kbefore, mbefore, rdw(mutex), 0xffffffffu);
@@ -418,7 +430,6 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
-    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     uint32_t r = block_current(timeout);
     if (traced) kt(KT_WAIT_END, key, mutex, rdw(key), rdw(mutex), 0, r);
     if (r != R_OK) {
