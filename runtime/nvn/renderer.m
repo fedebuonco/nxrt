@@ -47,6 +47,7 @@ static NvnTexture *snap_tex[8];
 static bool snap_ok[8];
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
+extern char g_capture_dir[512];  // (NXRT_DUMP_TRIGGER: a capture, lighter than a debug frame)
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
 void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path);
 void renderer_save_game_texture(NvnTexture *t, id<MTLTexture> tex, const char *path, const char *alpha_path);  // (metal.m)
@@ -297,8 +298,8 @@ static void end_pass(void) {
     if (enc) {
         [enc endEncoding];
         enc = nil;
-        if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
-            id<MTLTexture> t = renderer_texture(st.rt.color[0], nil, true);
+        if (g_debug_frame && !g_capture_dir[0] && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {  // (not
+            id<MTLTexture> t = renderer_texture(st.rt.color[0], nil, true);                                    //  in a capture)
             id<MTLCommandBuffer> c = cmdbuf;
             cmdbuf = nil;
             [c commit];
@@ -2078,7 +2079,10 @@ static void bind_textures(int stage, ShaderInfo *si) {
                         fc = [fc newTextureViewWithPixelFormat:fc.pixelFormat textureType:MTLTextureType2DArray levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
                     tex = fc;
                 }
-            if (g_debug_frame && e->tex && e->tex->addr) {
+            if (g_debug_frame && g_capture_dir[0] && e->tex)  // (a capture: which texture each draw samples, light)
+                LOG("[dtex] slot %d tex %ux%u f%#x addr %llx\n", i, e->tex->width, e->tex->height, e->tex->format,
+                    (unsigned long long)e->tex->addr);
+            if (g_debug_frame && !g_capture_dir[0] && e->tex && e->tex->addr) {
                 uint64_t total = tegra_total_size(&e->tex->layout), nz = 0;
                 const uint8_t *p = (const uint8_t *)(uintptr_t)e->tex->addr;
                 for (uint64_t k = 0; k < total; k++) nz += p[k] != 0;
@@ -2129,7 +2133,8 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (st_->shadow) tex = shadow_slot_texture(tex, st_, i, h);
         if (!tex) tex = dummy_texture(st_->type);
         if (!smp) smp = default_sampler();
-        if (g_debug_frame && tex.textureType == MTLTextureType2D && stage == 1) {
+        if (g_debug_frame && !g_capture_dir[0] && tex.textureType == MTLTextureType2D && stage == 1) {  // (each draw's
+                                                                    // textures: a capture saves each texture once instead)
             static int dn;
             char path[128], apath[128];
             snprintf(path, sizeof path, "build/dtex_%03d_%d.png", dn++, i);
