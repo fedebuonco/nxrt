@@ -79,7 +79,8 @@ static bool rt_same(const RtState *a, const RtState *b) {
 static struct {
     RtState rt;
     bool rt_dirty;
-    NvnProgram *program;
+    NvnProgram *program;   // what draws and dispatches use: the program bound for every stage, or a combined one
+    NvnProgram *bound[6];  // the program bound for each stage (vertex, fragment, geometry, tess control / eval, compute)
     uint8_t blend[8][8];
     uint32_t channel_mask;
     uint8_t color_state[4], ds[8], ms[0x18], poly[4];
@@ -111,6 +112,8 @@ static inline double now_ms(void) { return (double)clock_gettime_nsec_np(CLOCK_U
 #define TIMED_COMPILE(expr) ({ double t0_ = now_ms(); __auto_type r_ = (expr); stat_compile_ms += now_ms() - t0_; stat_compiles++; \
                                slow_note_build("pipeline", (uint64_t)((now_ms() - t0_) * 1e6)); r_; })
 
+// NXRT_LOG_SKIPS=1: the first time each skip site leaves a draw out, which one (its line here) and the program
+static void skip_note(int line);
 static bool gpu_passes(void);
 static void gp_log(void);
 static uint64_t stat_counters_gpu;  // timing counters given the GPU's time (the game's 30 / 60 fps choice)
@@ -483,6 +486,57 @@ static void gp_log(void) {
     if (total) LOG("[gpu-passes] total %.1f ms\n", total / 1e6);
     gp_n = 0;
     pthread_mutex_unlock(&gp_lock);
+}
+
+// nvnCommandBufferBindProgram(cmd, program, stages): the program is bound for those stages only. Most games bind one
+// program for vertex + fragment; some bind a program per stage (Fire Emblem: Three Houses: a vertex-only program, then
+// a fragment-only one). The renderer works from one program: the one bound for every stage when that's a single
+// program (as before), else a combined program made from the stages' (cached per combination, its stages refreshed
+// on each bind). A NULL program unbinds only the stages in the mask (Unity binds NULL for the ones it doesn't use).
+#define COMBINED_MAX 256
+static struct { NvnProgram *from[6]; NvnProgram prog; } g_combined[COMBINED_MAX];
+static int g_ncombined;
+static void bind_program(NvnProgram *p, uint32_t stages) {
+    if (!stages) stages = 0x3f;  // (an old recording without the mask: every stage, as before)
+    for (int i = 0; i < 6; i++)
+        if (stages & (1u << i)) st.bound[i] = p;
+    NvnProgram *one = NULL;
+    bool mixed = false;
+    for (int i = 0; i < 6; i++) {
+        NvnProgram *b = st.bound[i];
+        if (!b || !(b->stage_mask & (1u << i))) continue;  // (a stage this program doesn't have: doesn't decide)
+        if (!one) one = b;
+        else if (b != one) mixed = true;
+    }
+    if (!mixed) {
+        st.program = one ? one : p;
+        return;
+    }
+    int k = 0;
+    while (k < g_ncombined && memcmp(g_combined[k].from, st.bound, sizeof st.bound)) k++;
+    if (k == g_ncombined) {
+        if (g_ncombined == COMBINED_MAX) k = g_ncombined - 1;  // (full: the last slot is reused)
+        else g_ncombined++;
+        memcpy(g_combined[k].from, st.bound, sizeof st.bound);
+    }
+    NvnProgram *c = &g_combined[k].prog;
+    memset(c, 0, sizeof *c);
+    for (int i = 0; i < 6; i++) {
+        NvnProgram *b = st.bound[i];
+        if (b && (b->stage_mask & (1u << i))) c->stages[i] = b->stages[i], c->stage_mask |= 1u << i;
+    }
+    st.program = c;
+}
+
+static void skip_note(int line) {
+    stat_skipped++;
+    static int on = -1;
+    static uint32_t hits[8192];
+    if (on < 0) on = getenv("NXRT_LOG_SKIPS") && atoi(getenv("NXRT_LOG_SKIPS"));
+    if (!on || line <= 0 || line >= 8192) return;
+    uint32_t n = ++hits[line];
+    if ((n & (n - 1)) == 0 && (n == 1 || n >= 1024))  // (the first, then 1024, 2048, ...: which site keeps skipping)
+        LOG("[skip] site %d: %u draws left out (program %p)\n", line, n, (void *)st.program);
 }
 
 // Commit recorded work without waiting.
@@ -2207,7 +2261,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
     if (!cp) return;
-    if (!cp->ready) { stat_skipped++; return; }
+    if (!cp->ready) { skip_note(2210); return; }
     static int trace = -1;
     if (trace < 0) trace = getenv("NXRT_TRACE_CS") != NULL;
 #define CST(x) do { if (trace) { fprintf(stderr, "[cs] %s\n", x); fflush(stderr); } } while (0)
@@ -2586,7 +2640,7 @@ static id prep_find_pipe(NSString *body) {
 static NxDraw g_draw;                   // the current draw, for the game's hooks (runtime/nxgame.h)
 
 static void draw(CmdRec *r, bool indexed) {
-    if (!st.program) { stat_skipped++; return; }
+    if (!st.program) { skip_note(2589); return; }
     static bool logged_modes;
     if (!logged_modes) {
         logged_modes = true;
@@ -2600,7 +2654,16 @@ static void draw(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
-    if (!pr || !pr->ready) { stat_skipped++; return; }
+    if (!pr || !pr->ready) {
+        static int said;
+        if (getenv("NXRT_LOG_SKIPS") && said < 6) {
+            said++;
+            LOG("[skip] program vs %llx fs %llx: %s\n", st.program->stages[0].code_addr, st.program->stages[1].code_addr,
+                !pr ? "none (translation failed or no program)" : "not compiled yet");
+        }
+        skip_note(2603);
+        return;
+    }
     // the draw as the game's hooks see it (runtime/nxgame.h NxDraw)
     for (int i = 0; i < 6; i++) {
         g_draw.ubo[i] = (const float *)(uintptr_t)st.ubuf[0][i].addr;
@@ -2625,7 +2688,7 @@ static void draw(CmdRec *r, bool indexed) {
         if (NX_HOOK(draw_mirror) && NX_HOOK(draw_mirror)(composite)) {  // (the vertex flip mirrors a composite drawn with uvs, the fragment one a
             vkey.flip_x = fkey.flip_x = true;  // composite reading pixel positions; get_program keys on vkey)
             pr = get_program(st.program, &vkey, &fkey);
-            if (!pr || !pr->ready) { stat_skipped++; return; }
+            if (!pr || !pr->ready) { skip_note(2628); return; }
         }
     }
     {   // Interiors/dungeons draw a 16:9 backdrop quad over the still-rendered overworld: frames that
@@ -2649,12 +2712,12 @@ static void draw(CmdRec *r, bool indexed) {
                     while (*p == ',') p++;
                 }
             }
-            for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
+            for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { skip_note(2652); return; }
 
         }
         g_cur_fs_hash = last_hash;
         g_draw.fs_hash = last_hash;
-        if (NX_HOOK(draw_shader) && !NX_HOOK(draw_shader)(&g_draw)) { stat_skipped++; return; }
+        if (NX_HOOK(draw_shader) && !NX_HOOK(draw_shader)(&g_draw)) { skip_note(2657); return; }
 
 
         if (last_hash == 0x71fe31bbf03c3515ull && getenv("NXRT_LOG_INDOOR")) {
@@ -2720,7 +2783,7 @@ static void draw(CmdRec *r, bool indexed) {
             id done = ready_pipes[pk];
             if (done) { [ready_pipes removeObjectForKey:pk]; cache[pk] = done; pobj = done; }
         }
-        if (pobj == pending) { stat_skipped++; return; }
+        if (pobj == pending) { skip_note(2723); return; }
     }
     if (!pobj) {
         if (shader_rec_recording()) shader_rec_note(&rec);
@@ -2753,11 +2816,11 @@ static void draw(CmdRec *r, bool indexed) {
                 slow_note_build("pipeline", (uint64_t)((now_ms() - t0) * 1e6));
                 __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
             });
-            stat_skipped++;
+            skip_note(2756);
             return;
         }
     }
-    if (pobj == [NSNull null]) { stat_skipped++; return; }
+    if (pobj == [NSNull null]) { skip_note(2760); return; }
     pipe = pobj;
     pipe_tab[pslot].key = phash;
     pipe_tab[pslot].pipe = (__bridge void *)pipe;  // retained by the cache dictionary
@@ -2872,7 +2935,7 @@ static void draw(CmdRec *r, bool indexed) {
             int id = renderer_texpatch_of(shader_texture_object(1, &pr->fi->tex[i]));
             if (id >= 0) g_draw.tex_ids[g_draw.ntex++] = id;
         }
-        if (NX_HOOK(draw_textures) && !NX_HOOK(draw_textures)(&g_draw)) { stat_skipped++; return; }
+        if (NX_HOOK(draw_textures) && !NX_HOOK(draw_textures)(&g_draw)) { skip_note(2875); return; }
     }
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
@@ -3050,7 +3113,7 @@ static void draw(CmdRec *r, bool indexed) {
             id<MTLBuffer> ib = expand_indices(mode, count, NULL, 0, first, &n);
             [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:n indexType:MTLIndexTypeUInt32 indexBuffer:ib
                      indexBufferOffset:0 instanceCount:inst baseVertex:0 baseInstance:base_inst];
-        } else { stat_skipped++; return; }
+        } else { skip_note(3053); return; }
     } else {
         uint32_t itype = (uint32_t)r->x[1], count = (uint32_t)r->x[2];
         uint64_t iaddr = r->x[3];
@@ -3407,7 +3470,7 @@ static void exec_list(uint64_t handle, int depth) {
             for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) exec_list(h[i], depth + 1);
             break;
         }
-        case CMD_BIND_PROGRAM: st.program = (NvnProgram *)(uintptr_t)r->x[0]; break;
+        case CMD_BIND_PROGRAM: bind_program((NvnProgram *)(uintptr_t)r->x[0], (uint32_t)r->x[1]); break;
         case CMD_BIND_BLEND: { uint8_t *b = x; memcpy(st.blend[b[0] & 7], b, 8); break; }
         case CMD_BIND_CHANNEL_MASK: memcpy(&st.channel_mask, x, 4); break;
         case CMD_BIND_COLOR: memcpy(st.color_state, x, 4); break;

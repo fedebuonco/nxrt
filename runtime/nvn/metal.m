@@ -424,6 +424,13 @@ static void create_backend_texture(NvnTexture *t, TexBackend *b) {
         if (tw < 1) tw = 1;
         if (th < 1) th = 1;
     }
+    if (t->target == 10) {  // a buffer texture: not supported yet (a texture_buffer view of guest memory, and the
+                            // translator's buffer reads). A placeholder within Metal's limits so the game goes on.
+        static int said;
+        if (said++ < 3) LOG("[metal] buffer texture (%u texels, format %#x) not supported yet: placeholder\n", t->width, t->format);
+        tw = tw > 16384 ? 16384 : tw;
+        th = 1;
+    }
     d.width = tw;
     d.height = (t->target == 0 || t->target == 3) ? 1 : th;
     d.depth = t->target == 2 ? (t->depth ? t->depth : 1) : 1;

@@ -785,6 +785,9 @@ static void set_shaders(Cpu *c, int stride) {
         p->stages[stage].const_offset = *(const uint32_t *)(control + 0x700);
         p->stages[stage].const_size = *(const uint32_t *)(control + 0x6FC);
         p->stage_mask |= 1u << stage;
+        if (getenv("NXRT_LOG_STAGES"))
+            LOG("[program] %p shader %d/%d: code %llx magic %08x sph0 %08x type %u -> stage %u\n", (void *)p, i, n,
+                (unsigned long long)code, *(uint32_t *)(uintptr_t)code, sph0, (sph0 >> 10) & 0xF, stage);
     }
     RET(1);
 }
