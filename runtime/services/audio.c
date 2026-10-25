@@ -91,6 +91,11 @@ typedef struct {
     uint32_t nmix;
     SplitterDest *spl_dest;
     uint32_t nspl_dest;
+    // splitter states (by splitter id): the destinations they feed, in order (destination k: a voice's channel k, or a
+    // mix's source buffer k mod its buffer count)
+#define SPL_MAX_DESTS 24
+    struct { uint32_t n; int32_t dest[SPL_MAX_DESTS]; } *spl;
+    uint32_t nspl;
     uint8_t sink_used, sink_inputs, sink_input[6];
     Effect *fx;
     SDL_AudioStream *stream;
@@ -244,6 +249,24 @@ static int voice_prepare(Renderer *r, Voice *v) {
 }
 
 static Mix *find_mix(Renderer *r, int32_t id) { return id >= 0 && (uint32_t)id < r->nmix && r->mix[id].used ? &r->mix[id] : NULL; }
+
+// Destination k of splitter `id` (Horizon's SplitterContext.GetDestination), configured (a mix to send to), or NULL
+static SplitterDest *splitter_dest(Renderer *r, uint32_t id, uint32_t k) {
+    if (id >= r->nspl || k >= r->spl[id].n) return NULL;
+    int32_t d = r->spl[id].dest[k];
+    if (d < 0 || (uint32_t)d >= r->nspl_dest || r->spl_dest[d].mix_id < 0) return NULL;
+    return &r->spl_dest[d];
+}
+// Where a mix sends its output, for ordering: its destination mix, else its splitter's first configured destination
+static Mix *mix_next(Renderer *r, Mix *m) {
+    Mix *t = find_mix(r, m->dest);
+    if (t || m->dest_splitter >= r->nspl) return t;
+    for (uint32_t k = 0; k < r->spl[m->dest_splitter].n; k++) {
+        SplitterDest *sd = splitter_dest(r, m->dest_splitter, k);
+        if (sd && (t = find_mix(r, sd->mix_id))) return t;
+    }
+    return NULL;
+}
 
 // ------------------------------------------------------------------ reverb (port of Ryujinx ReverbState/Command)
 typedef struct { float *buf; uint32_t sr, cur, last, count, max; } DelayLine;
@@ -604,7 +627,7 @@ static void render_frame(Renderer *r, float *stereo) {
     for (uint32_t m = 1; m < r->nmix && m < 64; m++) {
         if (!r->mix[m].used) continue;
         int d = 0;
-        for (Mix *x = &r->mix[m]; x && d < 64; x = find_mix(r, x->dest)) { if (x == &r->mix[0]) break; d++; }
+        for (Mix *x = &r->mix[m]; x && d < 64; x = mix_next(r, x)) { if (x == &r->mix[0]) break; d++; }
         depth[m] = d;
         if (d > maxd) maxd = d;
     }
@@ -614,6 +637,23 @@ static void render_frame(Renderer *r, float *stereo) {
             if (!s->used || depth[m] != d) continue;
             apply_effects(r, (int32_t)m, s);
             Mix *t = find_mix(r, s->dest);
+            if (!t && s->dest_splitter < r->nspl && s->buf && s->bufs) {
+                // through a splitter (Horizon's GenerateSubMix): destination k takes source buffer k mod the buffer
+                // count, into each buffer j of its mix at the destination's volume j
+                for (uint32_t k = 0; k < r->spl[s->dest_splitter].n; k++) {
+                    SplitterDest *sd = splitter_dest(r, s->dest_splitter, k);
+                    Mix *dm = sd ? find_mix(r, sd->mix_id) : NULL;
+                    if (!dm || dm == s || !dm->buf) continue;
+                    float *src = s->buf + (k % s->bufs) * N;
+                    for (uint32_t j = 0; j < dm->bufs && j < MIXBUF_MAX; j++) {
+                        float g = s->volume * sd->mix[j];
+                        if (g == 0) continue;
+                        float *o = dm->buf + j * N;
+                        for (uint32_t i = 0; i < N; i++) o[i] += src[i] * g;
+                    }
+                }
+                continue;
+            }
             if (!t || t == s) continue;
             if (!s->buf || !t->buf) continue;
             for (uint32_t i = 0; i < s->bufs; i++)
@@ -891,9 +931,13 @@ static void update_splitters(Renderer *r, const uint8_t *data, size_t size) {
     size_t offset = 0x20;
     for (uint32_t i = 0; i < state_count; i++) {
         if (size - offset < 0x1c || *(const uint32_t *)(data + offset) != 0x49444E53) return;
-        uint32_t count = *(const uint32_t *)(data + offset + 12);
-        // 16-byte state header, destination IDs, then 12 reserved bytes.
+        uint32_t id = *(const uint32_t *)(data + offset + 4), count = *(const uint32_t *)(data + offset + 12);
+        // 16-byte state header (magic, id, sample rate, destination count), destination IDs, then 12 reserved bytes.
         if (count > (size - offset - 0x1c) / 4) return;
+        if (id < r->nspl) {
+            r->spl[id].n = count < SPL_MAX_DESTS ? count : SPL_MAX_DESTS;
+            memcpy(r->spl[id].dest, data + offset + 16, r->spl[id].n * 4);
+        }
         offset += 0x1c + (size_t)count * 4;
     }
     if (dest_count > (size - offset) / 0x70) return;
@@ -1078,7 +1122,7 @@ static void audio_renderer(Service *s, IpcReq *req, IpcResp *resp) {
             if (cpu && (req->cmd == 6 || req->cmd == 5)) {  // (who starts / stops it: the guest frames)
                 uint64_t fp = cpu->x[29];
                 LOG("[audren]   lr %llx bt:", (unsigned long long)cpu->x[30]);
-                for (int k = 0; k < 12 && fp >= 0x7100000000ull && fp < 0x7300000000ull && !(fp & 7); k++) {
+                for (int k = 0; k < 32 && fp >= 0x7100000000ull && fp < 0x7300000000ull && !(fp & 7); k++) {
                     LOG(" %llx", (unsigned long long)*(uint64_t *)(uintptr_t)(fp + 8));
                     fp = *(uint64_t *)(uintptr_t)fp;
                 }
@@ -1133,10 +1177,47 @@ typedef struct AudioOut AudioOut;
 static void audio_track(Renderer *r, AudioOut *a);
 static void audren_close(Service *s);
 
+// The work buffer the game allocates for the renderer (GetWorkBufferSize). This renderer mixes in host memory and never
+// touches it, so its size only has to be realistic: games carve it from their own sound heap. It was a flat 8 MB, and
+// Fire Emblem: Three Houses (an 11 MB sound heap) then couldn't fit its 5 MB stream buffer: its sound library tore
+// down at boot and the game had no audio. The hardware's size follows the parameters (the mix buffers, a state per
+// voice / mix / effect / splitter / sink, the command buffer, performance frames); this adds the same parts with
+// generous per-item sizes, doubled, at least 1 MB and at most the old 8 MB.
+// params (AudioRendererParameter): [0] rate, [1] samples per frame, [2] mix buffers, [3] sub mixes, [4] voices,
+// [5] sinks, [6] effects, [7] performance frames, [9] splitters, [10] splitter destinations.
+static uint64_t work_buffer_size(const uint32_t *p) {
+    uint64_t samples = p[1] ? p[1] : 240, mixbufs = p[2], mixes = (uint64_t)p[3] + 1, voices = p[4], sinks = p[5];
+    uint64_t effects = p[6], perf = p[7], splitters = p[9], dests = p[10];
+    uint64_t n = 0;
+    n += samples * (mixbufs + 6) * 4;                 // mix buffers (+ the voices' channels), float samples
+    n += (sinks + mixes) * 0x1e0 * 6 * 4;             // upsampler buffers (6 channels of 480 samples)
+    n += voices * (0x200 + 0x80 + 0x100);             // voice state, channel resource, update state
+    n += mixes * (0x940 + mixbufs * 4) + mixes * mixes;  // mix states, their edges
+    n += effects * 0x400;                             // effect states
+    n += splitters * 0x60 + dests * (0xe0 + mixbufs * 4);  // splitters, their destinations
+    n += sinks * 0x200;                               // sinks
+    n += (voices + mixes + effects + sinks) * 0x100 + 0x10000;  // command buffer
+    n += (perf + 1) * (0x400 + voices * 0x40);        // performance frames
+    n *= 2;
+    if (n < 0x100000) n = 0x100000;
+    if (n > 0x800000) n = 0x800000;
+    return (n + 0xfff) & ~0xfffull;
+}
+
 SERVICE("audren:u", audren_u) {
     (void)s;
     switch (req->cmd) {
     case 0: {  // OpenAudioRenderer(params, work size, aruid, pid, transfer mem, process)
+        if (getenv("NXRT_AUDIO_CMDS")) {  // (diagnostics) who opens it: the guest frames
+            Cpu *cpu = kernel_current_cpu();
+            uint64_t fp = cpu ? cpu->x[29] : 0;
+            LOG("[audren] OpenAudioRenderer bt:");
+            for (int k = 0; k < 32 && fp >= 0x7100000000ull && fp < 0x7300000000ull && !(fp & 7); k++) {
+                LOG(" %llx", (unsigned long long)*(uint64_t *)(uintptr_t)(fp + 8));
+                fp = *(uint64_t *)(uintptr_t)fp;
+            }
+            LOG("\n");
+        }
         Renderer *r = calloc(1, sizeof *r);
         const uint32_t *p = (const uint32_t *)req->data;
         r->sample_rate = p[0]; r->sample_count = p[1]; r->mix_buffers = p[2]; r->submixes = p[3];
@@ -1155,6 +1236,8 @@ SERVICE("audren:u", audren_u) {
         r->nspl_dest = r->splitters ? r->splitters * 4 : 256;
         if (r->nspl_dest < 256) r->nspl_dest = 256;
         r->spl_dest = calloc(r->nspl_dest, sizeof(SplitterDest));
+        r->nspl = r->splitters;
+        r->spl = r->nspl ? calloc(r->nspl, sizeof *r->spl) : NULL;
         for (uint32_t i = 0; i < r->nspl_dest; i++) r->spl_dest[i].mix_id = -1;
         renderer_open_output(r);
         r->event = kernel_create_event_pair(&r->event_w, &r->event_r);
@@ -1168,7 +1251,16 @@ SERVICE("audren:u", audren_u) {
         ipc_return_object(resp, svc);
         break;
     }
-    case 1: OUT(uint64_t, 0) = 0x800000; resp_size(resp, 8); break;  // GetWorkBufferSize: 8 MB
+    case 1: {  // GetWorkBufferSize(params): an estimate for these parameters (see work_buffer_size)
+        const uint32_t *p = (const uint32_t *)req->data;
+        uint64_t n = work_buffer_size(p);
+        static int said;
+        if (said++ < 2) LOG("[audren] work buffer for %u voices, %u mix buffers, %u mixes, %u effects, %u splitters: %llu KB\n",
+                            p[4], p[2], p[3] + 1, p[6], p[9], (unsigned long long)(n >> 10));
+        OUT(uint64_t, 0) = n;
+        resp_size(resp, 8);
+        break;
+    }
     case 2: case 4: ipc_return_object(resp, service_new("IAudioDevice", audio_device, NULL)); break;
     default: LOG("[audren] cmd %u (ok)\n", req->cmd);
     }
@@ -1212,7 +1304,7 @@ static void audren_free(Renderer *r) {
     if (r->wav) { wav_header(r->wav, r->wav_bytes, r->sample_rate); fclose(r->wav); }
     if (r->trace) fclose(r->trace);
     for (uint32_t m = 0; m < r->nmix; m++) free(r->mix[m].buf);
-    free(r->voice), free(r->chres), free(r->chst), free(r->mix), free(r->fx), free(r->spl_dest);  // (reverb delay lines leak)
+    free(r->voice), free(r->chres), free(r->chst), free(r->mix), free(r->fx), free(r->spl_dest), free(r->spl);  // (reverb delay lines leak)
     free(r);
 }
 
