@@ -47,6 +47,7 @@ static NvnTexture *snap_tex[8];
 static bool snap_ok[8];
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
+uint64_t renderer_exec_frame(void);  // (metal.m: the frame whose commands are being translated)
 extern char g_capture_dir[512];  // (NXRT_DUMP_TRIGGER: a capture, lighter than a debug frame)
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
 void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path);
@@ -910,6 +911,14 @@ static void begin_pass(void) {
     static int chunk = -1;
     if (chunk < 0) { const char *e = ENV("NXRT_CHUNK_PASSES"); chunk = gpu_passes() ? 1 : e ? atoi(e) : 2; }
     if (chunk > 0 && cmdbuf && ++g_passes_in_cb >= chunk) renderer_submit();
+    if (g_debug_frame) {  // (a capture / debug frame: each pass, its targets and how each starts)
+        static const char *const la[] = {"dontcare", "load", "clear"};
+        LOG("[pass] frame %llu:", (unsigned long long)renderer_exec_frame());
+        for (int i = 0; i < st.rt.ncolor; i++)
+            if (st.rt.color[i]) LOG(" c%d@%llx %s", i, (unsigned long long)st.rt.color[i]->addr, la[rp.colorAttachments[i].loadAction % 3]);
+        if (st.rt.depth) LOG(" d@%llx %s", (unsigned long long)st.rt.depth->addr, la[rp.depthAttachment.loadAction % 3]);
+        LOG("\n");
+    }
     if (gpu_passes()) {
         id<MTLTexture> t0 = rp.colorAttachments[0].texture, td = rp.depthAttachment.texture;
         id<MTLTexture> any = t0 ? t0 : td;
@@ -1048,7 +1057,8 @@ static bool record_clear(int index, int kind, const void *color, uint32_t mask, 
     const NvnTextureView *v = index >= 0 ? (st.rt.has_cview[index] ? &st.rt.cview[index] : NULL) : (st.rt.has_dview ? &st.rt.dview : NULL);
     if (v && (((v->setmask & 1) && v->base_level) || ((v->setmask & 2) && v->min_layer))) return false;
     td_record(t, index >= 0, kind, color, depth, dval, stencil, sval);
-    if (g_debug_frame) LOG("[clear] recorded idx %d depth %d (%g) stencil %d on texture %p\n", index, depth, dval, stencil, (void *)t);
+    if (g_debug_frame) LOG("[clear] recorded idx %d depth %d (%g) stencil %d on texture %p @%llx\n", index, depth, dval, stencil, (void *)t,
+                           (unsigned long long)(t ? t->addr : 0));
     return true;
 }
 
@@ -2524,8 +2534,10 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         else LOG(" %d=%llx", i, st.tex[1][i]);
     }
     LOG(" | rt %d", st.rt.ncolor);
-    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) LOG(" %ux%u/f%#x", st.rt.color[i]->width, st.rt.color[i]->height, st.rt.color[i]->format);
-    if (st.rt.depth) LOG(" d%#x", st.rt.depth->format);
+    for (int i = 0; i < st.rt.ncolor; i++)
+        if (st.rt.color[i]) LOG(" %ux%u/f%#x@%llx", st.rt.color[i]->width, st.rt.color[i]->height, st.rt.color[i]->format,
+                                (unsigned long long)st.rt.color[i]->addr);
+    if (st.rt.depth) LOG(" d%#x@%llx", st.rt.depth->format, (unsigned long long)st.rt.depth->addr);
     LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x streams:", st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask);
     for (int i = 0; i < st.nattrib; i++) LOG(" a%d(f%#x s%u o%u)", i, st.attrib[i] & 0xFF, (st.attrib[i] >> 8) & 0x1F, st.attrib[i] >> 13);
     for (int i = 0; i < 12; i++) if (st.vbuf[i].addr) LOG(" vb%d(%llx,%llu,stride %u div %u)", i, st.vbuf[i].addr, st.vbuf[i].size, st.stream[i][0], st.stream[i][1]);
