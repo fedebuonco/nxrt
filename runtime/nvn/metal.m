@@ -175,6 +175,7 @@ typedef struct {
     float sx, sy;        // allocation scale relative to the guest's size
     int reg;             // slot in g_reg (live textures, for the "largest textures" dump) + 1
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
+    bool tp_checked;     // tex_identify ran (also when it found nothing: "none" is not re-asked at every upload check)
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     bool format_views;   // allocated with MTLTextureUsagePixelFormatView (NvnTexture.format_views)
 } TexBackend;
@@ -561,8 +562,8 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     if (always_full < 0) always_full = getenv("NXRT_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && g_frame_counter - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
-    bool identified_now = !b->tp;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
-    if (identified_now) b->tp = NX_HOOK(tex_identify) ? NX_HOOK(tex_identify)(t) + 1 : -1;
+    bool identified_now = !b->tp_checked;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
+    if (identified_now) b->tp = NX_HOOK(tex_identify) ? NX_HOOK(tex_identify)(t) + 1 : -1, b->tp_checked = true;
     bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != (NX_HOOK(tex_generation) ? NX_HOOK(tex_generation)() : 0);
     bool fast = tex_fast_hash();  // (runtime/nvn/tex_hash.h; NXRT_TEX_FASTHASH=0: the previous hashes)
     if (!full && !restyle) {
@@ -580,7 +581,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
     // new contents (the game reused the memory for another image, or the data arrived after the first check): which
     // known texture it is, if any, is decided again before this upload patches it
-    if (!identified_now && h != b->data_hash) b->tp = NX_HOOK(tex_identify) ? NX_HOOK(tex_identify)(t) + 1 : -1;
+    if (!identified_now && h != b->data_hash) b->tp = NX_HOOK(tex_identify) ? NX_HOOK(tex_identify)(t) + 1 : -1, b->tp_checked = true;
     if (b->tp > 0) b->tp_gen = NX_HOOK(tex_generation) ? NX_HOOK(tex_generation)() : 0;
     b->data_hash = h;
     b->uploaded = true;
