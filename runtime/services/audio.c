@@ -1032,6 +1032,17 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
     if (o + 0x10 <= out->size) *(uint64_t *)(op + o) = elapsed;
     o += 0x10;
     oh[15] = o;
+    if (getenv("NXRT_AUDIO_CMDS")) {  // (diagnostics) the update's section sizes in and out
+        static int n;
+        if (n++ < 3) {
+            LOG("[audren] update in:");
+            for (int i = 0; i < 16; i++) LOG(" %x", h[i]);
+            LOG(" | out:");
+            for (int i = 0; i < 16; i++) LOG(" %x", oh[i]);
+            LOG(" | written %#x of %#llx; voices in %u, effects %u, sinks %u, pools %u\n", o, (unsigned long long)out->size,
+                nvoices, neffects, nsinks, npools);
+        }
+    }
     (void)resp;
 }
 
@@ -1056,6 +1067,25 @@ static void renderer_open_output(Renderer *r) {
 
 static void audio_renderer(Service *s, IpcReq *req, IpcResp *resp) {
     Renderer *r = s->state;
+    if (getenv("NXRT_AUDIO_CMDS")) {  // (diagnostics) every IAudioRenderer command, the first 40
+        static int n;
+        if (n++ < 40) {
+            IpcBuf *in = in_buf(req, 0), *out = out_buf(req, 0);
+            LOG("[audren] IAudioRenderer cmd %u (in %llu bytes, out %llu bytes) t=%.1f ms elapsed frames %llu state %u\n",
+                req->cmd, in ? (unsigned long long)in->size : 0, out ? (unsigned long long)out->size : 0,
+                SDL_GetTicksNS() / 1e6, (unsigned long long)r->elapsed_frames, r->state);
+            Cpu *cpu = kernel_current_cpu();
+            if (cpu && (req->cmd == 6 || req->cmd == 5)) {  // (who starts / stops it: the guest frames)
+                uint64_t fp = cpu->x[29];
+                LOG("[audren]   lr %llx bt:", (unsigned long long)cpu->x[30]);
+                for (int k = 0; k < 12 && fp >= 0x7100000000ull && fp < 0x7300000000ull && !(fp & 7); k++) {
+                    LOG(" %llx", (unsigned long long)*(uint64_t *)(uintptr_t)(fp + 8));
+                    fp = *(uint64_t *)(uintptr_t)fp;
+                }
+                LOG("\n");
+            }
+        }
+    }
     switch (req->cmd) {
     case 0: OUT(uint32_t, 0) = r->sample_rate; resp_size(resp, 4); break;
     case 1: OUT(uint32_t, 0) = r->sample_count; resp_size(resp, 4); break;
