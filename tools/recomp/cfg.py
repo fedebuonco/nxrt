@@ -32,6 +32,18 @@ def emu(m):
     return m.mu
 
 
+_SCRATCH_FILL = {}
+
+
+def scratch_for(mu, fill):
+    """The scratch memory (where the other registers point: stack, objects) filled differently for each proof run, so a
+    table whose targets come from memory rather than the index (a bounds-checked copy, the lookup on a value reloaded
+    from the stack: FE3H 0x7000633364, 0x70006335f4) gives different targets in the two runs and stays unproven."""
+    if fill not in _SCRATCH_FILL:
+        _SCRATCH_FILL[fill] = bytes([0x00 if fill == FILLS[0] else 0x5a]) * 0x100000
+    mu.mem_write(SCRATCH_MEM, _SCRATCH_FILL[fill])
+
+
 def true_function(m, a):
     """[start, end) of the .eh_frame function containing a (the compiler's function, before splitting)."""
     if not hasattr(m, '_eh'):
@@ -107,6 +119,7 @@ def _set_index(mu, regs, i):
 def _emulate_table(m, br_pc, entry, end, start, idx, count, set_at, fill):
     """Run start..br for each index value (set at address set_at), collect targets."""
     mu = emu(m)
+    scratch_for(mu, fill)
     rn = bits(m.word(br_pc), 5, 5)
 
     def step_to(frm, to):
@@ -214,6 +227,7 @@ def _jump_table_fallthrough(m, br_pc, entry, end, fill):
     if _index_reloaded(m, cmp, br_pc, idx_regs):
         return None
     mu = emu(m)
+    scratch_for(mu, fill)
     targets = []
 
     def step_to(frm, to):
