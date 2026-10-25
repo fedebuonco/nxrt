@@ -434,7 +434,10 @@ rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's)
     set_job("Reading the game package...");
     char why[256] = "";
     uint64_t tid = 0;
-    if (!nx_setup(package.c_str(), keys.c_str(), g_root.c_str(), &tid, why, sizeof why)) {
+    // NXRT_UPDATE=<.nsp>: the game's update with it (a manager pairs them): its code, and its changes to the RomFS
+    const char *update = getenv("NXRT_UPDATE");
+    if (update && !*update) update = NULL;
+    if (!nx_setup_update(package.c_str(), update, keys.c_str(), g_root.c_str(), &tid, why, sizeof why)) {
         fprintf(stderr, "[launcher] %s: %s\n", package.c_str(), why);
         why[0] = (char)toupper((unsigned char)why[0]);
         set_job("Those files can't be used", true, why);

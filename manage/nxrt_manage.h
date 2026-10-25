@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define NXM_ABI 1
+#define NXM_ABI 2  // (2: NxmPackage.is_update, nxm_package_setup_update)
 int nxm_abi(void);  // NXM_ABI of the library linked: a manager refuses another
 
 // ------------------------------------------------------------------ a game folder
@@ -35,6 +35,10 @@ bool nxm_nso_build_id(const char *path, uint8_t out[8]);
 // player's prod.keys. title_id: the package's program (may be NULL). Takes seconds (no RomFS copy).
 bool nxm_package_setup(const char *package, const char *keys, const char *out_dir, uint64_t *title_id, char *why,
                        size_t why_size);
+// The same from a base game and its update (an .nsp): the update's ExeFS, the base game's RomFS with the update's
+// changes (both read in place). update NULL: nxm_package_setup.
+bool nxm_package_setup_update(const char *package, const char *update, const char *keys, const char *out_dir,
+                              uint64_t *title_id, char *why, size_t why_size);
 
 // ------------------------------------------------------------------ a game package (.nsp / .xci / program .nca)
 typedef struct {
@@ -44,6 +48,7 @@ typedef struct {
     char name[0x201], publisher[0x101], version[0x11];  // from its control data ("" when it has none)
     uint8_t *icon;  // JPEG (nxm_package_free), NULL: none
     size_t icon_size;
+    bool is_update;  // an update: set up with its base game (nxm_package_setup_update)
 } NxmPackage;
 // What the package is, without setting it up (reads only its headers and control data). false: why.
 bool nxm_package_info(const char *package, const char *keys, NxmPackage *out, char *why, size_t why_size);

@@ -63,6 +63,11 @@ bool nxm_package_setup(const char *package, const char *keys, const char *out_di
     return nx_setup(package, keys, out_dir, title_id, why, why_size);
 }
 
+bool nxm_package_setup_update(const char *package, const char *update, const char *keys, const char *out_dir,
+                              uint64_t *title_id, char *why, size_t why_size) {
+    return nx_setup_update(package, update, keys, out_dir, title_id, why, why_size);
+}
+
 bool nxm_package_info(const char *package, const char *keys, NxmPackage *out, char *why, size_t why_size) {
     NxPackageInfo i;
     memset(out, 0, sizeof *out);
@@ -74,6 +79,7 @@ bool nxm_package_info(const char *package, const char *keys, NxmPackage *out, ch
     memcpy(out->publisher, i.publisher, sizeof out->publisher);
     memcpy(out->version, i.version, sizeof out->version);
     out->icon = i.icon, out->icon_size = i.icon_size;  // (handed over)
+    out->is_update = i.is_update;
     return true;
 }
 

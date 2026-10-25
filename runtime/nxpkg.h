@@ -16,6 +16,10 @@ extern "C" {
 // <out_dir>/romfs.src (the package's path, where the RomFS section is, its key: what nx_romfs_open needs).
 // title_id: the program's, out (may be NULL). false = failed (why: a short message for the player).
 bool nx_setup(const char *package, const char *keys, const char *out_dir, uint64_t *title_id, char *why, size_t why_size);
+// The same with an update (its package: .nsp): the ExeFS is the update's, the RomFS the base game's with the update's
+// changes (BKTR), both read in place. update NULL: nx_setup. A package that is itself an update is refused by nx_setup.
+bool nx_setup_update(const char *package, const char *update, const char *keys, const char *out_dir, uint64_t *title_id,
+                     char *why, size_t why_size);
 
 // What a game package is, without setting it up: its program's title id and main build id, and from its control data
 // the game's name, publisher, version and icon (a JPEG). keys: the player's prod.keys (title.keys beside it).
@@ -26,6 +30,7 @@ typedef struct {
     char name[0x201], publisher[0x101], version[0x11];  // (empty: no control data)
     uint8_t *icon;         // JPEG, malloc'd (nx_package_info_free), NULL: none
     size_t icon_size;
+    bool is_update;        // an update (its RomFS: changes to the base game's): set up with nx_setup_update
 } NxPackageInfo;
 bool nx_package_info(const char *package, const char *keys, NxPackageInfo *out, char *why, size_t why_size);
 void nx_package_info_free(NxPackageInfo *info);
