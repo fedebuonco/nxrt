@@ -1058,7 +1058,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int ia = (int)bits(w, 8, 8);
         char ib[16];
         const char *ix = ia != RZ ? reg(c, ia, ib) : NULL;
+        bool held = ix && ia >= d && ia < d + n;  // (the index among the destinations: kept before the first is written)
+        if (held) { sp(&c->body, "    { uint aix = %s;\n", ix); ix = "aix"; }
         for (int i = 0; i < n; i++) attr_load(c, d + i, addr + 4 * i, ix);
+        if (held) sp(&c->body, "    }\n");
     } else if (OPM(0xefa0000000000000ull, 0xfff8000000000000ull)) {  // AL2P: attribute address, logical to physical
         // Rd = Ra + Imm11 (20-30): attributes sit at the same addresses here (Ryujinx InstAl2p; FE3H's efa010000a07060b:
         // AL2P R11, R6, 0xa0). Feeds IPA / ALD with an index register.
@@ -1076,10 +1079,13 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int n = sz == 5 ? 2 : 1;
         char rb[16];
         const char *dyn = a == RZ ? NULL : reg(c, a, rb);
-        for (int i = 0; i < n; i++) {
+        // (LDC.64 Rd, c[Ra + imm] with Rd == Ra: the high word first, while Ra still holds the address - FE3H's UI
+        // vertex shader 72e4bfc900 picks each corner's UV this way; in order, the second load read a clobbered index)
+        bool hi_first = dyn && n == 2 && d == a;
+        for (int k = 0; k < n; k++) {
+            int i = hi_first ? n - 1 - k : k;
             char cb[256];
             cbuf_ref(c, idx, off + 4 * i, dyn, cb);
-            if (!dyn && (off + 4 * i) & 0) {}
             if (dyn) c->info->cbuf_size[idx] = 0x10000;
             set_reg(c, d + i, cb);
         }

@@ -196,6 +196,35 @@ static uint32_t tex_wh[2][64][2];       // per bound texture slot: guest size
 #define RSCALE_BUFFER_INDEX 18
 
 static int debug_pass_no;
+// Capture tool: NXRT_CAPTURE_WATCH=<hex>[,<hex>...] names textures (by address) or fragment programs (by code
+// address). In a capture's first frame, each draw that samples a watched texture or runs a watched program gets its
+// target saved right after it (draw_<n>_<pass>_<addr>.png: the pass is ended there and resumed, loading), and the
+// program's MSL saved once (<fs>_fs.metal). The pass snapshots are named by the pass's own target (pass_rt).
+static RtState pass_rt;          // the targets of the pass the encoder is on
+static bool draw_watched;        // (bind_textures / draw: this draw samples or runs something watched)
+static int debug_draw_no;
+static bool capture_first_frame(void) {
+    extern uint64_t g_debug_exec_frame;
+    return g_debug_frame && g_capture_dir[0] && renderer_exec_frame() == g_debug_exec_frame;
+}
+static bool capture_watches(uint64_t a) {
+    static uint64_t w[16];
+    static int n = -1;
+    if (n < 0) {
+        n = 0;
+        const char *e = getenv("NXRT_CAPTURE_WATCH");
+        while (e && *e && n < 16) {
+            char *end;
+            w[n] = strtoull(e, &end, 16);
+            if (end == e) break;
+            n++;
+            e = *end == ',' ? end + 1 : end;
+        }
+    }
+    for (int i = 0; i < n; i++)
+        if (a && w[i] == a) return true;
+    return false;
+}
 // Attachment traffic. A tile GPU loads and stores every attachment of every pass, and the game clears each target
 // with a full clear before drawing it: 13 of the 45 passes of a Field_11C frame were clear quads alone, and the game
 // also re-sets the targets it already has between draw groups, which ended the pass (store + load of everything,
@@ -303,22 +332,28 @@ static void end_pass(void) {
         // this stalled the game: one frame is a few seconds) - into the capture folder, named by pass and target
         extern uint64_t g_debug_exec_frame;
         bool snap = g_debug_frame && (!g_capture_dir[0] || renderer_exec_frame() == g_debug_exec_frame);
-        if (snap && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
-            id<MTLTexture> t = renderer_texture(st.rt.color[0], nil, true);
+        NvnTexture *c0 = pass_rt.ncolor ? pass_rt.color[0] : NULL;
+        if (snap && c0 && c0->backend) {
+            id<MTLTexture> t = renderer_texture(c0, nil, true);
             id<MTLCommandBuffer> c = cmdbuf;
             cmdbuf = nil;
             [c commit];
             [c waitUntilCompleted];
             char path[700], apath[700];
             if (g_capture_dir[0]) {
-                snprintf(path, sizeof path, "%s/pass_%03d_%llx.png", g_capture_dir, debug_pass_no, (unsigned long long)st.rt.color[0]->addr);
-                snprintf(apath, sizeof apath, "%s/pass_%03d_%llx_a.png", g_capture_dir, debug_pass_no++, (unsigned long long)st.rt.color[0]->addr);
+                if (draw_watched) {  // (a watched draw's target, right after it)
+                    snprintf(path, sizeof path, "%s/draw_%04d_p%03d_%llx.png", g_capture_dir, debug_draw_no, debug_pass_no, (unsigned long long)c0->addr);
+                    snprintf(apath, sizeof apath, "%s/draw_%04d_p%03d_%llx_a.png", g_capture_dir, debug_draw_no, debug_pass_no, (unsigned long long)c0->addr);
+                } else {
+                    snprintf(path, sizeof path, "%s/pass_%03d_%llx.png", g_capture_dir, debug_pass_no, (unsigned long long)c0->addr);
+                    snprintf(apath, sizeof apath, "%s/pass_%03d_%llx_a.png", g_capture_dir, debug_pass_no++, (unsigned long long)c0->addr);
+                }
                 LOG("[pass] snapshot %s\n", path);
             } else {
                 snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no);
                 snprintf(apath, sizeof apath, "build/pass_%03d_a.png", debug_pass_no++);
             }
-            renderer_save_game_texture(st.rt.color[0], t, path, apath);  // (the part the pass drew: Dynamic resolution)
+            renderer_save_game_texture(c0, t, path, apath);  // (the part the pass drew: Dynamic resolution)
         }
     }
 }
@@ -827,6 +862,7 @@ static void begin_pass(void) {
     opening_pass = true;  // (the chunk submit's end_pass below must not flush anything into this pass)
     end_pass();
     st.rt_dirty = false;
+    pass_rt = st.rt;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     int w = 0, h = 0;
     for (int i = 0; i < st.rt.ncolor; i++) {
@@ -925,7 +961,8 @@ static void begin_pass(void) {
         static const char *const la[] = {"dontcare", "load", "clear"};
         LOG("[pass] frame %llu:", (unsigned long long)renderer_exec_frame());
         for (int i = 0; i < st.rt.ncolor; i++)
-            if (st.rt.color[i]) LOG(" c%d@%llx %s", i, (unsigned long long)st.rt.color[i]->addr, la[rp.colorAttachments[i].loadAction % 3]);
+            if (st.rt.color[i]) LOG(" c%d@%llx %s mtl %p", i, (unsigned long long)st.rt.color[i]->addr, la[rp.colorAttachments[i].loadAction % 3],
+                                    (__bridge void *)rp.colorAttachments[i].texture);
         if (st.rt.depth) LOG(" d@%llx %s", (unsigned long long)st.rt.depth->addr, la[rp.depthAttachment.loadAction % 3]);
         LOG("\n");
     }
@@ -2099,9 +2136,13 @@ static void bind_textures(int stage, ShaderInfo *si) {
                         fc = [fc newTextureViewWithPixelFormat:fc.pixelFormat textureType:MTLTextureType2DArray levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
                     tex = fc;
                 }
-            if (g_debug_frame && g_capture_dir[0] && e->tex)  // (a capture: which texture each draw samples, light)
-                LOG("[dtex] slot %d tex %ux%u f%#x addr %llx\n", i, e->tex->width, e->tex->height, e->tex->format,
-                    (unsigned long long)e->tex->addr);
+            if (g_debug_frame && g_capture_dir[0] && e->tex) {  // (a capture: which texture each draw samples, light)
+                LOG("[dtex] slot %d tex %ux%u f%#x addr %llx mtl %p %lux%lu pf %lu sc %g,%g fr %g,%g view %d\n", i, e->tex->width,
+                    e->tex->height, e->tex->format, (unsigned long long)e->tex->addr, (__bridge void *)tex, (unsigned long)tex.width,
+                    (unsigned long)tex.height, (unsigned long)tex.pixelFormat, i < 64 ? tex_sc[stage][i][0] : 1, i < 64 ? tex_sc[stage][i][1] : 1,
+                    i < 64 ? tex_fr[stage][i][0] : 1, i < 64 ? tex_fr[stage][i][1] : 1, e->has_view);
+                if (capture_watches(e->tex->addr)) draw_watched = true;
+            }
             if (g_debug_frame && !g_capture_dir[0] && e->tex && e->tex->addr) {
                 uint64_t total = tegra_total_size(&e->tex->layout), nz = 0;
                 const uint8_t *p = (const uint8_t *)(uintptr_t)e->tex->addr;
@@ -2724,6 +2765,7 @@ static id prep_find_pipe(NSString *body) {
 static NxDraw g_draw;                   // the current draw, for the game's hooks (runtime/nxgame.h)
 
 static void draw(CmdRec *r, bool indexed) {
+    draw_watched = false;
     if (!st.program) { skip_note(2589); return; }
     static bool logged_modes;
     if (!logged_modes) {
@@ -3245,6 +3287,27 @@ static void draw(CmdRec *r, bool indexed) {
     }
     }  // runs
     stat_draws++, gp_draws_all++;
+    if (capture_first_frame() && (draw_watched || capture_watches(st.program->stages[1].code_addr))) {
+        static NSMutableSet *msl_saved;
+        if (!msl_saved) msl_saved = [NSMutableSet new];
+        uint64_t fa = st.program->stages[1].code_addr, va = st.program->stages[0].code_addr;
+        if (pr->fi && pr->fi->msl && ![msl_saved containsObject:@(fa)]) {
+            [msl_saved addObject:@(fa)];
+            char path[700];
+            snprintf(path, sizeof path, "%s/%llx_fs.metal", g_capture_dir, (unsigned long long)fa);
+            FILE *f = fopen(path, "w");
+            if (f) fputs(pr->fi->msl, f), fclose(f);
+            snprintf(path, sizeof path, "%s/%llx_vs.metal", g_capture_dir, (unsigned long long)va);
+            f = pr->vi && pr->vi->msl ? fopen(path, "w") : NULL;
+            if (f) fputs(pr->vi->msl, f), fclose(f);
+        }
+        LOG("[watch] draw %d vs=%llx fs=%llx\n", debug_draw_no, (unsigned long long)va, (unsigned long long)fa);
+        draw_watched = true;
+        end_pass();  // (snapshots the target as this draw left it; the next draw resumes the pass, loading)
+        st.rt_dirty = true;
+        debug_draw_no++;
+    }
+    draw_watched = false;
     if (dbg_this) {
         static int nlog;
         if (nlog++ < 4) {
