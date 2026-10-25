@@ -1501,13 +1501,15 @@ static void present_hooks(void) {
     if (trigger == (const char *)-1) trigger = getenv("NXRT_DUMP_TRIGGER");
     if (trigger && total_frames % 30 == 0 && access(trigger, F_OK) == 0) {
         unlink(trigger);
-        g_debug_frame_request = 1;
-        LOG("[dump] trigger: frame %llu\n", (unsigned long long)total_frames + 1);
+        extern uint64_t g_debug_exec_frame;
+        g_debug_exec_frame = renderer_exec_frame() + 2;  // (two frames on: the render thread hasn't started it)
+        LOG("[dump] trigger: frame %llu\n", (unsigned long long)g_debug_exec_frame);
         extern char g_window_shot_request[256];
         snprintf(g_window_shot_request, sizeof g_window_shot_request, "%s.png", trigger);
     }
     if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
-    g_debug_frame = debug_at && total_frames == (uint64_t)debug_at;
+    extern uint64_t g_debug_exec_frame;
+    if (!g_debug_exec_frame) g_debug_frame = debug_at && total_frames == (uint64_t)debug_at;
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", total_frames);
 }
 

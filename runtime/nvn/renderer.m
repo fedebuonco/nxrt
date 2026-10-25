@@ -3921,8 +3921,12 @@ void renderer_reset(void) {
     st_defaults();
 }
 
+uint64_t g_debug_exec_frame;  // (NXRT_DUMP_TRIGGER) the frame to dump, as the render thread translates it (0: none)
 void backend_execute(uint64_t handle) {
     @autoreleasepool {
+        // a trigger's debug frame is the frame whose commands run here: the presenting thread's flag covers only the
+        // commands that happen to run while it presents (a partial frame)
+        if (g_debug_exec_frame) g_debug_frame = renderer_exec_frame() == g_debug_exec_frame;
         exec_list(handle, 0);
         static int sync_submit = -1;
         if (sync_submit < 0) sync_submit = getenv("NXRT_SYNC_SUBMIT") ? 1 : 0;
