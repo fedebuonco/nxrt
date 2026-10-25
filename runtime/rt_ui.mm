@@ -599,11 +599,90 @@ static void remove_fonts() {
 
 
 // ------------------------------------------------------------------ background: a still of the game's title movie
+// The movie is a file in a folder setup's romfs/, or read from the game package in place (romfs.src: a package setup
+// has no RomFS on disk - FE3H's nx/movie/jpn/MV_OP.webm): found through the RomFS image's own directory tables and
+// handed to ffmpeg through a custom reader.
+typedef struct { NxRomfs *r; uint64_t off, size, pos; } PkgFile;
+
+static int pkg_read(void *opaque, uint8_t *buf, int n) {
+    PkgFile *f = (PkgFile *)opaque;
+    if (f->pos >= f->size) return AVERROR_EOF;
+    if ((uint64_t)n > f->size - f->pos) n = (int)(f->size - f->pos);
+    ssize_t got = nx_romfs_pread(f->r, buf, (uint64_t)n, f->off + f->pos);
+    if (got <= 0) return AVERROR_EOF;
+    f->pos += (uint64_t)got;
+    return (int)got;
+}
+
+static int64_t pkg_seek(void *opaque, int64_t off, int whence) {
+    PkgFile *f = (PkgFile *)opaque;
+    if (whence == AVSEEK_SIZE) return (int64_t)f->size;
+    int64_t base = (whence & 3) == SEEK_CUR ? (int64_t)f->pos : (whence & 3) == SEEK_END ? (int64_t)f->size : 0;
+    if (base + off < 0) return -1;
+    f->pos = (uint64_t)(base + off);
+    return (int64_t)f->pos;
+}
+
+// Where rel is in the package's RomFS image (its data, from the image's start). Directory entry: parent, sibling,
+// first child dir, first file, hash next, name length, name; file entry: parent, sibling, data offset (u64), size
+// (u64), hash next, name length, name (the RomFS layout, as runtime/services/fs.c reads it).
+static bool pkg_find(NxRomfs *r, const char *rel, uint64_t *off, uint64_t *size) {
+    uint64_t h[10];
+    if (nx_romfs_pread(r, h, sizeof h, 0) != (ssize_t)sizeof h) return false;
+    std::vector<uint8_t> dirs(h[4]), files(h[8]);
+    if (nx_romfs_pread(r, dirs.data(), h[4], h[3]) != (ssize_t)h[4] || nx_romfs_pread(r, files.data(), h[8], h[7]) != (ssize_t)h[8])
+        return false;
+    auto u32 = [](const std::vector<uint8_t> &t, uint64_t o) { uint32_t v = 0xFFFFFFFFu; if (o + 4 <= t.size()) memcpy(&v, &t[o], 4); return v; };
+    auto named = [](const std::vector<uint8_t> &t, uint64_t o, uint64_t name_at, const std::string &want) {
+        uint32_t nl = 0;
+        if (o + name_at - 4 + 4 > t.size()) return false;
+        memcpy(&nl, &t[o + name_at - 4], 4);
+        return nl == want.size() && o + name_at + nl <= t.size() && !memcmp(&t[o + name_at], want.data(), nl);
+    };
+    std::string path = rel;
+    uint32_t dir = 0;  // (the root)
+    for (size_t at = 0;;) {
+        size_t slash = path.find('/', at);
+        std::string part = path.substr(at, slash == std::string::npos ? std::string::npos : slash - at);
+        if (slash == std::string::npos) {  // the file, among the directory's files
+            for (uint32_t f = u32(dirs, (uint64_t)dir + 12); f != 0xFFFFFFFFu; f = u32(files, (uint64_t)f + 4))
+                if (named(files, f, 0x20, part)) {
+                    memcpy(off, &files[f + 8], 8), memcpy(size, &files[f + 0x10], 8);
+                    *off += h[9];
+                    return true;
+                }
+            return false;
+        }
+        uint32_t d = u32(dirs, (uint64_t)dir + 8);
+        while (d != 0xFFFFFFFFu && !named(dirs, d, 0x18, part)) d = u32(dirs, (uint64_t)d + 4);
+        if (d == 0xFFFFFFFFu) return false;
+        dir = d;
+        at = slash + 1;
+    }
+}
+
 static bool load_background(uint8_t **out, int *ow, int *oh) {
     if (!nx_game.info.title_movie) return false;
     std::string path = g_root + "/romfs/" + nx_game.info.title_movie;
     AVFormatContext *fmt = NULL;
-    if (avformat_open_input(&fmt, path.c_str(), NULL, NULL) < 0) return false;
+    NxRomfs *pkg = NULL;
+    PkgFile pf = {};
+    AVIOContext *io = NULL;
+    if (avformat_open_input(&fmt, path.c_str(), NULL, NULL) < 0) {
+        fmt = NULL;
+        char why[256];
+        pkg = file_exists(g_root + "/romfs.src") ? nx_romfs_open((g_root + "/romfs.src").c_str(), why, sizeof why) : NULL;
+        if (!pkg || !pkg_find(pkg, nx_game.info.title_movie, &pf.off, &pf.size)) { if (pkg) nx_romfs_close(pkg); return false; }
+        pf.r = pkg;
+        const int bs = 1 << 16;
+        io = avio_alloc_context((unsigned char *)av_malloc(bs), bs, 0, &pf, pkg_read, NULL, pkg_seek);
+        fmt = avformat_alloc_context();
+        fmt->pb = io;
+        if (avformat_open_input(&fmt, NULL, NULL, NULL) < 0) {  // (frees fmt on failure)
+            av_freep(&io->buffer), avio_context_free(&io), nx_romfs_close(pkg);
+            return false;
+        }
+    }
     bool got = false;
     int si = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     if (si >= 0 && avformat_find_stream_info(fmt, NULL) >= 0) {
@@ -638,6 +717,8 @@ static bool load_background(uint8_t **out, int *ow, int *oh) {
         avcodec_free_context(&cc);
     }
     avformat_close_input(&fmt);
+    if (io) av_freep(&io->buffer), avio_context_free(&io);
+    if (pkg) nx_romfs_close(pkg);
     return got;
 }
 
