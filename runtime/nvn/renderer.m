@@ -2212,10 +2212,11 @@ static uint64_t cs_content_key(uint64_t code_hash, const uint32_t local[3]) {
     return h;
 }
 
-static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max) {
+static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint32_t shared_bytes) {
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
+    k.shared_bytes = shared_bytes;
     cp->si = slow_translate(code, max, STAGE_COMPUTE, &k);
     if (!cp->si->msl) { LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, cp->code_addr); cp->failed = true; return false; }
     return true;
@@ -2237,6 +2238,12 @@ static CsProg *compute_program(NvnProgram *p) {
     for (int i = 0; i < 3; i++) {
         local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!local[i]) local[i] = 1;
+    }
+    if (getenv("NXRT_LOG_CS_CONTROL") && ss->control) {
+        const uint32_t *w = (const uint32_t *)(ss->control + 0x700);
+        LOG("[cscontrol] %llx local %ux%ux%u:", (unsigned long long)ss->code_addr, local[0], local[1], local[2]);
+        for (int i = 0; i < 0x30; i++) LOG(" %x", w[i]);
+        LOG("\n");
     }
     if (shader_rec_recording()) {
         ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
@@ -2262,7 +2269,8 @@ static CsProg *compute_program(NvnProgram *p) {
     shader_fp_check(&cp->fp, ss, "cs");  // (takes the fingerprint)
     cp->code_addr = ss->code_addr;
     memcpy(cp->local, local, sizeof local);
-    if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000)) return NULL;
+    uint32_t shared = ss->control ? *(const uint32_t *)(ss->control + 0x710) : 0;  // (its shared memory, bytes)
+    if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, shared)) return NULL;
     if (sync_shaders()) {
         compile_compute(cp);
         return cp->failed ? NULL : cp;
@@ -3825,7 +3833,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         if (have) return true;
         CsProg *cp = calloc(1, sizeof *cp);
         memcpy(cp->local, r->local, sizeof cp->local);
-        if (!translate_compute(cp, vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000)) return false;
+        if (!translate_compute(cp, vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000, 0)) return false;
         pthread_mutex_lock(&g_prep_lock);
         g_prep_cs[@(ck)] = [NSValue valueWithPointer:cp];
         pthread_mutex_unlock(&g_prep_lock);

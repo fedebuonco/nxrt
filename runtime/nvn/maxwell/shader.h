@@ -49,6 +49,7 @@ typedef struct {
     bool dual_source;       // Vulkan: colour outputs 0/1 are the two sources of attachment 0
     uint32_t buffer_tex;    // texture handle slots (bit (offset - 0x20) / 8) bound to buffer textures: the shader can't
                             // tell them from 1D textures, the bound texture does (texture_buffer, read by index)
+    uint32_t shared_bytes;  // compute: the program's shared memory (its control data, +0x710); 0 = unknown (32 KB)
 } ShaderKey;
 
 typedef struct {
