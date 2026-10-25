@@ -79,6 +79,7 @@ typedef struct {
     bool branchy;  // program uses the pc state machine
     char fwd_tail[2048];  // loop closings after the last block (structured mode)
     bool fwd;      // ... structured instead: blocks in pc order, loops as for (;;) (see FWD below)
+    const uint32_t *pop_to;  // SYNC / BRK at instruction i: where it goes, known statically (static_regions); NULL: the stacks
     int ipa_mode;  // interpolation mode of the IPA being translated (-1 for plain loads)
     int ipa_mul;   // its multiplier register (mode 1: the result is the "pass" value attr/w times this register)
     // GLSL (fields kept last: the MSL path's layout, including its out-of-range reg_used writes, is unchanged)
@@ -878,6 +879,69 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     write_tex_result(c, slot, call, mask, d, RZ, false, false);
 }
 
+// ------------------------------------------------------------------ static SSY / PBK targets
+// SSY / PBK push a reconvergence address on a stack and SYNC / BRK pop it: emulated with a small array indexed at run
+// time, which Apple's GPU compiler keeps in slow stack memory and which hides every target from its control-flow
+// analysis. Compiled shaders nest those regions (a region: from the push to its target), so a SYNC / BRK goes to the
+// target of the innermost region of its kind around it. Returns that table (index: instruction) when it provably equals
+// the stacks: regions forward and properly nested, every SYNC / BRK inside one, no BRA entering or leaving a region
+// (its source and target have the same innermost regions), no BRX / JMX / CAL. NULL: the stacks are kept.
+// Off by default (NXRT_SHADER_STATIC=1 turns it on): measured with LAS at 2x on a base M3 (scripted walk, back to
+// back), it resolves 266 of 268 shaders' stacks but the frame's GPU time is the same (13.60 vs 13.62 ms); the main pass
+// 4.73 vs 4.94 ms, within noise. Kept for the next measurement, not worth the risk on by default.
+typedef struct { uint32_t s, t; bool pbk; } Region;
+static int innermost(const Region *r, int n, bool pbk, uint32_t x) {  // (index of the latest-starting region holding x)
+    int best = -1;
+    for (int k = 0; k < n; k++)
+        if (r[k].pbk == pbk && r[k].s < x && x < r[k].t && (best < 0 || r[k].s > r[best].s)) best = k;
+    return best;
+}
+static uint32_t *static_regions(const uint64_t *code, size_t end) {
+    static int off = -1;
+    if (off < 0) off = !(getenv("NXRT_SHADER_STATIC") && atoi(getenv("NXRT_SHADER_STATIC")));
+    if (off) return NULL;
+    int n = 0, cap = 64;
+    Region *r = malloc(sizeof *r * (size_t)cap);
+    bool ok = true;
+    for (size_t i = 0; i < end && ok; i++) {
+        if (i % 4 == 0) continue;
+        uint64_t w = code[i], top = w & 0xfff0000000000000ull;
+        if (top == 0xe250000000000000ull || top == 0xe200000000000000ull || top == 0xe260000000000000ull ||
+            top == 0xe210000000000000ull)
+            ok = false;  // BRX / JMX / CAL / JMP: targets not known here
+        if ((top == 0xe290000000000000ull || top == 0xe2a0000000000000ull) && (w & 0x20)) ok = false;  // (cbuf target)
+        if ((top == 0xe290000000000000ull || top == 0xe2a0000000000000ull) && !(w & 0x20)) {
+            uint32_t pc = (uint32_t)(i * 8), t = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+            if (t <= pc) ok = false;
+            if (n == cap) r = realloc(r, sizeof *r * (size_t)(cap *= 2));
+            r[n++] = (Region){pc, t, top == 0xe2a0000000000000ull};
+        }
+    }
+    for (int a = 0; a < n && ok; a++)  // same kind: nested or disjoint
+        for (int b = 0; b < n && ok; b++)
+            if (a != b && r[a].pbk == r[b].pbk && r[a].s < r[b].s && r[b].s < r[a].t && r[a].t < r[b].t) ok = false;
+    uint32_t *to = ok ? calloc(end, sizeof *to) : NULL;
+    for (size_t i = 0; i < end && ok; i++) {
+        if (i % 4 == 0) continue;
+        uint64_t w = code[i];
+        uint32_t pc = (uint32_t)(i * 8);
+        bool sync = (w & 0xfff8000000000000ull) == 0xf0f8000000000000ull, brk = (w & 0xfff0000000000000ull) == 0xe340000000000000ull;
+        if (sync || brk) {
+            int k = innermost(r, n, brk, pc);
+            if (k < 0) ok = false;
+            else to[i] = r[k].t;
+        }
+        if ((w & 0xfff0000000000020ull) == 0xe240000000000000ull) {  // BRA
+            uint32_t t = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+            if (innermost(r, n, false, pc) != innermost(r, n, false, t) || innermost(r, n, true, pc) != innermost(r, n, true, t))
+                ok = false;
+        }
+    }
+    free(r);
+    if (!ok) { free(to); return NULL; }
+    return to;
+}
+
 // ------------------------------------------------------------------ instruction translation
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
@@ -912,13 +976,16 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sp(&c->body, c->fwd ? "    pc = %uu; break;\n" : "    pc = %uu; continue;\n", target);
     } else if (OPM(0xe290000000000000ull, 0xfff0000000000020ull)) {  // SSY
         c->uses_branches = true;
-        sp(&c->body, "    ssy[ssy_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        if (!c->pop_to) sp(&c->body, "    ssy[ssy_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xe2a0000000000000ull, 0xfff0000000000020ull)) {  // PBK
         c->uses_branches = true;
-        sp(&c->body, "    pbk[pbk_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        if (!c->pop_to) sp(&c->body, "    pbk[pbk_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xe2b0000000000000ull, 0xfff0000000000020ull)) {  // PCNT
         c->uses_branches = true;
         sp(&c->body, "    pcnt[pcnt_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+    } else if (c->pop_to && (OPM(0xf0f8000000000000ull, 0xfff8000000000000ull) ||
+                             OPM(0xe340000000000000ull, 0xfff0000000000000ull))) {  // SYNC / BRK, resolved statically
+        sp(&c->body, c->fwd ? "    pc = %uu; break;\n" : "    pc = %uu; continue;\n", c->pop_to[pc / 8]);
     } else if (OPM(0xf0f8000000000000ull, 0xfff8000000000000ull)) {  // SYNC
         sp(&c->body, c->fwd ? "    pc = ssy[--ssy_n]; break;\n" : "    pc = ssy[--ssy_n]; continue;\n");
     } else if (OPM(0xe340000000000000ull, 0xfff0000000000000ull)) {  // BRK
@@ -2230,6 +2297,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         }
     c->branchy = any_branch;
     c->fwd = any_branch && forward && !getenv("NXRT_NO_FWD_SHADERS");
+    uint32_t *pop_to = any_branch ? static_regions((const uint64_t *)code, end) : NULL;
+    c->pop_to = pop_to;
     bool fwd_first = true;
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
@@ -2270,6 +2339,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         info->num_insts++;
     }
     free(label);
+    free(pop_to);
+    c->pop_to = NULL;
     if (c->fwd && !c->fail) {  // (loops whose end is the program's end: closed after the last block, in the wrappers)
         c->fwd_tail[0] = 0;
         for (int k = nloops - 1; k >= 0; k--)  // (sorted by head: later heads are inner)
