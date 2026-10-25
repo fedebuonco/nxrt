@@ -426,6 +426,74 @@ quickest wins for every game. B6 is the big performance project, and should only
 
 ---
 
+## Part C: games pay only for what they use, then the GPU pipeline at its best
+
+**The goal:** a game pays, in CPU time, GPU time and shader size, only for the features it declares. With that
+cleared away, the GPU pipeline is tuned to the most it can do on Apple Silicon.
+
+### Where things stand (2026-10-25)
+
+- **Already pay-per-use:**
+  - **Game code:** each game builds its own (Part B).
+  - **HLE services:** they run only when the game calls them.
+  - **Hooks a game doesn't set:** cost one pointer check.
+- **Paid by every game:**
+  - **The per-draw tint:** the translator adds it to every fragment shader that writes a float color target 0
+    (`translate.c`: `uses_tint`). It means a buffer bound on every draw and a branch at the end of every pixel. All
+    105 fragment shaders in a LAS field walk had it, and EoW's get it too.
+  - **Texture identification for recolouring and replacement:** it ran on every upload check until `9c176ac`, where
+    it was 55% of LAS's render thread.
+  - **LAS rules in the core renderer:** level clears for `TelephoneBox` (`metal.m` `level_change_check`), and
+    first-use clears of screen-sized targets every frame (LAS's pits).
+  - **Generic shader translation:** every register is a 32-bit integer handled with `as_type`, constant buffers are
+    bound whole, and resolution-scale tables are added wherever a shader might read screen coordinates.
+- **The GPU pipeline mirrors the Switch's one-to-one:**
+  - **No pass merging:** LAS's four full-size depth-only passes, 24% of its GPU time at 2x, each save and reload
+    their depth image.
+  - **Conservative load / store actions:** Apple's GPUs work in tiles, so a save nobody reads, or a reload that
+    could be a clear, costs memory bandwidth on every pass.
+  - **No per-pipeline cost measurement yet:** the per-pass timer (`NXRT_GPU_PASSES=1`) stops at passes.
+
+### How each step is measured
+
+All on the same scripted walk, back to back with the step switched off, on LAS and EoW. LAS also at 1x and 2x
+(`tools`: the walk from `explore_far.sh`, a copy of a save).
+
+- **GPU time a frame, per kind of pass:** `NXRT_GPU_PASSES=1`.
+- **Frames on time:** `NXRT_LOG_PACE=1`, the share at 16.7 ms.
+- **Render-thread CPU time:** the `[pace]` lines.
+- **The picture:** screenshots at fixed frames (`NXRT_SHOT_AT`), compared side by side. The walk isn't deterministic,
+  so compare by eye, or pin a scene with a warp (`NXRT_WARP_AT`).
+- **Shader size and spills:** `NXRT_SAVE_MSL=1` (array sizes, line counts); Metal System Trace's
+  `graphics-compiler-spill-events`.
+
+### Steps
+
+| Step | What | How it's measured | Players rebuild? |
+|---|---|---|---|
+| **C1. Feature declarations** | The game declares its renderer features in `nx_game.info` (the Makefile's `NXRT_FEATURES` from Part A, made visible to the runtime): `draw-tint`, `tex-identify`, `scene-clears`, `mirror`, `widescreen-boxing`. The renderer and translator check the declaration, not the shader or the scene | EoW and Tunic boot and render as before with none declared; LAS declares all and renders as before | No |
+| **C2. Compile out what isn't declared** | Without `draw-tint`, no tint binding or branch in any shader. Without `tex-identify`, no texture checks on upload. Without `scene-clears`, no first-use clears. The shader cache key includes the feature set | EoW: fragment shaders lose the tint (`NXRT_SAVE_MSL`); GPU time per pass and render-thread time vs before | No |
+| **C3. LAS rules out of the core renderer** | `TelephoneBox`, the pit clears and the widescreen pieces move behind the `draw` / `scene_changed` hooks (Part A's draw actions) | No game-specific names left in `runtime/nvn` (`grep`); LAS's phone box, pits and widescreen as before | No |
+| **C4. Per-pipeline GPU cost** | A custom Instruments template with the shader sampler on (`gpu-shader-profiler-sample`), or a renderer mode that splits a chosen pass's draws into their own command buffers. Shaders are labelled with their guest address (`MTLFunction.label`, encoder labels) so samples map back to the game's programs | A table like `[gpu-passes]`, by pipeline: the top 20 pipelines' share of GPU time, for LAS and EoW | No |
+| **C5. Load / store actions** | Each pass's attachments: a clear instead of a load where the game clears first; no store where nothing reads the image later (a depth buffer used only inside its passes); temporary images on-chip only (`MTLStorageModeMemoryless`) where their contents never leave the pass. Decided from what later passes read, per frame | `[gpu-passes]`: the depth-only passes (LAS: 3.3 ms a frame at 2x) and the scene passes; the picture unchanged; Metal's validation layer for misuse | No |
+| **C6. Pass merging** | Consecutive passes on the same attachments with nothing reading them in between become one encoder. LAS's four depth-only passes first | Passes per frame (`[metal]` stats) and their GPU time; the picture unchanged | No |
+| **C7. Shader quality, where C4 points** | For the costly pipelines only: 16-bit arithmetic where the Switch shader used it (`HADD2` / `HMUL2` today go through `half2` and back), constant buffers read as structured data, branches resolved at translation (`NXRT_SHADER_STATIC`), local memory sized from the header (`NXRT_LMEM_SIZED`), measured again | Those pipelines' share in C4's table, before and after | No (shaders are translated at run time) |
+| **C8. Keeping the GPU clocked up** | macOS runs the GPU at the lowest clock that meets each frame (a base M3 at 2x: 490-930 MHz of 1,338, `powermetrics`), so a heavy frame misses. Experiments: encode frame N+1 while the GPU runs frame N (the render thread already queues), finer submits, present timing hints. Only what measurably raises the clock stays | `powermetrics --samplers gpu_power` (frequency and residency), frames on time | No |
+
+### Order
+
+C1 and C2 first: small, and every game gains from them. C3 follows Part A's draw actions. C4 comes before C5-C7,
+which choose what to change from its numbers. C8 is open-ended research, so it runs alongside, and only measured gains
+are kept.
+
+### What already showed no gain (don't repeat blindly)
+
+See "Frame rate investigation" above: static branch targets and sized local memory made no difference on their own;
+shorter present deadlines and a Game Mode bundle didn't raise the clock. C7 only revisits them for the pipelines that
+C4 shows to be expensive.
+
+---
+
 ## What each game has to change
 
 | Game | Part A | Part B |
@@ -451,6 +519,8 @@ for A.
 | 4 | **Extension points:** fs overlay, texture provider, present stage, pipeline cache, start-screen task slot, input output hook | **B3** incremental builds |
 | 5 | **Move the extras** behind `NXRT_FEATURES`, one at a time | **B4** differential testing |
 | 6 | **Move dev tooling**; update the docs to the new layout | **B5** dispatch, then **B6** registers, then **B7** profiles |
+
+Part C runs after Part A's step 2 (draw actions): C1-C2 any time, C3 after A2, C4-C8 after C2.
 
 ## Risks
 
