@@ -366,6 +366,45 @@ That makes every improvement measurable per game.
 - **Not done:** LAS's CPU use vs B5; an EoW run; step 2 (guest registers in C locals across functions).
 - **Parked** to work on frame rate (the GPU / render side) first.
 
+### Frame rate investigation (LAS at 2x, base M3, 2026-10-25)
+
+Measured on a scripted field walk with a copy of a save (`NXRT_GPU_PASSES=1`, Metal System Trace, powermetrics).
+
+- **GPU-bound:** 13.6-14 ms of GPU time a frame at 2x (10 ms at 1x). The render thread needs ~4.5 ms; game code is
+  light.
+- **Where the GPU time goes (2x):**
+  - main scene pass (2560x1440): 35%;
+  - four depth-only passes at full size: 24%;
+  - other scene passes: 10%;
+  - two passes at 3840x2160: 13%. Not a bug: "2x" is 2 x 1080 lines, so the game's 1920x1080 images are meant to
+    be 3840x2160. The 3D is 2560x1440 because the game itself draws it at 1280x720 in that mode.
+- **The GPU clock:** powermetrics shows the GPU busy 60-90% of each second but clocked at 490-930 MHz (top 1,338).
+  The driver only ever asks for its lowest 4 of 13 power states. macOS runs the GPU at the lowest clock that meets
+  each frame; in heavier moments it clocks up too late and frames miss 16.7 ms. A game app bundle (Game Mode
+  category) made no difference. There is no public API to set the clock.
+- **Why misses become 30 fps:** the game's own 30 fps mode (two world steps a frame). It takes it after a missed
+  vsync and leaves it after a quick frame. In-between rates would be slow motion, so triple buffering can't help.
+- **Tried, no measurable gain (back to back):**
+
+  | Change | GPU time a frame at 2x | Result |
+  |---|---|---|
+  | Static SSY / PBK targets in translated shaders (266 of 268 resolved) | 13.60 vs 13.62 ms | committed opt-in, `NXRT_SHADER_STATIC=1` |
+  | Local memory sized from the shader header (a 1,040-byte spill gone) | 13.37 vs 13.34 ms | committed opt-in, `NXRT_LMEM_SIZED=1` |
+  | Shorter present deadline (8 / 4 / 1 ms instead of 16.7) | 14.0-14.4 ms | 49-52 fps vs 54; reverted |
+  | Game app bundle (Game Mode) | | same GPU clocks |
+
+- **Tools that didn't work:** a full Metal frame capture (`MTLCaptureManager`) wrote a 56 GB trace (it copies the
+  buffer mapping guest memory) and the game stopped. Metal System Trace's default template has the shader sampler off.
+- **Bug found, left as is:** the runtime's 30 fps hold (`runtime/nvn/pace.c` `hold_30`) has had no game-manager
+  address since the runtime was split out of LAS (`fw = 0`), so it never changes the game. While its flag is set,
+  `pace_end_counter` still reports the game's GPU time as at least 20 ms. In one walk the flag stayed set for 68 of
+  90 s. Switching pacing off (`NXRT_PACE=0`) made no consistent difference over 2 + 2 runs (on: 45.8 / 54.3 fps;
+  off: 53.1 / 50.5), so it stays. To reconnect it: the game manager is `*(x0 + 8)` in LAS's frame controller
+  `f_700000c910`.
+- **What does help:** settings (1x in a window, or Match display at 75%, hold 60; Dynamic steps down when the GPU
+  falls behind), and earlier render-thread fixes (`9c176ac`, `2ceda04`). The clearest GPU work left is the four
+  full-size depth-only passes (~3.3 ms a frame).
+
 ### Steps
 
 Each step keeps the games working. The library's id covers the recompiler (see ARCHITECTURE.md), so each step that
