@@ -2,7 +2,7 @@
 # (nxrt.mk, the nx-runtime build, includes it too.) Variables a host may set first: NXRT (this folder), B (build dir),
 # CLANG, DEPS (a prefix with SDL3 instead of Homebrew's).
 #
-#   nx-platform  platform/   OS layer, data root and paths, app identity, crash handling hooks
+#   nx-platform  platform/   OS layer, data root and paths, app identity, crash handling hooks, the logger (nx_log)
 #   nx-settings  settings/   the ini file: sections registered by each part
 #   nx-input     input/      SDL3 keyboard / controllers, bindings, the Switch pad state (NxPad)
 #   nx-save      save/       save folders per boot profile, backups, read / write listeners
@@ -37,7 +37,7 @@ NX_UIFLAGS ?= -fobjc-arc
 NX_LDFLAGS ?= -L$(SDL)/lib -lSDL3 -Wl,-rpath,$(SDL)/lib -framework Foundation -framework Metal -framework QuartzCore \
               -framework AppKit -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
-NX_PLATFORM_SRC := $(NXRT)/platform/app.c $(NXRT)/platform/paths.c $(NXRT)/platform/$(PLATFORM).c
+NX_PLATFORM_SRC := $(NXRT)/platform/app.c $(NXRT)/platform/paths.c $(NXRT)/platform/nx_log.c $(NXRT)/platform/$(PLATFORM).c
 NX_SETTINGS_SRC := $(NXRT)/settings/settings.c
 NX_INPUT_SRC    := $(NXRT)/input/input.c $(NXRT)/input/bindings.c
 NX_SAVE_SRC     := $(NXRT)/save/save.c

@@ -1,4 +1,4 @@
-// The logging core (runtime/nx_log.c): levels and per-category filters, the line format, the run id, and a sink.
+// The logging core (platform/nx_log.c): levels and per-category filters, the line format, the run id, and a sink.
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>

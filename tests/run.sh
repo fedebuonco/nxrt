@@ -164,10 +164,10 @@ run_c test_hle_libc tests/test_hle_libc.c runtime/hle/libc.c
 run_c test_gamelib_id tests/test_gamelib_id.c
 
 # layers
-run_c test_log tests/test_log.c runtime/nx_log.c -- -pthread
-run_c test_settings tests/test_settings.c settings/settings.c runtime/nx_log.c -- -pthread
-run_c test_mods tests/test_mods.c runtime/mods.c runtime/nx_log.c -- -pthread
-run_c test_save tests/test_save.c save/save.c runtime/nx_log.c -- -pthread
+run_c test_log tests/test_log.c platform/nx_log.c -- -pthread
+run_c test_settings tests/test_settings.c settings/settings.c platform/nx_log.c -- -pthread
+run_c test_mods tests/test_mods.c runtime/mods.c platform/nx_log.c -- -pthread
+run_c test_save tests/test_save.c save/save.c platform/nx_log.c -- -pthread
 run_cxx test_sha256 tests/test_sha256.cpp
 
 # SDL: scancode names
@@ -176,7 +176,7 @@ if [ "$HAVE_SDL" = 1 ]; then
         name=test_bindings
         log="$OUT/$name.log"
         # shellcheck disable=SC2086
-        if $CC $CFLAGS $INC $SDL_CFLAGS tests/test_bindings.c input/bindings.c runtime/nx_log.c $SDL_LIBS -pthread -o "$OUT/$name" >"$log" 2>&1; then
+        if $CC $CFLAGS $INC $SDL_CFLAGS tests/test_bindings.c input/bindings.c platform/nx_log.c $SDL_LIBS -pthread -o "$OUT/$name" >"$log" 2>&1; then
             if "$OUT/$name" >>"$log" 2>&1; then report ok "$name" "$log"; else report fail "$name" "$log"; fi
         else
             report fail "$name" "$log"

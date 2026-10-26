@@ -61,7 +61,7 @@ manager session is a verbose game too.
 
 ## The C API
 
-`runtime/nx_log.h`:
+`platform/nx_log.h`:
 
 ```c
 NX_LOGE(NX_LOG_SETTINGS, "cannot write %s", path);
