@@ -70,11 +70,11 @@ static uint64_t next_debug_id = 1;
 
 // ================================================================== device
 // NVNdeviceInfo -> value
-// The NVN API version the game was built against. NVN ships inside each game's own sdk, so a game checks for its own
-// headers' version (major ==, minor >=) and skips its renderer otherwise. Games of SDK 6.5 to 16.2 check 53 (FE3H, Link's
-// Awakening, Skyward Sword HD, Metroid Dread, Echoes of Wisdom); Tomodachi Life (SDK 20.5.3) checks 55 and minor >= 15,
-// so SDK 17 and later get 55.15 - the oldest minor that passes, so the game assumes no newer feature. Which SDK first
-// shipped 55 is not known: NXRT_NVN_API=<major>.<minor> sets it for a game the rule gets wrong.
+// The NVN API version the game was built against. NVN ships inside each game's sdk, so a game checks for its own
+// headers' version (major ==, minor >=) and creates no device otherwise. SDK 10 and older are API 53 (minor 313 passes
+// them: Super Mario 3D World 10.4, Link's Awakening 8, Three Houses 6.5); SDK 11 and later are 55.15 (Super Mario Bros.
+// Wonder, SDK 16, requires major 55 and minor >= 15; Tomodachi Life, SDK 20.5.3, the same). The rule and the values are
+// nxnative's (MIT, THIRD_PARTY.md). NXRT_NVN_API=<major>.<minor> sets it for a game the rule gets wrong.
 static void nvn_api_version(uint32_t *major, uint32_t *minor) {
     static uint32_t mj, mn;
     if (!mj) {
@@ -90,13 +90,34 @@ static void nvn_api_version(uint32_t *major, uint32_t *minor) {
             mj = a, mn = b;
             LOG("[nvn] API version %u.%u (NXRT_NVN_API; the game's SDK is %d)\n", mj, mn, sdk);
         } else {
-            if (sdk >= 17) mj = 55, mn = 15;
-            else mj = 53, mn = 207;
+            if (sdk > 0 && sdk <= 10) mj = 53, mn = 313;
+            else mj = 55, mn = 15;
             LOG("[nvn] API version %u.%u (the game's SDK is %d%s)\n", mj, mn, sdk, sdk ? "" : ": not found");
         }
     }
     *major = mj, *minor = mn;
 }
+
+// NVNdeviceInfo -> value: measured on a Tegra X1 (nvnDeviceGetInteger called item by item on Super Mario Odyssey), as
+// nxnative lists them (MIT, THIRD_PARTY.md); indexed by the NVN_DEVICE_INFO_* enum of NVN 55, which NVN 53 is the start
+// of. Every item a game asks matters: games size their queue memory, align their render targets and pick code paths from
+// them (Tomodachi Life reads 0x36 ZCULL_SAVE_RESTORE_ALIGNMENT, 0x39, 0x51 / 0x55 / 0x5B queue memory sizes and the
+// feature flags 0x42-0x57; an older table here was misaligned from 0x2F and answered 0 from 0x41).
+static const uint32_t g_devinfo[] = {
+    [0x00] = 55, [0x01] = 15,  // (the API version: nvn_api_version)
+    [0x02] = 14, [0x03] = 65536, [0x04] = 256, [0x05] = 8, [0x06] = 16, [0x07] = 4, [0x08] = 16, [0x09] = 32,
+    [0x0A] = 16, [0x0B] = 4, [0x0C] = 4, [0x0D] = 4, [0x0E] = 16, [0x0F] = 32, [0x10] = 32, [0x11] = 256, [0x12] = 256,
+    [0x13] = 4, [0x14] = 8, [0x15] = 512, [0x16] = 256, [0x17] = 2, [0x18] = 256, [0x19] = 4096, [0x1A] = 131072,
+    [0x1B] = 16, [0x1C] = 1536, [0x1D] = 1024, [0x1E] = 64, [0x1F] = 1536, [0x20] = 65535, [0x21] = 65535, [0x22] = 65535,
+    [0x23] = 8, [0x24] = 1048576, [0x25] = 4096, [0x26] = 16, [0x27] = 4096, [0x28] = 1, [0x29] = 1, [0x2A] = 1,
+    [0x2B] = 262144, [0x2C] = 15, [0x2D] = 2048, [0x2E] = 1, [0x2F] = 1, [0x30] = 14, [0x31] = 5, [0x32] = 1, [0x33] = 8,
+    [0x34] = 8, [0x35] = 4, [0x36] = 32, [0x37] = 128, [0x38] = 32, [0x39] = 128, [0x3A] = 65536, [0x3B] = 1, [0x3C] = 4,
+    [0x3D] = 16384, [0x3E] = 134217728, [0x3F] = 2048, [0x40] = 16384, [0x41] = 16384, [0x42] = 1, [0x43] = 1, [0x44] = 1,
+    [0x45] = 1, [0x46] = 5, [0x47] = 1, [0x48] = 1, [0x49] = 1, [0x4A] = 1, [0x4B] = 1, [0x4C] = 1, [0x4D] = 16,
+    [0x4E] = 1024, [0x4F] = 32, [0x50] = 4096, [0x51] = 65536, [0x52] = 65536, [0x53] = 256, [0x54] = 16384,
+    [0x55] = 262144, [0x56] = 4096, [0x57] = 1, [0x58] = 4, [0x59] = 2, [0x5A] = 0, [0x5B] = 4096, [0x5C] = 16384,
+    [0x5D] = 4096, [0x5E] = 128, [0x5F] = 4096,  // (0x5F: per the sampler pool limit, not measured)
+};
 
 static uint32_t device_integer(uint32_t which) {
     if (which <= 1) {
@@ -104,23 +125,18 @@ static uint32_t device_integer(uint32_t which) {
         nvn_api_version(&major, &minor);
         return which ? minor : major;
     }
-    static const uint32_t v[] = {
-        [0] = 53, [1] = 207,           // API version: nvn_api_version
-        [2] = 14, [3] = 65536, [4] = 256, [5] = 8, [6] = 16, [7] = 4, [8] = 16, [9] = 32,
-        [10] = 16, [11] = 4, [12] = 4, [13] = 4, [14] = 16, [15] = 32, [16] = 32,
-        [17] = 256, [18] = 256,        // reserved texture / sampler descriptors
-        [19] = 4, [20] = 8, [21] = 0x10000, [22] = 0x1000,
-        [23] = 256, [24] = 256, [25] = 4096, [26] = 0x20000, [27] = 16,
-        [28] = 1536, [29] = 1024, [30] = 64, [31] = 1536,
-        [32] = 0x7FFFFFFF, [33] = 65535, [34] = 65535,
-        [35] = 8, [36] = 1048576, [37] = 4096, [38] = 16, [39] = 0x10000,
-        [40] = 1, [41] = 1, [42] = 1,  // min/max filtering, stencil8, ASTC
-        [43] = 0x40000, [44] = 15, [45] = 2048,
-        [46] = 1, [47] = 5, [48] = 1, [49] = 15,
-        [50] = 256, [51] = 1, [52] = 0, [53] = 0, [54] = 0, [55] = 256, [56] = 1, [57] = 0x1000,
-        [58] = 1, [59] = 1, [60] = 1, [61] = 1, [62] = 1, [63] = 1, [64] = 1,
-    };
-    return which < sizeof v / sizeof *v ? v[which] : 0;
+    // 0x2E / 0x30, the newest GPU code the driver takes: 1.16, the newest the translator reads (precompiled shaders can
+    // be newer than the SDK's own driver: ASTRAL CHAIN, SDK 6.4, ships 1.15 code and rejects 1.14)
+    if (which == 0x2E) return 1;
+    if (which == 0x30) return 16;
+    // 0x67 (SDK 19, not measured): the alignment of shader code copies - 256, shader code's alignment in a memory pool
+    if (which == 0x67) return 256;
+    if (which >= sizeof g_devinfo / sizeof *g_devinfo) {
+        static int nlog;
+        if (nlog++ < 16) LOG("[nvn] DeviceGetInteger: unknown item %#x, 0\n", which);
+        return 0;
+    }
+    return g_devinfo[which];
 }
 
 NVN(nvnDeviceBuilderSetDefaults) { G(uint32_t, A(0), 0) = 0; }

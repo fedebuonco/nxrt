@@ -9,6 +9,7 @@ named here. Nothing in this repository includes Nintendo game code, fonts or key
 |---|---|---|
 | Dear ImGui | [`third_party/imgui`](third_party/imgui) | MIT — [`LICENSE.txt`](third_party/imgui/LICENSE.txt), © 2014–2025 Omar Cornut |
 | SMAA | [`third_party/smaa`](third_party/smaa) | MIT — [`LICENSE.txt`](third_party/smaa/LICENSE.txt), © 2013 Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez |
+| nxnative: NVN device-info values and the NVN API-version rule | [`runtime/nvn/objects.c`](runtime/nvn/objects.c) (`g_devinfo`, `nvn_api_version`), from [seedds/nxnative](https://github.com/seedds/nxnative) | MIT — [`LICENSE`](third_party/nxnative/LICENSE), © 2026 seedds |
 | xxHash | [`third_party/xxhash`](third_party/xxhash) | BSD 2-Clause — [`LICENSE`](third_party/xxhash/LICENSE), © 2012–2021 Yann Collet |
 | Baloo 2 font | [`third_party/fonts/Baloo2`](third_party/fonts/Baloo2) | SIL Open Font License 1.1 — [`OFL.txt`](third_party/fonts/Baloo2/OFL.txt), © 2019 The Baloo 2 Project Authors |
 
