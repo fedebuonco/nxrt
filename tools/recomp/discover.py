@@ -7,7 +7,7 @@ any branch or call target outside its function becomes a new start, splitting th
 from analyze import eh_frame_functions
 from nso import R_AARCH64_RELATIVE
 
-from . import cfg
+from . import cfg, workers
 
 
 def sext26(w):
@@ -75,16 +75,22 @@ def functions(m, start_set):
     rounds)."""
     scanned = {}
     rounds = 0
+    cfg.true_function(m, m.lo)  # (reads the unwind data once, before the workers would each read it)
     while True:
         rounds += 1
         order = sorted(start_set)
+        todo = [(a, order[i + 1] if i + 1 < len(order) else m.hi) for i, a in enumerate(order)]
+        todo = [key for key in todo if key not in scanned]
+        # the scans, in forked workers (workers.py), a batch of neighbors at a time
+        n = max(1, len(todo) // (workers.jobs() * 32))
+        batches = [todo[i:i + n] for i in range(0, len(todo), n)]
+        for batch, results in zip(batches, workers.fork_map(m, lambda b: [cfg.scan(m, a, end) for a, end in b],
+                                                             batches)):
+            scanned.update(zip(batch, results))
         new = set()
         for i, a in enumerate(order):
             end = order[i + 1] if i + 1 < len(order) else m.hi
-            key = (a, end)
-            if key not in scanned:
-                scanned[key] = cfg.scan(m, a, end)
-            new |= scanned[key][1] - start_set
+            new |= scanned[(a, end)][1] - start_set
         if not new:
             break
         start_set |= new

@@ -116,6 +116,13 @@ def _set_index(mu, regs, i):
         mu.reg_write(A.UC_ARM64_REG_X0 + r if r < 29 else A.UC_ARM64_REG_X29, i)
 
 
+def materializations(m, start):
+    """The ADRP / ADR / ADD-imm instructions from the function entry (m._vlo) to start: replayed before each emulated
+    index (the same for every index, so found once)."""
+    return [a for a in range(m._vlo, start, 4)
+            if (m.word(a) & 0x1F000000) == 0x10000000 or (m.word(a) & 0xFF800000) == 0x91000000]
+
+
 def _emulate_table(m, br_pc, entry, end, start, idx, count, set_at, fill):
     """Run start..br for each index value (set at address set_at), collect targets."""
     mu = emu(m)
@@ -133,18 +140,15 @@ def _emulate_table(m, br_pc, entry, end, start, idx, count, set_at, fill):
 
     if _index_reloaded(m, set_at, br_pc, [idx]):
         return None
+    mat = materializations(m, start)
     targets = []
     try:
         for i in range(count):
             for r in range(29):
                 mu.reg_write(A.UC_ARM64_REG_X0 + r, fill)
             mu.reg_write(A.UC_ARM64_REG_SP, fill)
-            a2 = m._vlo
-            while a2 < start:
-                w2 = m.word(a2)
-                if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
-                    mu.emu_start(a2, 0, count=1)
-                a2 += 4
+            for a2 in mat:
+                mu.emu_start(a2, 0, count=1)
             if set_at != start and not step_to(start, set_at):
                 return None
             _set_index(mu, [idx], i)
@@ -228,6 +232,7 @@ def _jump_table_fallthrough(m, br_pc, entry, end, fill):
         return None
     mu = emu(m)
     scratch_for(mu, fill)
+    mat = materializations(m, start)
     targets = []
 
     def step_to(frm, to):
@@ -247,12 +252,8 @@ def _jump_table_fallthrough(m, br_pc, entry, end, fill):
             mu.reg_write(A.UC_ARM64_REG_SP, fill)
             # replay address materialization (ADRP/ADR/ADD-imm) from the function entry, so table
             # bases computed before loops or branches are known
-            a2 = m._vlo
-            while a2 < start:
-                w2 = m.word(a2)
-                if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
-                    mu.emu_start(a2, 0, count=1)
-                a2 += 4
+            for a2 in mat:
+                mu.emu_start(a2, 0, count=1)
             if not step_to(start, cmp):
                 return None
             _set_index(mu, idx_regs, i)

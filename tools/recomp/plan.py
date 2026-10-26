@@ -10,16 +10,13 @@ Then <name>_table.c (every function's address and pointer: the game code library
 main, main_build_id.txt (part of the library's id). Files whose text is unchanged are left alone.
 """
 import bisect
-import gc
 import io
-import multiprocessing as mp
 import os
 import re
-from concurrent.futures import ProcessPoolExecutor
 
 from lifter import hx
 
-from . import emit, report
+from . import emit, report, workers
 
 
 def write_if_changed(path, text):
@@ -52,36 +49,11 @@ def chunk_text(m, game, entries, hle, fns):
     return ''.join(text)
 
 
-def jobs():
-    """Worker processes for write_chunks: NXRT_GEN_JOBS, else every core. 1 (or no fork(): workers would have to
-    rebuild the Module) writes the chunks in this process."""
-    if 'fork' not in mp.get_all_start_methods():
-        return 1
-    try:
-        n = int(os.environ.get('NXRT_GEN_JOBS', ''))
-    except ValueError:
-        n = 0
-    return n if n > 0 else os.cpu_count() or 1
-
-
-_job = None  # (m, game, entries, hle, outdir, chunks): what forked workers inherit instead of a pickled copy
-
-
-def _write_chunk(k):
-    """(A worker:) chunk file k; returns what emitting it added to the module's stats."""
-    m, game, entries, hle, outdir, chunks = _job
-    before = m.stats.copy()
-    write_if_changed(os.path.join(outdir, f'{m.name}_{k:03d}.c'), chunk_text(m, game, entries, hle, chunks[k]))
-    return m.stats - before
-
-
-def write_chunks(m, game, entries, hle, outdir, span=SPAN, limit=0, njobs=None):
+def write_chunks(m, game, entries, hle, outdir, span=SPAN, limit=0):
     """Emit every function into the <name>_NNN.c file of its address range; returns (address order, chunk count).
 
-    With more than one job the files are written by forked workers (they share the Module copy-on-write, nothing
-    is pickled but chunk numbers), and the progress lines still count the files done in order: the app's builder
-    compiles <name>_000.. up to the reported count while generation goes on."""
-    global _job
+    The chunks' C is made by forked workers (workers.py) and written here in order, so the progress lines count the
+    files done in order: the app's builder compiles <name>_000.. up to the reported count while generation goes on."""
     name = m.name
     os.makedirs(outdir, exist_ok=True)
     order = sorted(entries)
@@ -93,31 +65,11 @@ def write_chunks(m, game, entries, hle, outdir, span=SPAN, limit=0, njobs=None):
         cj = bisect.bisect_left(order, m.lo + (k + 1) * span, ci)
         chunks.append(order[ci:cj])
         ci = cj
-    njobs = min(njobs or jobs(), nchunks)
-    _job = (m, game, entries, hle, outdir, chunks)
-    pool = None
-    if njobs > 1:
-        gc.collect()
-        gc.freeze()  # (so the workers' collector doesn't touch, and copy, every page of the Module)
-    try:
-        if njobs > 1:
-            # (not multiprocessing.Pool: a worker the system kills for memory would leave it waiting forever)
-            pool = ProcessPoolExecutor(njobs, mp_context=mp.get_context('fork'))
-            done = pool.map(_write_chunk, range(nchunks))
-        else:
-            done = map(_write_chunk, range(nchunks))
-        ci = 0
-        for k, stats in enumerate(done):
-            if pool:
-                m.stats.update(stats)  # (in this process emit counted them itself)
-            ci += len(chunks[k])
-            report.progress(name, ci, len(order), k + 1)
-    finally:
-        if pool:
-            pool.shutdown(cancel_futures=True)
-        if njobs > 1:
-            gc.unfreeze()
-        _job = None
+    ci = 0
+    for k, text in enumerate(workers.fork_map(m, lambda fns: chunk_text(m, game, entries, hle, fns), chunks)):
+        write_if_changed(os.path.join(outdir, f'{name}_{k:03d}.c'), text)
+        ci += len(chunks[k])
+        report.progress(name, ci, len(order), k + 1)
     for fn in os.listdir(outdir):  # an earlier run's extra chunks
         mm = re.fullmatch(re.escape(name) + r'_(\d{3,})\.c', fn)
         if mm and int(mm.group(1)) >= nchunks:

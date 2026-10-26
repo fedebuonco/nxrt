@@ -1,5 +1,5 @@
-"""tools/recomp's chunk files written by forked workers (plan.write_chunks with several jobs) against the same files
-written in one process: every file byte for byte, the progress lines the app's builder reads, and the module's stats.
+"""tools/recomp with forked workers (workers.py: discover's scans, plan's chunk files) against the same generation in
+one process: every file byte for byte, the progress lines the app's builder reads, and the module's stats.
 The module is synthetic: a few hundred small functions of real AArch64 code (calls, branches, FP, a computed jump, an
 HLE function, a patched instruction), cut into many chunks."""
 import contextlib
@@ -15,7 +15,7 @@ from collections import Counter
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 
 from lifter import Lifter
-from recomp import discover, plan
+from recomp import discover, plan, workers
 from recomp.emit import Game
 from recomp.module import Module
 
@@ -73,6 +73,7 @@ def module(words, starts):
 
 
 def generate(njobs, outdir):
+    os.environ["NXRT_GEN_JOBS"] = str(njobs)
     r = random.Random(7)
     words, starts = code(r)
     m = module(words, starts)
@@ -82,7 +83,7 @@ def generate(njobs, outdir):
     game = Game({patched: lambda gen, a: f"/* patched {a:#x} */"})
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
-        order, nchunks = plan.write_chunks(m, game, entries, hle, outdir, span=0x100, njobs=njobs)
+        order, nchunks = plan.write_chunks(m, game, entries, hle, outdir, span=0x100)
     plan.write_table(m, order, outdir)
     files = {fn: open(os.path.join(outdir, fn), "rb").read() for fn in sorted(os.listdir(outdir))}
     return files, err.getvalue(), m.stats, nchunks, len(order)
@@ -119,9 +120,9 @@ with tempfile.TemporaryDirectory() as d:
     check(not os.path.exists(os.path.join(out, f"main_{nchunks + 5:03d}.c")), "an extra chunk removed")
 
     os.environ["NXRT_GEN_JOBS"] = "3"
-    check(plan.jobs() == 3, "NXRT_GEN_JOBS")
+    check(workers.jobs() == 3, "NXRT_GEN_JOBS")
     os.environ["NXRT_GEN_JOBS"] = "x"
-    check(plan.jobs() == (os.cpu_count() or 1), "NXRT_GEN_JOBS unset or bad: every core")
+    check(workers.jobs() == (os.cpu_count() or 1), "NXRT_GEN_JOBS unset or bad: every core")
 
 print(f"{checks} checks, {failures} failures")
 sys.exit(1 if failures else 0)

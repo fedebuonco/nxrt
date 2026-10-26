@@ -3,7 +3,7 @@
 Usage: gen.py <name> <nso> <base> <outdir> [--game DIR] [--hle hle_symbols.txt] [--span BYTES]
 
 --game: the game's tools folder (games/<id>/tools): its patches.py has the game's own code changes (see load_game).
-NXRT_GEN_JOBS: processes that write the chunk files (default: every core; 1 writes them in this one, see plan.jobs).
+NXRT_GEN_JOBS: worker processes for the scans and the chunk files (default: every core; 1: none, see recomp/workers.py).
 
 FP/SIMD/CRC32 instructions are emitted as AArch64 inline asm: the generated code is for Apple Silicon.
 The stages (load, discover, cfg, lift, emit, plan, report) are in tools/recomp/ (its __init__.py lists them).
