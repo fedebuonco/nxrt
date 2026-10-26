@@ -684,7 +684,19 @@ RT_ON_RESET(desc_pools_reset) { memset(g_texture_pools, 0, sizeof g_texture_pool
 
 static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, int count, size_t entry, NvnDescPool **reg) {
     NvnDescPool *d = calloc(1, sizeof *d);
-    d->addr = HOST(NvnPool, pool)->storage + off;
+    uint64_t storage = HOST(NvnPool, pool)->storage;
+    d->addr = storage + off;
+    if (!d->addr) {
+        // A descriptor pool at the start of a zero-based memory pool: the game builds its handles as pool base +
+        // index and (in newer SDKs) writes through that handle as a guest pointer. Give the pool a guest base and
+        // publish it as the pool offset; the renderer still reads the low 20 bits as the pool index.
+        uint64_t base = (uint64_t)(uintptr_t)hle_alloc((uint64_t)count * 0x100 + 0x100);
+        d->addr = base;
+        off = base - storage;
+        if (ENV("NXRT_LOG_NVN"))
+            LOG("[nvn] descriptor pool: backed at %#llx (storage %#llx, count %d)\n", (unsigned long long)base,
+                (unsigned long long)storage, count);
+    }
     d->count = count;
     d->entries = calloc(count, entry);
     SET_HOST(guest, d);
