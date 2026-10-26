@@ -27,6 +27,7 @@ HASH = 0x200
 STRTAB = 0x240
 SYMTAB = 0x280
 RELA = 0x300
+RELR = 0x340
 TEXT = 0x400
 RO = 0x400
 DATA = 0x500
@@ -49,6 +50,10 @@ def make_text(gnu=False):
         (1, 1),         # DT_NEEDED ("libnx")
         (7, RELA),      # DT_RELA
         (8, 24),        # DT_RELASZ
+    ] + ([
+        (36, RELR),     # DT_RELR (packed relative relocations, newer linkers)
+        (35, 16),       # DT_RELRSZ
+    ] if gnu else []) + [
         (0, 0),         # DT_NULL
     ]
     off = DYN
@@ -77,6 +82,11 @@ def make_text(gnu=False):
         struct.pack_into("<IBBHQQ", t, SYMTAB + i * 24, name, info, other, shndx, value, size)
     # one R_AARCH64_JUMP_SLOT relocation for the import
     struct.pack_into("<QQq", t, RELA, 0x20, (1 << 32) | 1026, 0)
+    if gnu:
+        # DT_RELR: 0x3A0 itself, then a bitmap of the words after it - bits 1 and 3: 0x3A8 and 0x3B8
+        struct.pack_into("<QQ", t, RELR, 0x3A0, 0b1011)
+        for off, val in ((0x3A0, 0x111), (0x3A8, 0x222), (0x3B8, 0x333)):
+            struct.pack_into("<Q", t, off, val)
     return t
 
 
@@ -109,7 +119,7 @@ def build(path, compress=False, gnu=False):
         f.write(hdr + body)
 
 
-def expected(n):
+def expected(n, relr=False):
     check(n.text == (0, TEXT), "text segment")
     check(n.rodata == (RO, 0x100), "rodata segment")
     check(n.data == (DATA, DATA_LEN), "data segment")
@@ -120,7 +130,8 @@ def expected(n):
     check(len(n.syms) == 3, "symbol count")
     check([s[0] for s in n.imports()] == ["libnx"], "imports")
     check([s[0] for s in n.exports()] == ["foo"], "exports")
-    check(n.relocs == [(0x20, 1026, 1, 0)], "relocations")
+    packed = [(0x3A0, 1027, 0, 0x111), (0x3A8, 1027, 0, 0x222), (0x3B8, 1027, 0, 0x333)] if relr else []
+    check(n.relocs == [(0x20, 1026, 1, 0)] + packed, "relocations (DT_RELR decoded)" if relr else "relocations")
     check(n.dyn.get(4, n.dyn.get(0x6FFFFEF5)) == HASH and n.dyn[5] == STRTAB and n.dyn[6] == SYMTAB, "dynamic table")
     check(bytes(n.image[0x300:0x318]) == struct.pack("<QQq", 0x20, (1 << 32) | 1026, 0), "relocation bytes")
     check(n.image[0:4] == bytes([0x78, 0x56, 0x34, 0x12]), "text bytes")
@@ -133,8 +144,8 @@ def main():
         expected(Nso(p))
         build(p, compress=True)
         expected(Nso(p))
-        build(p, compress=True, gnu=True)  # the symbol count from DT_GNU_HASH alone
-        expected(Nso(p))
+        build(p, compress=True, gnu=True)  # newer linkers: DT_GNU_HASH alone, and DT_RELR
+        expected(Nso(p), relr=True)
         # A file that is not an NSO is refused (assert), not parsed into nonsense.
         with open(p, "wb") as f:
             f.write(b"NOTANSO")

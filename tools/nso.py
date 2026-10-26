@@ -5,6 +5,7 @@ import lz4.block
 
 DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
 DT_GNU_HASH = 0x6ffffef5
+DT_RELRSZ, DT_RELR = 35, 36  # packed relative relocations (newer linkers)
 DT_STRSZ, DT_JMPREL, DT_RELACOUNT = 10, 23, 0x6FFFFFF9
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 
@@ -80,6 +81,29 @@ class Nso:
                 for i in range(n):
                     r_off, r_info, r_add = struct.unpack_from('<QQq', self.image, b + i * 24)
                     self.relocs.append((r_off, r_info & 0xFFFFFFFF, r_info >> 32, r_add))
+        # DT_RELR: each listed word gets the base added; its addend is the word itself (an offset in the module)
+        if DT_RELR in dyn:
+            for r_off in self.relr_offsets(dyn[DT_RELR], dyn.get(DT_RELRSZ, 0)):
+                self.relocs.append((r_off, R_AARCH64_RELATIVE, 0, self.u64(r_off)))
+
+    def relr_offsets(self, off, size):
+        """The words a DT_RELR table relocates: an even entry is one offset, an odd one a bitmap of the 63 words after
+        the last (bit i: word i - 1)."""
+        out, where = [], 0
+        for i in range(size // 8):
+            e = self.u64(off + i * 8)
+            if not e & 1:
+                out.append(e)
+                where = e + 8
+            else:
+                bits, k = e >> 1, 0
+                while bits:
+                    if bits & 1:
+                        out.append(where + k * 8)
+                    bits >>= 1
+                    k += 1
+                where += 63 * 8
+        return out
 
     def gnu_hash_nsyms(self, off):
         """The symbol count from a DT_GNU_HASH table: the end of the highest bucket's chain."""

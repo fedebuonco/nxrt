@@ -11,7 +11,7 @@ int g_nmodules;
 
 enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
        DT_JMPREL = 23, DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27, DT_FINI_ARRAYSZ = 28,
-       DT_GNU_HASH = 0x6ffffef5 };
+       DT_RELRSZ = 35, DT_RELR = 36, DT_GNU_HASH = 0x6ffffef5 };
 enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 };
 
 typedef struct { uint32_t name; uint8_t info, other; uint16_t shndx; uint64_t value, size; } Elf64Sym;
@@ -245,14 +245,43 @@ static uint64_t resolve(Module *m, uint32_t symidx) {
     return hle_register(name, NULL);
 }
 
+// DT_RELR, newer linkers' packed relative relocations (each word: += the module's base). An even entry is the offset of
+// one word to relocate; an odd one is a bitmap of the 63 words after the last one (bit i: word i - 1). Returns how many.
+static uint64_t relocate_relr(Module *m, uint64_t relr, uint64_t relrsz) {
+    if (relr > m->size || relrsz > m->size - relr || relrsz % 8) FATAL("%s: bad DT_RELR table\n", m->name);
+    const uint64_t *e = (const uint64_t *)(uintptr_t)(m->base + relr);
+    uint64_t where = 0, n = 0;
+#define RELR_AT(off)                                                                                                   \
+    do {                                                                                                               \
+        if ((off) > m->size - 8) FATAL("%s: DT_RELR entry past the module\n", m->name);                               \
+        *(uint64_t *)(uintptr_t)(m->base + (off)) += m->base;                                                          \
+        n++;                                                                                                           \
+    } while (0)
+    for (uint64_t i = 0; i < relrsz / 8; i++) {
+        if (!(e[i] & 1)) {
+            RELR_AT(e[i]);
+            where = e[i] + 8;
+        } else {
+            for (uint64_t bits = e[i] >> 1, k = 0; bits; bits >>= 1, k++)
+                if (bits & 1) RELR_AT(where + k * 8);
+            where += 63 * 8;
+        }
+    }
+#undef RELR_AT
+    return n;
+}
+
 static void relocate(Module *m) {
-    uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0;
+    uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0, relr = 0, relrsz = 0;
     for (uint64_t *d = (uint64_t *)m->dynamic; d[0] != DT_NULL; d += 2) {
         if (d[0] == DT_RELA) rela = m->base + d[1];
         if (d[0] == DT_RELASZ) relasz = d[1];
         if (d[0] == DT_JMPREL) jmprel = m->base + d[1];
         if (d[0] == DT_PLTRELSZ) pltsz = d[1];
+        if (d[0] == DT_RELR) relr = d[1];
+        if (d[0] == DT_RELRSZ) relrsz = d[1];
     }
+    uint64_t packed = relrsz ? relocate_relr(m, relr, relrsz) : 0;
     int unresolved = 0;
     for (int pass = 0; pass < 2; pass++) {
         Elf64Rela *r = (Elf64Rela *)(pass ? jmprel : rela);
@@ -276,7 +305,8 @@ static void relocate(Module *m) {
             }
         }
     }
-    LOG("relocated %-5s (%d imports bound to host stubs)\n", m->name, unresolved);
+    LOG("relocated %-5s (%d imports bound to host stubs, %llu packed relative)\n", m->name, unresolved,
+        (unsigned long long)packed);
 }
 
 void loader_load(const char *exefs) {
