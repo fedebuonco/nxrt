@@ -3624,6 +3624,10 @@ static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
+        if (r->flags & CMD_DEFERRED) {
+            uint32_t len = r->size > (uint32_t)offsetof(CmdRec, extra) ? r->size - (uint32_t)offsetof(CmdRec, extra) : 0;
+            if (r->src && len) memcpy(r->extra, (const void *)(uintptr_t)r->src, len);
+        }
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         switch (r->op) {

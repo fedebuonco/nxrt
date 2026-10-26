@@ -133,10 +133,14 @@ typedef struct {
 // One recorded command: header, the call's integer and float arguments, then copied data.
 typedef struct {
     uint32_t op, size;  // size includes the header, multiple of 8
+    uint32_t flags;     // CMD_DEFERRED: extra[] is refilled from src when the list is translated
+    uint32_t pad;
+    uint64_t src;       // guest address a deferred bind's data is read from
     uint64_t x[7];      // x1..x7 of the call
     float f[4];         // s0..s3 of the call
     uint8_t extra[];
 } CmdRec;
+enum { CMD_DEFERRED = 1u };
 
 enum {
     CMD_END = 0, CMD_JUMP, CMD_CALL,

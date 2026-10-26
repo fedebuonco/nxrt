@@ -5,7 +5,9 @@
 
 static uint64_t nvn_proc(const char *name) {
     if (!name || !*name) return 0;
-    return hle_register(name, hle_lookup_impl(name));
+    HostFn fn = hle_lookup_impl(name);
+    if (!fn && ENV("NXRT_NVN_LOG")) LOG("[nvn] no host for %s\n", name);
+    return hle_register(name, fn);
 }
 
 HLE_FUNC("nvnBootstrapLoader", nvn_bootstrap_loader) {

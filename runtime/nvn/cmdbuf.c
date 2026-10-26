@@ -155,6 +155,27 @@ static CmdRec *record_copy(Cpu *c, uint32_t op, int arg, uint32_t len) {
     if (s.x[arg] && len) memcpy(r->extra, (void *)(uintptr_t)s.x[arg], len);
     return r;
 }
+// A deferred bind either takes the address of the handles (older NVN) or returns a buffer for the game to fill (the
+// NVN 55 SDK). In the latter case the game adds its cursor offset to our pointer; it writes one byte into the buffer in
+// front of the handles, so the recorded source is base+1. The render thread reads it when it translates the list,
+// after the game has filled it and before the fence that lets the game reuse the memory (rqueue.c's contract).
+static CmdRec *record_deferred(Cpu *c, uint32_t op, int count_arg, int src_arg, uint32_t elem) {
+    uint32_t n = (uint32_t)A(count_arg);
+    uint64_t src = A(src_arg);
+    uint64_t buf = 0;
+    if (!(src >= GUEST_LO && src < GUEST_HI) || !src) {
+        buf = (uint64_t)(uintptr_t)hle_alloc(0x100 + (uint64_t)n * elem);
+        src = buf + 1;
+    }
+    Snap s = snap(c);
+    CmdRec *r = record(c, op, n * elem, &s);
+    if (src && n) {
+        r->flags |= CMD_DEFERRED;
+        r->src = src;
+    }
+    if (buf) c->x[0] = buf;
+    return r;
+}
 #define PLAIN(name, op) NVN(name) { Snap s = snap(c); record(c, op, 0, &s); }
 
 // ---- state binding
@@ -228,6 +249,17 @@ NVN(nvnCommandBufferBindSeparateTexture) {
     memcpy(r->extra, &s.x[3], 8);
 }
 NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; }
+NVN(nvnCommandBufferBindSeparateSamplersDeferred) {
+    uint32_t n = (uint32_t)A(3);
+    uint64_t src = A(4);
+    if ((!(src >= GUEST_LO && src < GUEST_HI) || !src) && n) c->x[0] = (uint64_t)(uintptr_t)hle_alloc(0x100 + (uint64_t)n * 8);
+}
+NVN(nvnCommandBufferBindVertexBuffersDeferred) { record_deferred(c, CMD_BIND_VERTEX_BUFFERS, 2, 3, 16); }
+NVN(nvnCommandBufferBindUniformBuffersDeferred) { record_deferred(c, CMD_BIND_UNIFORM_BUFFERS, 3, 4, 16); }
+NVN(nvnCommandBufferBindStorageBuffersDeferred) { record_deferred(c, CMD_BIND_STORAGE_BUFFERS, 3, 4, 16); }
+NVN(nvnCommandBufferBindTexturesDeferred) { record_deferred(c, CMD_BIND_TEXTURES, 3, 4, 8); }
+NVN(nvnCommandBufferBindImagesDeferred) { record_deferred(c, CMD_BIND_IMAGES, 3, 4, 8); }
+NVN(nvnCommandBufferBindSeparateTexturesDeferred) { record_deferred(c, CMD_BIND_TEXTURES, 3, 4, 8); }
 NVN(nvnCommandBufferBindSeparateSampler) { (void)c; }
 NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; }
 NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; }
