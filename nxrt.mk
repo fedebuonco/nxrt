@@ -177,12 +177,23 @@ PY := $(wildcard $(GAME_TOOLS)/venv/bin/python)
 
 # The generator's Python environment, in the game's folder (tools/venv: not committed). `make venv` once per game;
 # `make gen` and the app's own build need it.
+# On an exFAT/FAT drive macOS keeps each file's metadata in a "._<name>" file beside it, and Python (before 3.12) reads
+# "._distutils-precedence.pth" as a .pth and stops at its first byte: those files are removed around each step.
+VENV_CLEAN = find "$(GAME_TOOLS)/venv" -name '._*' -type f -delete 2>/dev/null || true
 venv:
-	@if [ ! -x "$(GAME_TOOLS)/venv/bin/python" ]; then \
-	    echo "Creating $(GAME_TOOLS)/venv"; \
-	    python3 -m venv "$(GAME_TOOLS)/venv"; \
+	@if [ ! -x "$(GAME_TOOLS)/venv/bin/python" ] || ! "$(GAME_TOOLS)/venv/bin/python" -c '' 2>/dev/null; then \
+	    $(VENV_CLEAN); \
+	    if ! "$(GAME_TOOLS)/venv/bin/python" -c '' 2>/dev/null; then \
+	        echo "Creating $(GAME_TOOLS)/venv"; \
+	        rm -rf "$(GAME_TOOLS)/venv"; \
+	        python3 -m venv --without-pip "$(GAME_TOOLS)/venv"; \
+	        $(VENV_CLEAN); \
+	        "$(GAME_TOOLS)/venv/bin/python" -m ensurepip >/dev/null; \
+	    fi; \
 	fi
+	@$(VENV_CLEAN)
 	@"$(GAME_TOOLS)/venv/bin/python" -m pip install -q --upgrade capstone lz4 unicorn
+	@$(VENV_CLEAN)
 	@echo "$(GAME_TOOLS)/venv: capstone, lz4, unicorn ready"
 
 # every module of the game (GAME_MODULES) from your own extracted/exefs
