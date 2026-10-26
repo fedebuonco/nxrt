@@ -30,13 +30,15 @@ From a game project that includes `nxrt.mk`, `make test` does the same.
 | `test_sha256` | `runtime/cache_sha256.h` | NIST vectors, padding boundaries, incremental updates |
 | `test_bindings` | `input/bindings.c` | default layout, name tables, capture/cancel/swap, the settings lines (needs SDL3) |
 | `test_nso` | `tools/nso.py` | a synthetic NSO: header, plain and LZ4 segments, MOD0, dynamics, symbols, relocations |
+| `test_gen` | `tools/recomp/plan.py` | the chunk files written by parallel workers against one process: every file byte for byte, the progress lines the builder reads, the stats, unchanged files left alone, `NXRT_GEN_JOBS` |
 
 ## Optional dependencies
 
 - **liblz4**: used as the reference decoder in `test_lz4`. Without it the test still runs, using a built-in
   literal-only encoder and hand-built match blocks. `run.sh` finds it through `pkg-config` or Homebrew.
 - **SDL3**: only `test_bindings` needs it (scancode names); it is skipped when SDL3 isn't installed.
-- **Python + `lz4`**: only `test_nso.py`; it uses `tools/venv/bin/python` when present, else `python3`.
+- **Python + `lz4`**: `test_nso.py`; with `capstone` and `unicorn` too, `test_gen.py`. They use
+  `tools/venv/bin/python` when present, else `python3`.
 
 ## Adding a test
 

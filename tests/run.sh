@@ -92,6 +92,8 @@ elif command -v python3 >/dev/null 2>&1; then PY=python3
 fi
 HAVE_PY_LZ4=0
 [ -n "$PY" ] && "$PY" -c 'import lz4.block' >/dev/null 2>&1 && HAVE_PY_LZ4=1
+HAVE_PY_RECOMP=0
+[ -n "$PY" ] && "$PY" -c 'import lz4.block, capstone, unicorn' >/dev/null 2>&1 && HAVE_PY_RECOMP=1
 
 PASS=0
 FAIL=0
@@ -191,6 +193,13 @@ if [ "$HAVE_PY_LZ4" = 1 ]; then
     run_py test_nso tests/test_nso.py
 else
     wanted test_nso && { echo "python3 or the lz4 package not found" >"$OUT/test_nso.log"; report skip test_nso "$OUT/test_nso.log"; }
+fi
+
+# Python: the recompiler's chunk files, written in parallel
+if [ "$HAVE_PY_RECOMP" = 1 ]; then
+    run_py test_gen tests/test_gen.py
+else
+    wanted test_gen && { echo "python3 or its lz4/capstone/unicorn packages not found" >"$OUT/test_gen.log"; report skip test_gen "$OUT/test_gen.log"; }
 fi
 
 printf '\n%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
