@@ -1,5 +1,6 @@
 // NVN objects, builders, and state objects (everything except command recording).
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,9 +14,42 @@ static uint64_t next_debug_id = 1;
 
 // ================================================================== device
 // NVNdeviceInfo -> value
+// The NVN API version the game was built against. NVN ships inside each game's own sdk, so a game checks for its own
+// headers' version (major ==, minor >=) and skips its renderer otherwise. Games of SDK 6.5 to 16.2 check 53 (FE3H, Link's
+// Awakening, Skyward Sword HD, Metroid Dread, Echoes of Wisdom); Tomodachi Life (SDK 20.5.3) checks 55 and minor >= 15,
+// so SDK 17 and later get 55.15 - the oldest minor that passes, so the game assumes no newer feature. Which SDK first
+// shipped 55 is not known: NXRT_NVN_API=<major>.<minor> sets it for a game the rule gets wrong.
+static void nvn_api_version(uint32_t *major, uint32_t *minor) {
+    static uint32_t mj, mn;
+    if (!mj) {
+        int sdk = 0;
+        for (int i = 0; i < g_nmodules && !sdk; i++) {
+            const char *tag = "NintendoSdk_nnSdk-";
+            const char *at = memmem((const void *)(uintptr_t)g_modules[i].base, g_modules[i].size, tag, strlen(tag));
+            if (at) sdk = atoi(at + strlen(tag));
+        }
+        const char *env = getenv("NXRT_NVN_API");
+        unsigned a, b;
+        if (env && sscanf(env, "%u.%u", &a, &b) == 2) {
+            mj = a, mn = b;
+            LOG("[nvn] API version %u.%u (NXRT_NVN_API; the game's SDK is %d)\n", mj, mn, sdk);
+        } else {
+            if (sdk >= 17) mj = 55, mn = 15;
+            else mj = 53, mn = 207;
+            LOG("[nvn] API version %u.%u (the game's SDK is %d%s)\n", mj, mn, sdk, sdk ? "" : ": not found");
+        }
+    }
+    *major = mj, *minor = mn;
+}
+
 static uint32_t device_integer(uint32_t which) {
+    if (which <= 1) {
+        uint32_t major, minor;
+        nvn_api_version(&major, &minor);
+        return which ? minor : major;
+    }
     static const uint32_t v[] = {
-        [0] = 53, [1] = 207,           // API version
+        [0] = 53, [1] = 207,           // API version: nvn_api_version
         [2] = 14, [3] = 65536, [4] = 256, [5] = 8, [6] = 16, [7] = 4, [8] = 16, [9] = 32,
         [10] = 16, [11] = 4, [12] = 4, [13] = 4, [14] = 16, [15] = 32, [16] = 32,
         [17] = 256, [18] = 256,        // reserved texture / sampler descriptors
