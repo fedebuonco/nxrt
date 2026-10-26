@@ -559,6 +559,30 @@ static bool input_key(const char *key, const char *val) {
     else return bind_settings_load(key, val);  // bind_pad_* / bind_key_*: bindings.c
     return true;
 }
+// NXRT_CONTROLLER=<path>: controller settings the manager (nxrt-frontend) passes for this launch - its global
+// controller defaults, with the game's per-game settings already merged over them. Read after the game's own
+// nx_app.ini, so the lines it names win; it is never written back. Same "key = value" lines as this section.
+static void input_controller_overlay(void) {
+    const char *p = getenv("NXRT_CONTROLLER");
+    if (!p || !*p) return;
+    FILE *f = fopen(p, "r");
+    if (!f) { LOG("[input] controller settings: cannot read %s\n", p); return; }
+    char line[2048];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char key[64], val[1024];
+        int got = sscanf(line, " %63[^= ] = %1023[^\n]", key, val);
+        if (got < 1 || key[0] == '#') continue;
+        if (got < 2) val[0] = 0;  // ("key =": an empty value)
+        input_key(key, val);
+    }
+    fclose(f);
+    LOG("[input] controller settings: %s\n", p);
+}
+static void input_loaded(bool found) {
+    (void)found;
+    input_controller_overlay();
+}
 static void input_write(FILE *f) {
     fprintf(f, "dpad_move = %d\n", g_input_settings.dpad_move);
     fprintf(f, "rumble = %d\nrumble_strength = %d\nled = %d\n", g_input_settings.rumble, g_input_settings.rumble_strength,
@@ -569,6 +593,6 @@ static void input_write(FILE *f) {
 }
 
 void nxin_init(void) {
-    static const NxSettingsSection s = {"input", NULL, input_key, NULL, input_write};
+    static const NxSettingsSection s = {"input", NULL, input_key, input_loaded, input_write};
     nx_settings_register(&s);
 }
