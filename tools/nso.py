@@ -4,6 +4,7 @@ import sys
 import lz4.block
 
 DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
+DT_GNU_HASH = 0x6ffffef5
 DT_STRSZ, DT_JMPREL, DT_RELACOUNT = 10, 23, 0x6FFFFFF9
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 
@@ -58,10 +59,14 @@ class Nso:
         strtab = dyn.get(DT_STRTAB, 0)
         self.strtab = strtab
         self.needed = [self.cstr(strtab + n) for n in needed]
-        # dynsym count from DT_HASH nchain
+        # dynsym count from DT_HASH nchain, else from DT_GNU_HASH's chains (newer SDKs' sdk has only that)
         self.syms = []
-        if DT_HASH in dyn and DT_SYMTAB in dyn:
+        nchain = 0
+        if DT_HASH in dyn:
             nchain = self.u32(dyn[DT_HASH] + 4)
+        elif DT_GNU_HASH in dyn:
+            nchain = self.gnu_hash_nsyms(dyn[DT_GNU_HASH])
+        if nchain and DT_SYMTAB in dyn:
             st = dyn[DT_SYMTAB]
             for i in range(nchain):
                 o = st + i * 24
@@ -75,6 +80,18 @@ class Nso:
                 for i in range(n):
                     r_off, r_info, r_add = struct.unpack_from('<QQq', self.image, b + i * 24)
                     self.relocs.append((r_off, r_info & 0xFFFFFFFF, r_info >> 32, r_add))
+
+    def gnu_hash_nsyms(self, off):
+        """The symbol count from a DT_GNU_HASH table: the end of the highest bucket's chain."""
+        nbuckets, symoffset, bloom, _shift = struct.unpack_from('<IIII', self.image, off)
+        buckets = off + 16 + bloom * 8
+        chains = buckets + nbuckets * 4
+        last = max(struct.unpack_from('<%dI' % nbuckets, self.image, buckets), default=0)
+        if last < symoffset:
+            return symoffset
+        while not self.u32(chains + (last - symoffset) * 4) & 1:
+            last += 1
+        return last + 1
 
     def cstr(self, off):
         end = self.image.index(b'\0', off)

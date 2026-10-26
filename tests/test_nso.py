@@ -34,7 +34,7 @@ DATA_LEN = 0x100
 BSS = 0x80
 
 
-def make_text():
+def make_text(gnu=False):
     t = bytearray(TEXT)
     struct.pack_into("<I", t, 0, 0x12345678)
     struct.pack_into("<I", t, 4, MOD0)  # the MOD0 offset, as the loader reads it
@@ -42,7 +42,7 @@ def make_text():
     # relative offsets from MOD0: dynamic, bss start/end, eh start/end, module object
     struct.pack_into("<6i", t, MOD0 + 4, DYN - MOD0, 0, 0, 0, 0, 0)
     dyn = [
-        (4, HASH),      # DT_HASH
+        (0x6FFFFEF5 if gnu else 4, HASH),  # DT_GNU_HASH (newer SDKs' sdk has only that) or DT_HASH
         (5, STRTAB),    # DT_STRTAB
         (6, SYMTAB),    # DT_SYMTAB
         (10, 0x10),     # DT_STRSZ
@@ -56,7 +56,14 @@ def make_text():
         struct.pack_into("<QQ", t, off, tag, val)
         off += 16
     # DT_HASH: nbucket, nchain (the loader takes nchain as the symbol count), then buckets and chains
-    struct.pack_into("<II", t, HASH, 1, 3)
+    if gnu:
+        # DT_GNU_HASH: nbuckets 1, symoffset 1, one bloom word, shift 0; bloom; bucket 1; chains for symbols 1, 2 (the
+        # last one ends the chain: bit 0) - so 3 symbols
+        struct.pack_into("<IIII", t, HASH, 1, 1, 1, 0)
+        struct.pack_into("<QI", t, HASH + 16, 0, 1)
+        struct.pack_into("<II", t, HASH + 28, 0x1234 & ~1, 0x5678 | 1)
+    else:
+        struct.pack_into("<II", t, HASH, 1, 3)
     # strings: "" / "libnx" / "foo" / "bar"
     strings = b"\0libnx\0foo\0bar\0"
     t[STRTAB:STRTAB + len(strings)] = strings
@@ -73,8 +80,8 @@ def make_text():
     return t
 
 
-def build(path, compress=False):
-    text = make_text()
+def build(path, compress=False, gnu=False):
+    text = make_text(gnu)
     ro = bytes((i * 3) & 0xFF for i in range(0x100))
     data = bytes((i * 5 + 1) & 0xFF for i in range(DATA_LEN))
     if compress:
@@ -114,7 +121,7 @@ def expected(n):
     check([s[0] for s in n.imports()] == ["libnx"], "imports")
     check([s[0] for s in n.exports()] == ["foo"], "exports")
     check(n.relocs == [(0x20, 1026, 1, 0)], "relocations")
-    check(n.dyn[4] == HASH and n.dyn[5] == STRTAB and n.dyn[6] == SYMTAB, "dynamic table")
+    check(n.dyn.get(4, n.dyn.get(0x6FFFFEF5)) == HASH and n.dyn[5] == STRTAB and n.dyn[6] == SYMTAB, "dynamic table")
     check(bytes(n.image[0x300:0x318]) == struct.pack("<QQq", 0x20, (1 << 32) | 1026, 0), "relocation bytes")
     check(n.image[0:4] == bytes([0x78, 0x56, 0x34, 0x12]), "text bytes")
 
@@ -125,6 +132,8 @@ def main():
         build(p, compress=False)
         expected(Nso(p))
         build(p, compress=True)
+        expected(Nso(p))
+        build(p, compress=True, gnu=True)  # the symbol count from DT_GNU_HASH alone
         expected(Nso(p))
         # A file that is not an NSO is refused (assert), not parsed into nonsense.
         with open(p, "wb") as f:

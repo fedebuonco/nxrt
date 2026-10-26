@@ -10,11 +10,33 @@ Module g_modules[8];
 int g_nmodules;
 
 enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
-       DT_JMPREL = 23, DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27, DT_FINI_ARRAYSZ = 28 };
+       DT_JMPREL = 23, DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27, DT_FINI_ARRAYSZ = 28,
+       DT_GNU_HASH = 0x6ffffef5 };
 enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 };
 
 typedef struct { uint32_t name; uint8_t info, other; uint16_t shndx; uint64_t value, size; } Elf64Sym;
 typedef struct { uint64_t off, info; int64_t addend; } Elf64Rela;
+
+// The symbol count from DT_GNU_HASH, for a module linked without DT_HASH (newer SDKs' sdk): the last symbol is the
+// end of the chain of the highest bucket (nbuckets, symoffset, bloom words, bloom shift; bloom; buckets; chains).
+// 0 when the table doesn't fit in the module.
+static uint64_t gnu_hash_nsyms(uint64_t base, uint64_t size, uint64_t off) {
+    if (off > size || size - off < 16) return 0;
+    const uint32_t *h = (const uint32_t *)(uintptr_t)(base + off);
+    uint64_t nbuckets = h[0], symoffset = h[1], bloom = h[2];
+    uint64_t buckets_off = off + 16 + bloom * 8, chains_off = buckets_off + nbuckets * 4;
+    if (bloom > size || nbuckets > size || chains_off > size) return 0;
+    const uint32_t *buckets = (const uint32_t *)(uintptr_t)(base + buckets_off);
+    uint64_t last = 0;
+    for (uint64_t i = 0; i < nbuckets; i++)
+        if (buckets[i] > last) last = buckets[i];
+    if (last < symoffset) return symoffset;
+    for (;; last++) {
+        uint64_t c = chains_off + (last - symoffset) * 4;
+        if (c + 4 > size) return 0;
+        if (*(const uint32_t *)(uintptr_t)(base + c) & 1) return last + 1;
+    }
+}
 
 static uint8_t *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -86,6 +108,7 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
     do {                                                                                                               \
         if ((off) > size || (bytes) > size - (off)) FATAL("%s: dynamic entry past the module\n", path);                \
     } while (0)
+    uint64_t gnu_hash = 0;
     for (uint64_t *d = (uint64_t *)(uintptr_t)m->dynamic;; d += 2) {
         if ((uintptr_t)d + 16 > (uintptr_t)(base + size)) FATAL("%s: dynamic table runs past the module\n", path);
         if (d[0] == DT_NULL) break;
@@ -102,6 +125,7 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
             NEED(d[1], 8);
             m->nsyms = *(uint32_t *)(uintptr_t)(base + d[1] + 4);
             break;
+        case DT_GNU_HASH: gnu_hash = d[1]; break;
         case 12:
             NEED(d[1], 4);
             m->init = base + d[1];
@@ -123,7 +147,8 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
         }
     }
 #undef NEED
-    if (m->symtab && m->nsyms) {  // (the symbol table's size comes from DT_HASH's nchain)
+    if (!m->nsyms && gnu_hash) m->nsyms = gnu_hash_nsyms(base, size, gnu_hash);
+    if (m->symtab && m->nsyms) {  // (the symbol table's size comes from DT_HASH's nchain, or DT_GNU_HASH's chains)
         uint64_t off = m->symtab - base;
         if (m->nsyms > (size - off) / sizeof(Elf64Sym))
             FATAL("%s: bad symbol count %llu\n", path, (unsigned long long)m->nsyms);
