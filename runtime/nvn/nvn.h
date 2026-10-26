@@ -49,7 +49,25 @@ typedef struct {
     uint16_t base_level, num_levels, min_layer, num_layers;
     uint32_t format, target, ds_mode;
     uint8_t swizzle[4];
-} NvnTextureView;  // our layout of the guest NVNtextureView (0x28 bytes)
+} NvnTextureView;  // a view as the renderer uses it (the guest's NVNtextureView holds an NvnGuestView)
+
+// What nxrt keeps in the guest's NVNtextureView, opaque to the game: 16 bytes, as the view is 40 bytes in NVN 53 and 16
+// in NVN 55 (Tomodachi Life keeps one in 16 bytes of its stack frame, its saved registers right after - clearing 40
+// overwrote its frame pointer). Swizzles are 3 bits each (NVN_TEXTURE_SWIZZLE_ZERO..A: 0..5).
+typedef struct {
+    uint8_t setmask, target, ds_mode, pad;
+    uint16_t base_level, num_levels, min_layer, num_layers;
+    uint16_t format, swizzle;
+} NvnGuestView;
+_Static_assert(sizeof(NvnGuestView) == 16, "NvnGuestView must fit NVN 55's NVNtextureView");
+
+static inline void nvn_view_read(NvnTextureView *out, const void *guest) {
+    const NvnGuestView *g = (const NvnGuestView *)guest;
+    *out = (NvnTextureView){.setmask = g->setmask, .base_level = g->base_level, .num_levels = g->num_levels,
+                            .min_layer = g->min_layer, .num_layers = g->num_layers, .format = g->format,
+                            .target = g->target, .ds_mode = g->ds_mode};
+    for (int i = 0; i < 4; i++) out->swizzle[i] = (g->swizzle >> (3 * i)) & 7;
+}
 
 // A view naming a texture (pool entry, render target, clear, copy): one in another format is told to the backend before
 // the texture is used through it.

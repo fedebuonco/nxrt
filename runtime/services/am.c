@@ -89,6 +89,7 @@ static void self_controller(Service *s, IpcReq *req, IpcResp *resp) {
     case 62: resp->copy_handles[resp->ncopy++] = new_event(); break;
     case 40: OUT(uint64_t, 0) = 1; resp_size(resp, 8); break;  // CreateManagedDisplayLayer
     case 69: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
+    case 91: resp->copy_handles[resp->ncopy++] = new_event(); break;  // GetAccumulatedSuspendedTickChangedEvent
     default: UNHANDLED("ISelfController");
     }
 }
@@ -252,6 +253,9 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
     case 23: memcpy(resp->data, "1.0.0", 6); resp_size(resp, 0x10); break;
     case 40: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // NotifyRunning
     case 130: case 140: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    // GetHealthWarningDisappearedSystemEvent: signaled, as there is no health-warning screen to wait for (newer SDKs'
+    // games wait on it before their first frame)
+    case 210: resp->copy_handles[resp->ncopy++] = new_signaled_event(); break;
     default: UNHANDLED("IApplicationFunctions");
     }
 }

@@ -874,7 +874,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         }
         case 17: v = 0; break;
         case 18: v = nx_game.info.title_id; break;
-        case 20: v = 0; break;
+        case 20: {  // UserExceptionContextAddress: a page of the process's own (nn::os keeps its dying-message
+                    // region there - SetDyingMessageRegion writes +0x1c0: newer SDKs, Tomodachi Life)
+            static uint64_t ctx;
+            if (!ctx) ctx = (uint64_t)(uintptr_t)hle_alloc(0x1000);
+            v = ctx;
+            break;
+        }
         // (Switchbrew SVC GetInfo: types newer SDKs may ask for)
         case 23: v = 1; break;            // IsApplication
         case 24: v = 0x100; break;        // FreeThreadCount (plenty: threads are host threads)

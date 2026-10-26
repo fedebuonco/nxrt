@@ -8,3 +8,7 @@ strlen
 strcmp
 strncmp
 memchr
+# nn::vi indirect images (runtime/hle/vi.c: no library applet draws one)
+_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii
+_ZN2nn2vi16GetIndirectImageEPmS1_Pvmmii
+_ZN2nn2vi16GetIndirectImageEPmS1_Pvmmiiffff

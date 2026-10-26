@@ -308,10 +308,13 @@ NVN(nvnMemoryPoolInitialize) {
 NVN(nvnMemoryPoolFinalize) { free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
 // (Unity calls Map/Get* on pools that were never initialised; the SDK's calls would fault, a recomp can read 0.)
-NVN(nvnMemoryPoolMap) { RET(A(0) ? HOST(NvnPool, A(0))->storage : 0); }
-NVN(nvnMemoryPoolGetBufferAddress) { RET(A(0) ? HOST(NvnPool, A(0))->storage : 0); }  // GPU address == CPU address
-NVN(nvnMemoryPoolGetSize) { RET(A(0) ? HOST(NvnPool, A(0))->size : 0); }
-NVN(nvnMemoryPoolGetFlags) { RET(A(0) ? HOST(NvnPool, A(0))->flags : 0); }
+// A pool's record, or NULL for a pool object never initialized (zeroed): its getters then answer 0, as a game may ask
+// before it initializes the pool (Tomodachi Life's GetBufferAddress on an empty one).
+static NvnPool *pool_of(uint64_t pool) { return pool ? HOST(NvnPool, pool) : NULL; }
+NVN(nvnMemoryPoolMap) { NvnPool *p = pool_of(A(0)); RET(p ? p->storage : 0); }
+NVN(nvnMemoryPoolGetBufferAddress) { NvnPool *p = pool_of(A(0)); RET(p ? p->storage : 0); }  // GPU address == CPU address
+NVN(nvnMemoryPoolGetSize) { NvnPool *p = pool_of(A(0)); RET(p ? p->size : 0); }
+NVN(nvnMemoryPoolGetFlags) { NvnPool *p = pool_of(A(0)); RET(p ? p->flags : 0); }
 NVN(nvnMemoryPoolFlushMappedRange) {
     if (ENV("NXRT_LOG_NVN"))
         LOG("[nvn] FlushMappedRange pool=%#llx off=%#llx size=%#llx\n", (unsigned long long)A(0),
@@ -545,24 +548,26 @@ NVN(nvnTextureFlushTexels) { (void)c; }
 NVN(nvnTextureInvalidateTexels) { (void)c; }
 
 // Texture views (our layout of the 0x28-byte guest struct)
-#define TV(T, off) G(T, A(0), off)
-NVN(nvnTextureViewSetDefaults) { memset(AP(0), 0, 0x28); }
-NVN(nvnTextureViewSetLevels) { TV(uint32_t, 0) |= 1; TV(uint16_t, 4) = (uint16_t)A(1); TV(uint16_t, 6) = (uint16_t)A(2); }
-NVN(nvnTextureViewSetLayers) { TV(uint32_t, 0) |= 2; TV(uint16_t, 8) = (uint16_t)A(1); TV(uint16_t, 10) = (uint16_t)A(2); }
-NVN(nvnTextureViewSetFormat) { TV(uint32_t, 0) |= 4; TV(uint32_t, 12) = (uint32_t)A(1); }
+#define GV ((NvnGuestView *)AP(0))
+NVN(nvnTextureViewSetDefaults) { memset(AP(0), 0, sizeof(NvnGuestView)); }
+NVN(nvnTextureViewSetLevels) { GV->setmask |= 1; GV->base_level = (uint16_t)A(1); GV->num_levels = (uint16_t)A(2); }
+NVN(nvnTextureViewSetLayers) { GV->setmask |= 2; GV->min_layer = (uint16_t)A(1); GV->num_layers = (uint16_t)A(2); }
+NVN(nvnTextureViewSetFormat) { GV->setmask |= 4; GV->format = (uint16_t)A(1); }
 NVN(nvnTextureViewSetSwizzle) {
-    NvnTextureView *v = AP(0);
-    v->setmask |= 8;
-    v->swizzle[0] = (uint8_t)A(1); v->swizzle[1] = (uint8_t)A(2); v->swizzle[2] = (uint8_t)A(3); v->swizzle[3] = (uint8_t)A(4);
+    GV->setmask |= 8;
+    GV->swizzle = (uint16_t)((A(1) & 7) | (A(2) & 7) << 3 | (A(3) & 7) << 6 | (A(4) & 7) << 9);
 }
-NVN(nvnTextureViewSetDepthStencilMode) { NvnTextureView *v = AP(0); v->setmask |= 16; v->ds_mode = (uint32_t)A(1); }
-NVN(nvnTextureViewSetTarget) { NvnTextureView *v = AP(0); v->setmask |= 32; v->target = (uint32_t)A(1); }
-NVN(nvnTextureViewGetLevels) { *(int32_t *)AP(1) = TV(uint16_t, 4); *(int32_t *)AP(2) = TV(uint16_t, 6); RET(TV(uint32_t, 0) & 1); }
-NVN(nvnTextureViewGetLayers) { *(int32_t *)AP(1) = TV(uint16_t, 8); *(int32_t *)AP(2) = TV(uint16_t, 10); RET(!!(TV(uint32_t, 0) & 2)); }
-NVN(nvnTextureViewGetFormat) { *(uint32_t *)AP(1) = TV(uint32_t, 12); RET(!!(TV(uint32_t, 0) & 4)); }
-NVN(nvnTextureViewGetSwizzle) { NvnTextureView *v = AP(0); for (int i = 0; i < 4; i++) *(uint32_t *)AP(1 + i) = v->swizzle[i]; RET(!!(v->setmask & 8)); }
-NVN(nvnTextureViewGetDepthStencilMode) { NvnTextureView *v = AP(0); *(uint32_t *)AP(1) = v->ds_mode; RET(!!(v->setmask & 16)); }
-NVN(nvnTextureViewGetTarget) { NvnTextureView *v = AP(0); *(uint32_t *)AP(1) = v->target; RET(!!(v->setmask & 32)); }
+NVN(nvnTextureViewSetDepthStencilMode) { GV->setmask |= 16; GV->ds_mode = (uint8_t)A(1); }
+NVN(nvnTextureViewSetTarget) { GV->setmask |= 32; GV->target = (uint8_t)A(1); }
+NVN(nvnTextureViewGetLevels) { *(int32_t *)AP(1) = GV->base_level; *(int32_t *)AP(2) = GV->num_levels; RET(GV->setmask & 1); }
+NVN(nvnTextureViewGetLayers) { *(int32_t *)AP(1) = GV->min_layer; *(int32_t *)AP(2) = GV->num_layers; RET(!!(GV->setmask & 2)); }
+NVN(nvnTextureViewGetFormat) { *(uint32_t *)AP(1) = GV->format; RET(!!(GV->setmask & 4)); }
+NVN(nvnTextureViewGetSwizzle) {
+    for (int i = 0; i < 4; i++) *(uint32_t *)AP(1 + i) = (GV->swizzle >> (3 * i)) & 7;
+    RET(!!(GV->setmask & 8));
+}
+NVN(nvnTextureViewGetDepthStencilMode) { *(uint32_t *)AP(1) = GV->ds_mode; RET(!!(GV->setmask & 16)); }
+NVN(nvnTextureViewGetTarget) { *(uint32_t *)AP(1) = GV->target; RET(!!(GV->setmask & 32)); }
 NVN(nvnTextureViewCompare) { RET(memcmp(AP(0), AP(1), 0x1C) == 0); }
 
 NVN(nvnTextureWriteTexels) {
@@ -712,7 +717,7 @@ static void register_texture(Cpu *c) {
     if (e->tex) e->tex->pool_refs++;
     e->dead_format = 0;
     e->has_view = A(3) != 0;
-    if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
+    if (e->has_view) nvn_view_read(&e->view, AP(3));
     if (e->has_view) nvn_texture_note_view(e->tex, &e->view);
     pthread_mutex_unlock(&g_pool_lock);
 }

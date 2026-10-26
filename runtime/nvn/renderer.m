@@ -831,9 +831,15 @@ static id<MTLTexture> view_texture(NvnTexture *t, const NvnTextureView *v, bool 
     NSUInteger nlv = (v->setmask & 1) && v->num_levels ? v->num_levels : base.mipmapLevelCount - lv0;
     NSUInteger ly0 = (v->setmask & 2) ? v->min_layer : 0;
     NSUInteger nly = (v->setmask & 2) && v->num_layers ? v->num_layers : base.arrayLength - ly0;
-    if (base.textureType == MTLTextureTypeCube) nly = 6;
+    // (sampled, a cube is all 6 faces; rendered into, the faces it names - one face of a cube or a cube array is a 2D
+    // view of it, and Metal wants cube views in whole cubes: part of a cube array is a 2D array)
+    if (base.textureType == MTLTextureTypeCube && (!render || !(v->setmask & 2))) nly = 6;
     MTLTextureType type = base.textureType;
-    if (render && (type == MTLTextureType2DArray || type == MTLTextureTypeCube) && nly == 1) type = MTLTextureType2D;
+    if (render && nly == 1 &&
+        (type == MTLTextureType2DArray || type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray))
+        type = MTLTextureType2D;
+    else if ((type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray) && nly % 6)
+        type = MTLTextureType2DArray;
     if (lv0 + nlv > base.mipmapLevelCount) nlv = base.mipmapLevelCount - lv0;
     if (pf == base.pixelFormat && lv0 == 0 && nlv == base.mipmapLevelCount && ly0 == 0 && type == base.textureType)
         return base;

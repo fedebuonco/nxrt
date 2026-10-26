@@ -1,5 +1,6 @@
 // nn::vi (display/layer) and nv:: (graphics driver init), implemented on the host.
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "../hle.h"
@@ -64,6 +65,32 @@ HLE_FUNC("_ZN2nn2vi12SetLayerCropEPNS0_5LayerEiiii", vi_set_layer_crop) { c->x[0
 // the renderer (runtime/nvn/output_scale.c), so it only succeeds. (Run as the SDK's own code it asks the display
 // service for a session object the runtime doesn't model, and gets null.)
 HLE_FUNC("_ZN2nn2vi19SetLayerScalingModeEPNS0_5LayerENS0_11ScalingModeE", vi_set_layer_scaling_mode) { c->x[0] = 0; }
+
+// Indirect images: what a library applet draws for the game to show (the software keyboard's inline mode, Tomodachi Life
+// at boot). There is no applet: the image's memory is what an RGBA8 image needs, and the image is transparent (no
+// keyboard drawn). Run as the SDK's own code these ask the display service the runtime doesn't model, and get null.
+// (exported as hle_<symbol>, and listed in hle_symbols.txt: the software keyboard calls them from inside sdk, where a
+// direct call never passes the dispatcher)
+void hle__ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii(Cpu *c) {
+    uint64_t w = (uint32_t)c->x[2], h = (uint32_t)c->x[3];
+    *(uint64_t *)(uintptr_t)c->x[0] = (w * h * 4 + 0xFFF) & ~0xFFFull;
+    *(uint64_t *)(uintptr_t)c->x[1] = 0x1000;
+    c->x[0] = 0;
+}
+// GetIndirectImage(u64* width, u64* height, void* buffer, u64 size, u64 layer, int w, int h[, crop]): nothing drawn
+static void indirect_image(Cpu *c) {
+    if (c->x[2] && c->x[3]) memset((void *)(uintptr_t)c->x[2], 0, c->x[3]);
+    if (c->x[0]) *(uint64_t *)(uintptr_t)c->x[0] = (uint32_t)c->x[5];
+    if (c->x[1]) *(uint64_t *)(uintptr_t)c->x[1] = (uint32_t)c->x[6];
+    c->x[0] = 0;
+}
+void hle__ZN2nn2vi16GetIndirectImageEPmS1_Pvmmii(Cpu *c) { indirect_image(c); }
+void hle__ZN2nn2vi16GetIndirectImageEPmS1_Pvmmiiffff(Cpu *c) { indirect_image(c); }
+HLE_FUNC("_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii", vi_get_indirect_image_memory_requirement) {
+    hle__ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii(c);
+}
+HLE_FUNC("_ZN2nn2vi16GetIndirectImageEPmS1_Pvmmii", vi_get_indirect_image) { indirect_image(c); }
+HLE_FUNC("_ZN2nn2vi16GetIndirectImageEPmS1_Pvmmiiffff", vi_get_indirect_image_crop) { indirect_image(c); }
 
 HLE_FUNC("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", vi_get_native_window) {
     if (!g_native_window) g_native_window = (uint64_t)hle_alloc(0x100);
