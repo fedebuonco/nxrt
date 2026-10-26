@@ -12,8 +12,13 @@
 #define AF(i) (*(float *)&c->v[(i)])
 #define RET(v) (c->x[0] = (uint64_t)(v))
 #define RETF(f) do { c->v[0] = 0; *(float *)&c->v[0] = (f); } while (0)
-#define HOST(T, guest) ((T *)(uintptr_t)(*(uint64_t *)(uintptr_t)(guest)))
-#define SET_HOST(guest, p) (*(uint64_t *)(uintptr_t)(guest) = (uint64_t)(uintptr_t)(p))
+// A guest NVN object stays the game's object: its vtable and fields are not ours. The host object behind it lives in
+// this registry, keyed by the guest pointer. (Writing the host pointer at offset 0 used to overwrite a game vtable:
+// Tomodachi's texture object then resolved a vtable through that host pointer.)
+void *nvn_host_get(uint64_t guest);
+void nvn_host_set(uint64_t guest, void *host);
+#define HOST(T, guest) ((T *)nvn_host_get((uint64_t)(guest)))
+#define SET_HOST(guest, p) nvn_host_set((uint64_t)(guest), (void *)(p))
 #define G(T, base, off) (*(T *)((uint8_t *)(uintptr_t)(base) + (off)))
 
 typedef struct NvnPool {

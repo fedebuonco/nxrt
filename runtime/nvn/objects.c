@@ -5,7 +5,63 @@
 #include <string.h>
 
 #include "../kernel.h"
+#include <pthread.h>
+
 #include "nvn.h"
+
+// guest NVN object -> host object. The guest object belongs to the game (vtable at offset 0); never write into it.
+typedef struct { uint64_t guest; void *host; } HostEnt;
+static HostEnt *g_host_ents;
+static size_t g_host_n, g_host_cap;
+static pthread_mutex_t g_host_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void host_grow(void) {
+    size_t ncap = g_host_cap ? g_host_cap * 2 : 4096;
+    HostEnt *n = calloc(ncap, sizeof *n);
+    if (!n) FATAL("nvn: no memory for the host-object registry\n");
+    for (size_t i = 0; i < g_host_cap; i++) {
+        if (!g_host_ents[i].guest) continue;
+        size_t k = (g_host_ents[i].guest >> 4) & (ncap - 1);
+        while (n[k].guest) k = (k + 1) & (ncap - 1);
+        n[k] = g_host_ents[i];
+    }
+    free(g_host_ents);
+    g_host_ents = n;
+    g_host_cap = ncap;
+}
+
+void *nvn_host_get(uint64_t guest) {
+    if (!guest) return NULL;
+    pthread_mutex_lock(&g_host_lock);
+    void *host = NULL;
+    if (g_host_cap) {
+        size_t k = (guest >> 4) & (g_host_cap - 1);
+        while (g_host_ents[k].guest && g_host_ents[k].guest != guest) k = (k + 1) & (g_host_cap - 1);
+        if (g_host_ents[k].guest) host = g_host_ents[k].host;
+    }
+    pthread_mutex_unlock(&g_host_lock);
+    return host;
+}
+
+void nvn_host_set(uint64_t guest, void *host) {
+    if (!guest) return;
+    pthread_mutex_lock(&g_host_lock);
+    if (g_host_n * 2 >= g_host_cap) host_grow();
+    size_t k = (guest >> 4) & (g_host_cap - 1);
+    while (g_host_ents[k].guest && g_host_ents[k].guest != guest) k = (k + 1) & (g_host_cap - 1);
+    if (!g_host_ents[k].guest) g_host_n++;
+    g_host_ents[k].guest = guest;
+    g_host_ents[k].host = host;
+    pthread_mutex_unlock(&g_host_lock);
+}
+
+RT_ON_RESET(host_registry_reset) {
+    pthread_mutex_lock(&g_host_lock);
+    free(g_host_ents);
+    g_host_ents = NULL; g_host_n = g_host_cap = 0;
+    pthread_mutex_unlock(&g_host_lock);
+}
+
 #include "rqueue.h"
 
 void renderer_sync(void);
@@ -711,6 +767,12 @@ static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, 
 
 NVN(nvnTexturePoolInitialize) {
     desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnTexEntry), g_texture_pools);
+    if (ENV("NXRT_LOG_NVN")) {
+        NvnDescPool *d = HOST(NvnDescPool, A(0));
+        LOG("[nvn] texture pool %#llx: base %#llx off %#llx count %d storage %#llx\n", (unsigned long long)A(0),
+            (unsigned long long)d->addr, (unsigned long long)G(uint64_t, A(0), 16), (int)A(3),
+            (unsigned long long)HOST(NvnPool, A(1))->storage);
+    }
     RET(1);
 }
 NVN(nvnTexturePoolFinalize) { (void)c; }
@@ -770,7 +832,18 @@ void nvn_dead_slot_sampled(const NvnTexEntry *e, uint32_t slot) {
             e->dead_format - 1, nlog == 8 ? " (further ones not logged)" : "");
     }
 }
-NVN(nvnTexturePoolRegisterTexture) { register_texture(c); }
+NVN(nvnTexturePoolRegisterTexture) {
+    if (ENV("NXRT_LOG_NVN")) {
+        NvnDescPool *d = HOST(NvnDescPool, A(0));
+        int id = (int)A(1);
+        uint64_t slot = d && id >= 0 && id < d->count ? d->addr + (uint64_t)id : 0;
+        LOG("[nvn] texture pool register pool %#llx id %d tex %#llx view %#llx base %#llx slot %#llx [slot]=%#llx\n",
+            (unsigned long long)A(0), id, (unsigned long long)A(2), (unsigned long long)A(3),
+            (unsigned long long)(d ? d->addr : 0), (unsigned long long)slot,
+            (unsigned long long)(slot ? *(uint64_t *)(uintptr_t)slot : 0));
+    }
+    register_texture(c);
+}
 NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
 
 NVN(nvnSamplerPoolInitialize) {
