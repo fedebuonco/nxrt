@@ -127,7 +127,7 @@ Data roots used here:
 
 | game | settings | game folder | notes |
 |---|---|---|---|
-| LAS | `/tmp/d/larecomp.ini` | `/Volumes/PortableSSD/LA-extract` (folder) | `romfs/` on disk |
+| LAS | `/tmp/d/larecomp.ini` | `<your drive>/LA-extract` (folder) | `romfs/` on disk |
 | EoW | `/tmp/eowdata/eowrecomp.ini` | `…/EoW Recomp game` (package) | `romfs.src` |
 | Sky | `/tmp/skydata/skyrecomp.ini` | `…/The Legend of Zelda Skyward Sword HD (NSP) (Base Game)/Sky Recomp game` | `romfs.src`, `resolution = 75%` |
 

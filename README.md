@@ -21,6 +21,8 @@ implement one `nx_game` descriptor. The contract is [docs/INTEGRATING.md](docs/I
 | [`ui/`](ui) | start screen, in-game menu, on-screen keyboard (Dear ImGui) |
 | [`third_party/`](third_party) | imgui, SMAA, xxHash, ReShade headers, the Baloo 2 font |
 | [`examples/`](examples) | `game-template` (a recomp in three files), `ui-host` (the five layers alone) |
+| [`manage/`](manage) | `libnxrt_manage`: game folders and packages (setup, updates, RomFS) for a manager app such as [nxrt-frontend](https://github.com/fedebuonco/nxrt-frontend) |
+| [`frontend/`](frontend) | `latest.json`, the update manifest nxrt-frontend checks |
 
 ## Build
 
@@ -78,8 +80,12 @@ to Metal on macOS and Vulkan elsewhere. [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 
 ## Status
 
-macOS arm64 is the verified target. Windows and Linux are in the tree (Vulkan) but unverified since the ports were
-merged. No game files, keys or assets are included.
+macOS on Apple silicon (Metal) is the target of this release; the Vulkan renderer and the Windows / Linux builds are not
+in it. No game files, keys or assets are included: players bring their own. Changes by release: [CHANGELOG.md](CHANGELOG.md).
+
+The apps also answer a manager: `--describe` and `--status` (who the game is, how its files and game code stand), and
+`--setup-files`, `--generate`, `--compile`, `--setup` (the steps from a game package to a game that plays), as
+[nxrt-frontend](https://github.com/fedebuonco/nxrt-frontend) uses them.
 
 ## Logging
 

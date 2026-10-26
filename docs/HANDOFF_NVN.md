@@ -211,9 +211,9 @@ NXRT_DUMP_THREADS=1  # event creation with the creating HLE function
 Game folders (owner's drive, **read-only for you**):
 
 ```
-LAS  /Volumes/PortableSSD/LA-extract                         (romfs/ folder, 3836 files)
-EoW  /Volumes/PortableSSD/EoW Recomp game                    (romfs.src package)
-Sky  /Volumes/PortableSSD/.../Sky Recomp game                (romfs.src package)
+LAS  <your drive>/LA-extract                         (romfs/ folder, 3836 files)
+EoW  <your drive>/EoW Recomp game                    (romfs.src package)
+Sky  <your drive>/.../Sky Recomp game                (romfs.src package)
 ```
 
 Rules: never commit game files, keys, generated C, `*.dylib`/`.id`, or saves. Rebuilds of a game's library take
