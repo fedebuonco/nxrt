@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "nx_app.h"
+#include "nx_log.h"
 
 enum { MAX_SECTIONS = 16 };
 static const NxSettingsSection *g_sections[MAX_SECTIONS];
@@ -13,7 +14,7 @@ void nx_settings_register(const NxSettingsSection *s) {
     for (int i = 0; i < g_nsections; i++)
         if (g_sections[i] == s) return;
     if (g_nsections < MAX_SECTIONS) g_sections[g_nsections++] = s;
-    else fprintf(stderr, "[settings] too many sections: %s left out\n", s->name);
+    else NX_LOGE(NX_LOG_SETTINGS, "too many sections: %s left out", s->name);
 }
 
 // NXRT_SETTINGS=<path>: another settings file (test runs never touch the player's)
@@ -45,7 +46,8 @@ void settings_load(void) {
     }
     for (int i = 0; i < g_nsections; i++)
         if (g_sections[i]->loaded) g_sections[i]->loaded(f != NULL);
-    if (f) fprintf(stderr, "[settings] loaded %s\n", nx_settings_path());
+    if (f) NX_LOGI(NX_LOG_SETTINGS, "loaded %s", nx_settings_path());
+    else NX_LOGD(NX_LOG_SETTINGS, "%s not found; defaults", nx_settings_path());
     if (getenv("NXRT_SETTINGS_ROUNDTRIP")) {  // (test) write it back the way this build would, and stop
         settings_save();
         exit(0);
@@ -54,9 +56,10 @@ void settings_load(void) {
 
 void settings_save(void) {
     FILE *f = fopen(nx_settings_path(), "w");
-    if (!f) { fprintf(stderr, "[settings] cannot write %s\n", nx_settings_path()); return; }
+    if (!f) { NX_LOGE(NX_LOG_SETTINGS, "cannot write %s", nx_settings_path()); return; }
     fprintf(f, "# %s settings (edited from the in-game menu: F1, Esc, or Minus+Plus on a controller)\n", nx_app.title);
     for (int i = 0; i < g_nsections; i++)
         if (g_sections[i]->write) g_sections[i]->write(f);
     fclose(f);
+    NX_LOGI(NX_LOG_SETTINGS, "wrote %s", nx_settings_path());
 }

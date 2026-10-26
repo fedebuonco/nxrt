@@ -6,9 +6,10 @@
 #include <string.h>
 
 #include "input_bind.h"
+#include "nx_log.h"
 #include "nx_input.h"
 
-#define LOG(...) fprintf(stderr, __VA_ARGS__)
+#define LOG(...) NX_LOGI(NX_LOG_INPUT, __VA_ARGS__)
 
 _Static_assert(PADB_LTRIGGER == SDL_GAMEPAD_BUTTON_COUNT, "trigger pseudo-buttons follow SDL's buttons");
 

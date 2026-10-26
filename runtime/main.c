@@ -337,6 +337,7 @@ static void layers_init(void) {
 }
 
 int main(int argc, char **argv) {
+    nx_log_init();  // NXRT_LOG / NXRT_LOG_FILE / NXRT_RUN_ID (docs/LOGGING.md)
     // --describe: the game, as JSON, and exit (a manager reads it: nxrt-frontend); --status: the game files and code too
     extern void rt_print_describe(void), rt_print_status(void);
     extern int rt_run_setup(const char *src, const char *mode);
@@ -366,6 +367,7 @@ int main(int argc, char **argv) {
     rt_paths_init();  // the data root becomes the working directory (nx-platform paths.h)
     // the game folder: a path on the command line, else the one chosen at setup (settings: e.g. a portable drive),
     // else extracted/ in the data root
+    NX_LOGD(NX_LOG_APP, "mode: %s", status_only ? "status" : setup_src ? "setup" : skip_launcher ? "game" : "start screen");
     settings_load();
     if (root == arg_root || strcmp(root, "extracted")) rt_game_dir_set(root, false);  // (a folder of the player's: only what
                                                                                      //  the app builds there may go)

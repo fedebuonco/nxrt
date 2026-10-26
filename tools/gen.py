@@ -12,6 +12,7 @@ import os
 import sys
 import time
 
+import nxlog
 from recomp import discover, plan, report
 from recomp.emit import Game
 from recomp.module import Module
@@ -54,6 +55,7 @@ def main():
     ap.add_argument('--limit', type=int, default=0)
     args = ap.parse_args()
     game = load_game(args.game)
+    nxlog.log.info("generating %s (%s, base %#x)", args.name, args.nso, args.base)
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base)                      # load
@@ -66,7 +68,15 @@ def main():
     plan.write_table(m, order, args.outdir)
     plan.write_build_id(m, args.outdir)
     report.finished(args.name, nchunks, time.time() - t0)
+    nxlog.log.info("generated %s: %d chunks", args.name, nchunks)
 
 
 if __name__ == '__main__':
-    main()
+    nxlog.setup()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        nxlog.log.exception("generation failed")
+        raise

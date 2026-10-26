@@ -1,3 +1,4 @@
+#include "nx_log.h"
 #include "nx_save.h"
 
 #include <dirent.h>
@@ -90,7 +91,7 @@ static int backup(void) {
     snprintf(dst, sizeof dst, "%s/%s", root, stamp);
     if (is_dir(dst)) return -1;  // (two boots in one second)
     int n = copy_tree(src, dst);
-    fprintf(stderr, "[save] backup of %s: %d files -> %s\n", src, n, dst);
+    NX_LOGI(NX_LOG_SAVE, "backup of %s: %d files -> %s", src, n, dst);
     // keep the newest `keep` (the names sort by time)
     static char names[256][32];
     int count = 0;

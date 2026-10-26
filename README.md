@@ -80,3 +80,13 @@ to Metal on macOS and Vulkan elsewhere. [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 
 macOS arm64 is the verified target. Windows and Linux are in the tree (Vulkan) but unverified since the ports were
 merged. No game files, keys or assets are included.
+
+## Logging
+
+The runtime and the generator share one line format (`[time] [LEVEL] [category] [run=<id>] message`), with levels,
+categories and a `NXRT_LOG` filter (`warn`, `debug`, `input=trace,gen=debug`), an optional `NXRT_LOG_FILE`, and the
+manager's `NXRT_RUN_ID`. Stdout stays the manager protocol. See [docs/LOGGING.md](docs/LOGGING.md).
+
+```sh
+NXRT_LOG=debug build/eowrecomp --play
+```

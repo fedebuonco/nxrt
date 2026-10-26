@@ -1,4 +1,5 @@
 #include "mods.h"
+#include "nx_log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -160,9 +161,9 @@ void mods_rescan(void) {
         memcpy(s_mods, ordered, sizeof(ModEntry) * s_mod_count);
     }
 
-    fprintf(stderr, "[mods] scanned %d mods in mods/ directory\n", s_mod_count);
+    NX_LOGI(NX_LOG_MODS, "scanned %d mods in mods/", s_mod_count);
     for (int i = 0; i < s_mod_count; i++) {
-        fprintf(stderr, "[mods] #%d: '%s' [%s] (%d files%s)\n",
+        NX_LOGD(NX_LOG_MODS, "#%d: '%s' [%s] (%d files%s)",
                 i + 1, s_mods[i].name, s_mods[i].enabled ? "ENABLED" : "DISABLED",
                 s_mods[i].file_count, s_mods[i].has_metadata ? ", romfs_metadata.bin" : "");
     }

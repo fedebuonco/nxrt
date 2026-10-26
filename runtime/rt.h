@@ -6,20 +6,15 @@
 #include <stdio.h>
 
 #include "cpu.h"
+#include "nx_log.h"
 #include "platform.h"
 
-// One write per line: stderr is unbuffered (main.c / platform: crash logs aren't lost), and Windows' CRT then wrote a
-// formatted line as dozens of separate WriteFile calls - the 2-second stats line cost ~40 ms, a hitch every 2 s.
+// Runtime logs go through the shared logger (nx_log.c): a timestamp, a level, a category and the manager's run id.
+// Kept one line per call: stderr is line-buffered and crash logs aren't lost.
 static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt, ...) {
-    char b[2048];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(b, sizeof b, fmt, ap);
-    va_end(ap);
-    if (n < 0) return;
-    if ((size_t)n < sizeof b) { fwrite(b, 1, (size_t)n, stderr); return; }
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);  // (longer: as before)
+    nx_log_v(NX_LOG_INFO, NX_LOG_APP, fmt, ap);
     va_end(ap);
 }
 #define LOG(...) rt_log(__VA_ARGS__)

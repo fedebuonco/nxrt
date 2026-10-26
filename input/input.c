@@ -10,11 +10,12 @@
 #include <string.h>
 
 #include "input_bind.h"
+#include "nx_log.h"
 #include "nx_app.h"
 #include "nx_input.h"
 #include "nx_settings.h"
 
-#define LOG(...) fprintf(stderr, __VA_ARGS__)
+#define LOG(...) NX_LOGI(NX_LOG_INPUT, __VA_ARGS__)
 
 _Static_assert(NX_BTN_DOWN == BIND_DOWN && NX_BTN_ZL == BIND_ZL, "bindings follow the button bits");
 
