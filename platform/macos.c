@@ -140,10 +140,23 @@ void plat_thread_realtime(uint64_t period_ns) {
 // the default class as before.
 int plat_cpu_count(void) { return 0; }  // (no affinity masks here: the caller uses the machine's count)
 
+static qos_class_t qos_for(int prio) {
+    return prio <= 44 ? QOS_CLASS_USER_INTERACTIVE
+           : prio <= 59 ? QOS_CLASS_USER_INITIATED
+                        : QOS_CLASS_UTILITY;  // nxnative's mapping
+}
+
 void plat_thread_guest(int prio) {
     static int on = -1;
     if (on < 0) on = !getenv("NXRT_THREAD_QOS") || atoi(getenv("NXRT_THREAD_QOS")) != 0;
-    if (on) pthread_set_qos_class_self_np(prio <= 44 ? QOS_CLASS_USER_INTERACTIVE : QOS_CLASS_USER_INITIATED, 0);
+    if (on) pthread_set_qos_class_self_np(qos_for(prio), 0);
+}
+
+void *plat_thread_qos_override_start(pthread_t t, int prio) {
+    return (void *)pthread_override_qos_class_start_np(t, qos_for(prio), 0);
+}
+void plat_thread_qos_override_end(void *override) {
+    if (override) pthread_override_qos_class_end_np((pthread_override_t)override);
 }
 
 bool plat_exe_path(char *buf, size_t size) {

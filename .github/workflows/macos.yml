@@ -1,0 +1,19 @@
+name: macos
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: brew install sdl3 ffmpeg lz4
+      - name: Host tests (ASan/UBSan)
+        run: ./tests/run.sh
+      - name: Host tests (TSan)
+        run: ./tests/run-tsan.sh
+      - name: Template build
+        run: make -C examples/game-template -j4 CLANG=/usr/bin/clang

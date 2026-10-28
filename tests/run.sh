@@ -164,6 +164,15 @@ run_c test_romfs tests/test_romfs.c runtime/romfs_build.c
 run_c test_manage tests/test_manage.c manage/nxrt_manage.c runtime/nxpkg.c runtime/lz4_block.c runtime/romfs_build.c -- -pthread
 run_c test_hle_libc tests/test_hle_libc.c runtime/hle/libc.c
 run_c test_gamelib_id tests/test_gamelib_id.c
+run_c test_yield tests/test_yield.c runtime/yield_backoff.c
+run_c test_shader_facts tests/test_shader_facts.c runtime/nvn/shader_facts.c
+run_c test_shader_key tests/test_shader_key.c runtime/nvn/shader_source_key.c
+run_c test_shader_strict tests/test_shader_strict.c runtime/nvn/shader_strict.c
+run_c test_archive_file tests/test_archive_file.c runtime/nvn/archive_file.c
+run_c test_shader_rec_norm tests/test_shader_rec_norm.c runtime/nvn/shader_rec_norm.c
+run_c test_kernel_sync tests/test_kernel_sync.c -- -pthread -Wl,-undefined,dynamic_lookup
+run_c test_kernel_memory tests/test_kernel_memory.c -- -pthread -Wl,-undefined,dynamic_lookup
+run_c test_power tests/test_power.c platform/power_macos.c -- -pthread
 
 # layers
 run_c test_log tests/test_log.c platform/nx_log.c -- -pthread
@@ -187,6 +196,19 @@ if [ "$HAVE_SDL" = 1 ]; then
 else
     wanted test_bindings && { echo "SDL3 not found (pkg-config sdl3 or Homebrew sdl3)" >"$OUT/test_bindings.log"; report skip test_bindings "$OUT/test_bindings.log"; }
 fi
+
+# Python: benchmark log/route parser
+run_py test_bench tests/test_bench.py
+run_py test_loops tests/test_loops.py
+run_py test_mac_profile tests/test_mac_profile.py
+run_py test_shader_libs tests/test_shader_libs.py
+run_py test_survey tests/test_survey.py
+run_py test_fnmap tests/test_fnmap.py
+run_py test_docs tests/test_docs.py
+run_py test_smoke tests/test_smoke.py
+run_py test_onboard tests/test_onboard.py
+run_py test_crash_report tests/test_crash_report.py
+run_c test_display_match tests/test_display_match.c platform/display_match.c
 
 # Python: the recompiler's NSO loader
 if [ "$HAVE_PY_LZ4" = 1 ]; then

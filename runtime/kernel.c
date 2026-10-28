@@ -7,6 +7,7 @@
 #include "hle.h"
 #include "kernel.h"
 #include "nxgame.h"
+#include "yield_backoff.h"
 
 // ------------------------------------------------------------------ results
 #undef R_OK
@@ -26,6 +27,42 @@
 
 pthread_mutex_t g_klock = PTHREAD_MUTEX_INITIALIZER;
 static __thread KThread *t_cur;
+extern __thread uint64_t g_blocked_ns;  // defined below (threads)
+
+// ------------------------------------------------------------------ yield back-off (yield_backoff.h)
+// A guest yield loop (SleepThread(0)) with no other runnable work would spin a host core. After start_ns of consecutive
+// yields whose x19..x28 did not change, sleep an eighth of the run (10 us .. cap_ns). Any other SVC resets the run.
+// NXRT_YIELD_BACKOFF=0: off. =<cap_us>[:<start_us>]: tune (default 250:2000).
+static int yb_on = -1;
+static uint64_t yb_start_ns = 2000000, yb_cap_ns = 250000;
+static void yb_config(void) {
+    yb_on = 1;
+    const char *e = getenv("NXRT_YIELD_BACKOFF");
+    if (e && (!*e || !strcmp(e, "0"))) { yb_on = 0; return; }
+    if (e && *e) {
+        char *end = NULL;
+        unsigned long cap = strtoul(e, &end, 0), start = 2000;
+        if (end && *end == ':') start = strtoul(end + 1, NULL, 0);
+        if (cap) yb_cap_ns = (uint64_t)cap * 1000;
+        if (start) yb_start_ns = (uint64_t)start * 1000;
+        if (yb_cap_ns < 10000) yb_cap_ns = 10000;
+    }
+}
+
+// A gate on the back-edge of a loop proved self-contained (tools/recomp/loops.py, generated only with
+// NXRT_SPIN_GATE=1 at generation). The first pass records the site; after 2 ms in the same loop, sleep 250 us a pass,
+// so a waiter leaves the core to the threads doing work. NXRT_SPIN_GATE=0 at run time makes it a no-op.
+void nx_spin_gate(uint64_t site) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NXRT_SPIN_GATE"); on = e && atoi(e) != 0; }
+    if (!on || !t_cur) return;
+    uint64_t now = plat_now_ns();
+    if (t_cur->spin_site != site) { t_cur->spin_site = site; t_cur->spin_since = now; return; }
+    if (now - t_cur->spin_since < 2000000) return;
+    uint64_t t0 = now;
+    plat_sleep_until_ns(now + 250000);
+    g_blocked_ns += plat_now_ns() - t0;
+}
 
 // ------------------------------------------------------------------ handle table
 #define MAX_HANDLES 4096
@@ -279,6 +316,34 @@ KThread *kernel_current_thread(void) { return t_cur; }
 
 static uint32_t *u32p(uint64_t a) { return (uint32_t *)(uintptr_t)a; }
 
+// Lock lending (NXRT_QOS_LEND=1): while a thread waits for a mutex, the owner runs at the waiter's QoS, so the lock is
+// released promptly. The owner's own class is put back when it releases. Off by default: it needs a scheduler
+// measurement before it becomes a default (A8).
+static int qos_lend_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("NXRT_QOS_LEND") && atoi(getenv("NXRT_QOS_LEND")) != 0;
+    return on;
+}
+static KThread *thread_by_handle(uint32_t h) {
+    for (KThread *t = g_threads; t; t = t->anext)
+        if (t->handle == h) return t;
+    return NULL;
+}
+static void qos_lend(uint32_t owner, KThread *waiter) {
+    if (!qos_lend_on() || !owner || !waiter || !waiter->started) return;
+    KThread *o = thread_by_handle(owner);
+    if (o && o != waiter && o->started && !o->finished && !o->qos_override)
+        o->qos_override = plat_thread_qos_override_start(o->host, waiter->prio);
+}
+static void qos_restore(uint32_t owner) {
+    if (!qos_lend_on() || !owner) return;
+    KThread *o = thread_by_handle(owner);
+    if (o && o->qos_override) {
+        plat_thread_qos_override_end(o->qos_override);
+        o->qos_override = NULL;
+    }
+}
+
 // Try to take mutex `m` for `tag`, or mark it contended. Returns true if acquired. Uses CAS so a
 // concurrent user-space unlock (owner storing 0) is never overwritten.
 static bool mutex_acquire_or_mark(uint64_t m, uint32_t tag) {
@@ -393,6 +458,7 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
         return R_OK;
     }
     KThread *t = t_cur;
+    qos_lend(v & ~WAITERS_BIT, t);
     t->wait_kind = WAIT_MUTEX;
     t->wait_addr = addr;
     t->wait_tag = tag;
@@ -405,6 +471,7 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
 static uint32_t svc_arbitrate_unlock(uint64_t addr) {
     pthread_mutex_lock(&g_klock);
     uint32_t before = rdw(addr);
+    qos_restore(before & ~WAITERS_BIT);
     mutex_release(addr);
     kt(KT_UNLOCK, addr, 0, before, rdw(addr), 0, 0);
     pthread_mutex_unlock(&g_klock);
@@ -423,6 +490,8 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     // kernel call), change the state, read 0 and not signal, and this thread then slept on a wakeup that never came
     // (EoW: every worker and the main thread in condvar waits, all mutexes free).
     __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
+    qos_lend(mbefore & ~WAITERS_BIT, t);
+    qos_restore(t->handle);  // this thread's own class after any lending
     mutex_release(mutex);
     bool traced = !kt_timed_key(key, timeout >= 0);
     if (traced) kt(KT_WAIT, key, mutex, kbefore, mbefore, rdw(mutex), 0xffffffffu);
@@ -432,6 +501,7 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     t->wait_tag = tag;
     uint32_t r = block_current(timeout);
     if (traced) kt(KT_WAIT_END, key, mutex, rdw(key), rdw(mutex), 0, r);
+    qos_restore(t->handle);
     if (r != R_OK) {
         // On Horizon, svcWaitProcessWideKeyAtomic does NOT reacquire the mutex on R_TIMEOUT;
         // nn::os TimedWait calls InternalCriticalSection::Enter(mutex) in user space when r == R_TIMEOUT.
@@ -660,6 +730,7 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
 
 static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     uint64_t *x = c->x;
+    if (t_cur && imm != 0x0B) t_cur->yb_run = 0;  // any other SVC is progress
     switch (imm) {
     case 0x01: {  // SetHeapSize
         uint64_t size = x[1];
@@ -705,7 +776,28 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x0A: longjmp(t_cur->unwind, 1);  // ExitThread: back to thread_main, which signals the thread object
     case 0x0B: {  // SleepThread (in slices of at most 50 ms: a reboot doesn't wait out a long sleep)
         int64_t ns = (int64_t)x[0];
-        if (ns <= 0) { sched_yield(); break; }
+        if (ns <= 0) {  // a yield: the SDK's YieldThread and a zero SleepThread land here
+            if (yb_on < 0) yb_config();
+            KThread *self = t_cur;
+            if (!yb_on || !self) { sched_yield(); break; }
+            uint64_t now = plat_now_ns();
+            if (self->yb_run && !yield_backoff_progress(self->yb_regs, &x[19])) {
+                uint64_t sleep_ns = yield_backoff_sleep_ns(now - self->yb_run, yb_start_ns, yb_cap_ns);
+                if (sleep_ns) {
+                    self->yb_sleeps++;
+                    uint64_t t0 = now;
+                    plat_sleep_until_ns(now + sleep_ns);
+                    g_blocked_ns += plat_now_ns() - t0;
+                    break;
+                }
+            } else {
+                self->yb_run = now;
+                memcpy(self->yb_regs, &x[19], sizeof self->yb_regs);
+            }
+            sched_yield();
+            break;
+        }
+        if (t_cur) t_cur->yb_run = 0;
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             // MinGW nanosleep rounds short waits to ~15.6 ms even after

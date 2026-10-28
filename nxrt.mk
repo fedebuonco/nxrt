@@ -26,6 +26,9 @@ MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
 CC       := $(CLANG) $(MINFLAG)
 CXX      := $(CLANG)++ $(MINFLAG)
 GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -I$(RT)
+ifneq ($(FNPROF),)
+GENFLAGS += -DNXRT_FNPROF
+endif
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it

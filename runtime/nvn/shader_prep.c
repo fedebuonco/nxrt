@@ -12,6 +12,7 @@
 #include "../lz4_block.h"
 #include "nvn.h"
 #include "shader_prep.h"
+#include "shader_strict.h"
 #include "nx_app.h"
 
 uint64_t shader_code_hash(const uint8_t *code, size_t n) {  // FNV-1a, 64-bit
@@ -269,7 +270,10 @@ void shader_first_visit(const char *what, uint64_t a, uint64_t b, uint64_t id) {
     size_t j = h & (cap - 1);
     while (seen[j] && seen[j] != h) j = (j + 1) & (cap - 1);
     bool fresh = !seen[j];
-    if (fresh) seen[j] = h, cnt++;
+    if (fresh) {
+        seen[j] = h, cnt++;
+        shader_strict_first_visit();
+    }
     pthread_mutex_unlock(&lock);
     if (!fresh) return;
     int k = ++n;

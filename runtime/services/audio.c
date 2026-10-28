@@ -11,6 +11,37 @@
 #include "../settings.h"
 #include "../ipc.h"
 
+// ------------------------------------------------------------------ sleep/wake
+// The streams open on the device, so a sleep can pause them and a wake resume them. Fixed small table: a game opens
+// one audren stream and a few audout streams; the runtime only needs the handles it must pause.
+#define AUDIO_SUSPEND_MAX 16
+static SDL_AudioStream *g_susp[AUDIO_SUSPEND_MAX];
+static pthread_mutex_t g_susp_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void suspend_add(SDL_AudioStream *s) {
+    if (!s) return;
+    pthread_mutex_lock(&g_susp_lock);
+    for (int i = 0; i < AUDIO_SUSPEND_MAX; i++)
+        if (!g_susp[i]) { g_susp[i] = s; break; }
+    pthread_mutex_unlock(&g_susp_lock);
+}
+static void suspend_remove(SDL_AudioStream *s) {
+    if (!s) return;
+    pthread_mutex_lock(&g_susp_lock);
+    for (int i = 0; i < AUDIO_SUSPEND_MAX; i++)
+        if (g_susp[i] == s) g_susp[i] = NULL;
+    pthread_mutex_unlock(&g_susp_lock);
+}
+void audio_suspend(bool suspend) {
+    pthread_mutex_lock(&g_susp_lock);
+    for (int i = 0; i < AUDIO_SUSPEND_MAX; i++) {
+        if (!g_susp[i]) continue;
+        if (suspend) SDL_PauseAudioStreamDevice(g_susp[i]);
+        else SDL_ResumeAudioStreamDevice(g_susp[i]);
+    }
+    pthread_mutex_unlock(&g_susp_lock);
+}
+
 // ------------------------------------------------------------------ audren: a CPU mixer modelled on
 // Ryujinx's AudioRenderer (VoiceState / DataSourceHelper / StateUpdater; MIT, Ryujinx Team and Contributors,
 // third_party/ryujinx/LICENSE.txt).
@@ -1107,6 +1138,7 @@ static void renderer_open_output(Renderer *r) {
     const char *gain = getenv("NXRT_AUDIO_GAIN");
     if (gain) SDL_SetAudioStreamGain(r->stream, (float)atof(gain));
     SDL_ResumeAudioStreamDevice(r->stream);
+    suspend_add(r->stream);
 }
 
 static void audio_renderer(Service *s, IpcReq *req, IpcResp *resp) {
@@ -1300,7 +1332,7 @@ static void audio_track(Renderer *r, AudioOut *a) {
 static void audren_free(Renderer *r) {
     r->quit = true;
     pthread_join(r->thread, NULL);
-    if (r->stream) SDL_DestroyAudioStream(r->stream);
+    if (r->stream) { suspend_remove(r->stream); SDL_DestroyAudioStream(r->stream); }
     if (r->wav) { wav_header(r->wav, r->wav_bytes, r->sample_rate); fclose(r->wav); }
     if (r->trace) fclose(r->trace);
     for (uint32_t m = 0; m < r->nmix; m++) free(r->mix[m].buf);
@@ -1323,7 +1355,7 @@ static void audren_close(Service *s) {
 static void audout_free(AudioOut *a) {
     a->quit = true;
     pthread_join(a->thread, NULL);
-    if (a->stream) SDL_DestroyAudioStream(a->stream);
+    if (a->stream) { suspend_remove(a->stream); SDL_DestroyAudioStream(a->stream); }
     if (a->wav) fclose(a->wav);
     free(a);
 }
@@ -1489,6 +1521,7 @@ SERVICE("audout:u", audout_u) {
                 const char *gain = getenv("NXRT_AUDIO_GAIN");
                 if (gain) SDL_SetAudioStreamGain(a->stream, (float)atof(gain));
                 SDL_ResumeAudioStreamDevice(a->stream);
+                suspend_add(a->stream);
             }
         }
         pthread_create(&a->thread, NULL, audout_thread, a);

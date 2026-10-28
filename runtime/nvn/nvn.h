@@ -109,6 +109,7 @@ typedef struct NvnProgram {
     NvnShaderStage stages[6];
     uint32_t stage_mask;
     void *backend;
+    uint64_t vs_hash, fs_hash;  // shader_stage_hash of the two stages, once (shader facts lookup)
 } NvnProgram;
 
 typedef struct NvnWindow {

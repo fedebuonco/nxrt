@@ -1,5 +1,6 @@
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
 #include <pthread.h>
+#include <stdatomic.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -264,6 +265,9 @@ static const char *host_sym(uint64_t pc, uint64_t *offset) {
 }
 
 void rt_fatal_trace(void) {
+    Cpu *tc = kernel_current_cpu();
+    fprintf(stderr, "[crash] thread=%llu cpu=%p sp=%llx\n", (unsigned long long)kernel_current_thread_id(),
+            (void *)tc, (unsigned long long)(tc ? tc->sp : 0));
     fprintf(stderr, "host backtrace (guest functions are f_<addr>):\n");
     plat_print_backtrace();
     Cpu *c = kernel_current_cpu();
@@ -272,6 +276,18 @@ void rt_fatal_trace(void) {
         for (int i = 0; i < 31; i += 4)
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,
                     c->x[i + 1], i + 2, c->x[i + 2], i + 3, c->x[i + 3]);
+        if (getenv("NXRT_CRASH_DUMP")) {  // onboarding: inspect the object/array a virtual call was using
+            const uint64_t regs[] = {c->x[0], c->x[1], c->x[22], c->x[25]};
+            for (int r = 0; r < 4; r++) {
+                uint64_t a = regs[r];
+                fprintf(stderr, "  [x%d] = %016llx", r == 0 ? 0 : r == 1 ? 1 : r == 2 ? 22 : 25,
+                        (unsigned long long)a);
+                if (a >= GUEST_LO && a + 0x40 < 0x7800000000ull) {
+                    for (int k = 0; k < 6; k++) fprintf(stderr, " %016llx", (unsigned long long)*(uint64_t *)(uintptr_t)(a + k * 8));
+                }
+                fprintf(stderr, "\n");
+            }
+        }
         uint64_t fp = c->x[29];  // guest frame chain (the SDK and the recompiled code keep frame pointers)
         for (int i = 0; i < 16 && fp >= STACK_BASE && fp + 16 <= STACK_BASE + STACK_SIZE; i++) {
             uint64_t prev = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8);
@@ -347,3 +363,24 @@ void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
 }
 
 void crash_handler_install(void) { plat_crash_handler_install(); }
+
+volatile int g_sp_check;
+__attribute__((constructor)) static void sp_check_init(void) {
+    const char *e = getenv("NXRT_SP_CHECK");
+    g_sp_check = e ? atoi(e) : 0;
+}
+
+// NXRT_SP_CHECK=1: called from FN_ENTER (generated function entry) with the guest SP. A bad SP is logged with the
+// guest function and thread before the eventual segfault loses the context. =2 also aborts at the first bad entry.
+void rt_sp_check(Cpu *c, uint64_t pc) {
+    if (getenv("NXRT_SP_TRACE") && pc == 0x7000178b00ull)
+        LOG("[spentry] c=%p sp=%llx x1=%llx lr=%llx thread=%llu\n", (void *)c, (unsigned long long)c->sp,
+            (unsigned long long)c->x[1], (unsigned long long)c->x[30], (unsigned long long)kernel_current_thread_id());
+    if (c->sp >= STACK_BASE && c->sp <= STACK_BASE + STACK_SIZE && (c->sp & 15) == 0) return;
+    static _Atomic int n;
+    if (atomic_fetch_add(&n, 1) < 24)
+        LOG("[spcheck] thread %llu entry f_%llx: sp=%llx lr=%llx\n", (unsigned long long)kernel_current_thread_id(),
+            (unsigned long long)pc, (unsigned long long)c->sp, (unsigned long long)c->x[30]);
+    if (g_sp_check >= 2) FATAL("[spcheck] bad guest sp %llx at f_%llx (thread %llu)\n", (unsigned long long)c->sp,
+                               (unsigned long long)pc, (unsigned long long)kernel_current_thread_id());
+}

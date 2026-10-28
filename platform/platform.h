@@ -2,6 +2,7 @@
 // nx-platform (the lowest layer): platform/macos.c (the one platform there is; this header is where another would plug
 // in), app.c.
 #pragma once
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -12,7 +13,22 @@
 enum { PLAT_PERF_GAME, PLAT_PERF_RENDER, PLAT_PERF_VSYNC };
 static inline void plat_thread_perf_core(int role) { (void)role; }
 void plat_thread_guest(int prio);      // a guest thread's host scheduling class from its Switch priority
+void *plat_thread_qos_override_start(pthread_t t, int prio);  // raise another thread's class (lock lending)
+void plat_thread_qos_override_end(void *override);
 uint64_t plat_thread_cpu_ns(void);     // the calling thread's CPU time so far (user + system; diagnostics)
+
+// Process power counters for the periodic [power] line ([pace]): energy is cumulative, in nanojoules; wakeups counts
+// the process's idle + interrupt wakes. false when the OS does not expose them (the line is skipped).
+typedef struct {
+    uint64_t energy_nj;
+    uint64_t wakeups;
+} PlatPower;
+bool plat_power_sample(PlatPower *out);
+
+// Sleep/wake notifications (macOS: NSWorkspace). The callback runs on the notification's queue; waking=false before
+// sleep, true after wake. Called once from the runtime; a no-op platform simply never calls it.
+typedef void (*PlatSleepFn)(bool waking);
+void plat_sleep_watch(PlatSleepFn fn);
 
 #ifdef __cplusplus
 extern "C" {

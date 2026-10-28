@@ -18,6 +18,10 @@
 #include "nvn.h"
 #include "rqueue.h"
 #include "renderer.h"
+#include "input_host.h"
+#include "display.h"
+#include "frame_rate.h"
+#include "shader_strict.h"
 #include "nxgame.h"
 #include "pace.h"
 #include "tex_hash.h"
@@ -1262,7 +1266,8 @@ void backend_represent(void) {
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
 void backend_present_now(NvnTexture *t, uint64_t frame) {
-    if (rq_stopping()) return;  // quitting: no drawable after the window closed (#40, as Vulkan)
+    if (rq_stopping()) return;
+    plat_display_tick(rt_frame_rate(), (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0);  // quitting: no drawable after the window closed (#40, as Vulkan)
     extern void renderer_submit(void);
     extern void renderer_texture_will_read(NvnTexture *t);
     renderer_texture_will_read(t);  // (a recorded clear of the image becomes its pass first)
@@ -1414,7 +1419,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 g_window_shot_request[0] = 0;
             } else {
                 renderer_save_texture(shot_tex, getenv("NXRT_SHOT_PATH") ? getenv("NXRT_SHOT_PATH") : "build/window.png");
-                if (getenv("NXRT_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+                if (getenv("NXRT_EXIT_AFTER_SHOT")) { fflush(stderr); renderer_flush(); renderer_shutdown(); shader_strict_exit(); _exit(0); }
             }
             g_save_upright = false;
         }
@@ -1444,7 +1449,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (shot_from) mkdir("build/frames", 0755);
         snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png", frame);
         save_png(b->tex, path);
-        if (getenv("NXRT_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (getenv("NXRT_EXIT_AFTER_SHOT")) { fflush(stderr); renderer_flush(); renderer_shutdown(); shader_strict_exit(); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;  // NXRT_FPS_INTERVAL=<s>: fps line period (default 2)
@@ -1549,6 +1554,9 @@ void ui_window_init(void) {
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !getenv("NXRT_WINDOW") && !getenv("NXRT_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    SDL_PropertiesID wprops = SDL_GetWindowProperties(window);
+    plat_display_bind(SDL_GetPointerProperty(wprops, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL));
+    plat_display_tick(rt_frame_rate(), (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0);
     SDL_MetalView view = SDL_Metal_CreateView(window);
     layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
     dev = MTLCreateSystemDefaultDevice();

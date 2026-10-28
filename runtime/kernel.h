@@ -43,6 +43,13 @@ struct KThread {
     uint64_t wait_since;
     uint64_t sync_handles;
     int32_t sync_count;
+    // Yield back-off (yield_backoff.h): the current run of consecutive SleepThread(0) calls and x19..x28 at its start.
+    uint64_t yb_run;
+    uint64_t yb_regs[10];
+    uint64_t yb_sleeps;  // (diagnostics: back-off sleeps so far)
+    // Spin-wait gate (nx_spin_gate): the loop's back-edge and when it was first seen in this run.
+    uint64_t spin_site, spin_since;
+    void *qos_override;  // lock lending: the override this thread holds while it owns a waited-for mutex
 };
 
 typedef struct KSharedMem {

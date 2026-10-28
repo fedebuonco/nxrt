@@ -7,9 +7,12 @@ out of the module) through an inline cache at the site (cpu.h NX_IC_CALL / NX_IC
 (cfg.py) is a `switch` over its targets. A `br` whose table couldn't be proven makes its function take the
 all-instruction fallback: a `switch (c->pc)` over every instruction, so any target still lands on the right one.
 """
+import os
 import re
 
 from lifter import Unsupported, emit_asm_batch, hx
+
+from . import loops
 
 OPTNONE_INSNS = 3000  # functions with the all-instruction fallback above this many instructions are compiled unoptimized
 
@@ -66,6 +69,15 @@ def emit_function(m, game, entry, end, labels, tables, hle):
     # optimizer into the hours (main 1.0.0: f_7000a7c130, f_7001389610 - over an hour each at -O1): unoptimized
     # those compile in seconds.
     all_labels = 'all' in tables.values()  # (an unproven table: the all-instruction fallback)
+    # Spin-wait gates: only when generation asks for them (NXRT_SPIN_GATE=1), so an ordinary build is unchanged.
+    # A gate is put on the back-edge of a loop loops.py proved self-contained; see tools/recomp/loops.py.
+    gate = set()
+    if os.environ.get("NXRT_SPIN_GATE"):
+        try:
+            gate = loops.safe_backedges(m, entry, end)
+            m.stats['spin_loops'] += len(gate)
+        except Exception:
+            gate = set()
     huge = all_labels and (end - entry) // 4 > OPTNONE_INSNS and entry not in hle
     attr = '__attribute__((optnone, noinline)) ' if huge else ''
     if huge:
@@ -84,9 +96,10 @@ def emit_function(m, game, entry, end, labels, tables, hle):
             out.append('    ' + emit_asm_batch(batch))
             batch.clear()
 
-    def jump(t):
+    def jump(t, gate_site=None):
+        pre = f'nx_spin_gate({hx(gate_site)}); ' if gate_site else ''
         if entry <= t < end:
-            return f'goto {label(t)};'
+            return pre + f'goto {label(t)};'
         if not m.in_text(t):
             return f'c->pc = {hx(t)}; NX_IC_TAIL();'
         refs.add(t)
@@ -143,9 +156,9 @@ def emit_function(m, game, entry, end, labels, tables, hle):
         if k == 'op' or k == 'trap':
             out.append('    ' + ins.code)
         elif k == 'b':
-            out.append('    ' + jump(ins.target))
+            out.append('    ' + jump(ins.target, a if a in gate else None))
         elif k == 'bcond':
-            out.append(f'    if ({ins.cond}) {{ {jump(ins.target)} }}')
+            out.append(f'    if ({ins.cond}) {{ {jump(ins.target, a if a in gate else None)} }}')
         elif k == 'bl':
             t = ins.target
             if m.in_text(t):

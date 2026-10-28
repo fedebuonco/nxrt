@@ -40,6 +40,7 @@ typedef void (*GuestFn)(Cpu *);
 // ---- runtime services (runtime/*.c)
 RT_API void rt_dispatch(Cpu *c);                 // call function at c->pc
 RT_API void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
+RT_API void nx_spin_gate(uint64_t site);  // a proven wait loop's back-edge (tools/recomp/loops.py); NXRT_SPIN_GATE=1
 RT_API void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 RT_API void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
 RT_API uint64_t rt_ticks(void);
@@ -93,8 +94,10 @@ typedef uint8_t __attribute__((may_alias)) u8a;
 // guest call) was ~10% of the game code's instructions (measured in LASRecomp-Android-Plus).
 RT_API extern volatile int g_fnprof;
 RT_API void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
+RT_API extern volatile int g_sp_check;
+RT_API void rt_sp_check(Cpu *c, uint64_t pc);
 #ifdef NXRT_FNPROF
-#define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]); } while (0)
+#define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]); if (__builtin_expect(g_sp_check, 0)) rt_sp_check(c, a); } while (0)
 #else
 #define FN_ENTER(a) ((void)0)
 #endif

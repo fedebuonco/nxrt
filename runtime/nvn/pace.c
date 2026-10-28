@@ -175,7 +175,32 @@ static uint64_t pace_scene(void) {
     return h ? h : 1;
 }
 
+// The periodic [power] line: process energy (nJ), wakeups and the rate per frame, every 300 presents.
+// NXRT_POWER_LOG=0 turns it off. The counters are the process's, so they include the guest and the host threads.
+static void power_line(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NXRT_POWER_LOG"); on = !e || atoi(e) != 0; }
+    if (!on) return;
+    static uint64_t frames, t0, e0, w0;
+    if (++frames < 300) return;
+    PlatPower p;
+    uint64_t now = plat_now_ns();
+    if (!plat_power_sample(&p)) { frames = 0; return; }
+    if (t0 && now > t0) {
+        double secs = (double)(now - t0) / 1e9;
+        double mj = p.energy_nj >= e0 ? (double)(p.energy_nj - e0) / 1e6 / (double)frames : 0.0;
+        uint64_t wakes = p.wakeups >= w0 ? p.wakeups - w0 : 0;
+        if (p.energy_nj) LOG("[power] %llu frames: %.2f W, %.2f mJ/frame, %llu wakeups\n", (unsigned long long)frames,
+                             p.energy_nj >= e0 ? (double)(p.energy_nj - e0) / 1e9 / secs : 0.0, mj,
+                             (unsigned long long)wakes);
+        else LOG("[power] %llu frames: energy not exposed, %llu wakeups\n", (unsigned long long)frames,
+                 (unsigned long long)wakes);
+    }
+    t0 = now, e0 = p.energy_nj, w0 = p.wakeups, frames = 0;
+}
+
 void pace_frame(void) {
+    power_line();
     spike_test();
     static int on = -1;
     if (on < 0) { const char *e = getenv("NXRT_PACE"); on = NX_HOOK(frame_rate_hold) && (!e || atoi(e) != 0); }
