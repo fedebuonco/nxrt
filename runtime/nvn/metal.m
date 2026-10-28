@@ -859,9 +859,21 @@ void backend_init(void) {
     present_sampler = [dev newSamplerStateWithDescriptor:sd];
     // Wrap the guest heap: memory pools live there, and GPU addresses are guest addresses.
     g_guest_buffer_base = HEAP_BASE;
-    g_guest_buffer = [dev newBufferWithBytesNoCopy:(void *)HEAP_BASE length:HEAP_MAX
-                                           options:MTLResourceStorageModeShared deallocator:nil];
-    if (!g_guest_buffer) FATAL("cannot wrap guest heap in a Metal buffer (max %llu)\n", (uint64_t)dev.maxBufferLength);
+    { extern void watch_pause(void); watch_pause(); }  // (the debug page watch unprotects for the wrap)
+    if (getenv("NXRT_SKIP_GUEST_WRAP")) {
+        LOG("[metal] guest heap wrap skipped (NXRT_SKIP_GUEST_WRAP)\n");
+    } else if (getenv("NXRT_TRUNCATE_GUEST_WRAP")) {
+        NSUInteger len = HEAP_MAX;
+        if (len > dev.maxBufferLength) len = dev.maxBufferLength;
+        g_guest_buffer = [dev newBufferWithBytesNoCopy:(void *)HEAP_BASE length:len
+                                               options:MTLResourceStorageModeShared deallocator:nil];
+        if (!g_guest_buffer) FATAL("cannot wrap truncated guest heap (%llu bytes)\n", (uint64_t)len);
+        LOG("[metal] guest heap wrap truncated to %llu bytes\n", (uint64_t)len);
+    } else {
+        g_guest_buffer = [dev newBufferWithBytesNoCopy:(void *)HEAP_BASE length:HEAP_MAX
+                                               options:MTLResourceStorageModeShared deallocator:nil];
+        if (!g_guest_buffer) FATAL("cannot wrap guest heap in a Metal buffer (max %llu)\n", (uint64_t)dev.maxBufferLength);
+    }
     renderer_init(dev);
     LOG("[metal] %s, heap buffer %llu MB\n", dev.name.UTF8String, (uint64_t)HEAP_MAX >> 20);
 }

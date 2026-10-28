@@ -302,13 +302,22 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
 // function (f_<guest addr>) doing them, then the page is reopened until the next re-arm.
 uint64_t g_watch_lo, g_watch_hi;
 static uint64_t watch_page;
+static volatile int watch_paused;
 static void *watch_thread(void *a) {
     (void)a;
     int r = plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE);
     fprintf(stderr, "[watch] page %llx protect -> %d\n", (unsigned long long)watch_page, r);
-    for (;;) { plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE); usleep(100); }
+    for (;;) {
+        if (!watch_paused) plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE);
+        usleep(100);
+    }
     return NULL;
 }
+void watch_pause(void) {
+    watch_paused = 1;
+    if (watch_page) plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);
+}
+void watch_resume(void) { watch_paused = 0; }
 void watch_arm(void) {
     if (!g_watch_lo || watch_page) return;
     watch_page = g_watch_lo & ~(PLAT_PAGE - 1);

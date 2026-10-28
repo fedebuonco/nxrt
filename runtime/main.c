@@ -348,6 +348,20 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--status")) status_only = true;
     }
     layers_init();
+    {   // debug: NXRT_WATCH_MEM=lo,hi protects the page and attributes writes to the host function
+        const char *wm = getenv("NXRT_WATCH_MEM");
+        if (wm && *wm) {
+            extern uint64_t g_watch_lo, g_watch_hi;
+            extern void watch_arm(void);
+            unsigned long long lo = 0, hi = 0;
+            if (sscanf(wm, "%llx,%llx", &lo, &hi) >= 1) {
+                g_watch_lo = lo;
+                g_watch_hi = hi ? hi : lo + 8;
+                watch_arm();
+                fprintf(stderr, "[watch] armed %#llx-%#llx\n", lo, hi ? hi : lo + 8);
+            }
+        }
+    }
     plat_init();
     plat_thread_name("nx-main");
     setvbuf(stderr, NULL, _IOLBF, 0);

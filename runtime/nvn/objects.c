@@ -848,6 +848,12 @@ NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
 
 NVN(nvnSamplerPoolInitialize) {
     desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnSamplerDesc), g_sampler_pools);
+    if (ENV("NXRT_LOG_NVN")) {
+        NvnDescPool *d = HOST(NvnDescPool, A(0));
+        LOG("[nvn] sampler pool %#llx: base %#llx off %#llx count %d storage %#llx\n", (unsigned long long)A(0),
+            (unsigned long long)d->addr, (unsigned long long)G(uint64_t, A(0), 16), (int)A(3),
+            (unsigned long long)HOST(NvnPool, A(1))->storage);
+    }
     RET(1);
 }
 NVN(nvnSamplerPoolFinalize) { (void)c; }
@@ -858,6 +864,10 @@ NVN(nvnSamplerPoolGetSize) { RET(G(uint32_t, A(0), 24)); }
 NVN(nvnSamplerPoolRegisterSampler) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
+    if (ENV("NXRT_LOG_NVN"))
+        LOG("[nvn] sampler pool register pool %#llx id %d sampler %#llx base %#llx slot %#llx\n",
+            (unsigned long long)A(0), id, (unsigned long long)A(2), (unsigned long long)(d ? d->addr : 0),
+            (unsigned long long)(d && id >= 0 && id < d->count ? d->addr + (uint64_t)id : 0));
     if (id >= 0 && id < d->count) ((NvnSamplerDesc *)d->entries)[id] = *HOST(NvnSamplerDesc, A(2));
 }
 NVN(nvnSamplerPoolRegisterSamplerBuilder) {
