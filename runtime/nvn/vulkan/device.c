@@ -970,6 +970,13 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);
         if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
+        // build/perf: touching it profiles the next frame's GPU time per pass, in the game as it is being played (no
+        // restart, no second instance - the report lands in the session's log at the next present).
+        if ((frame % 15) == 0 && access("build/perf", F_OK) == 0) {
+            unlink("build/perf");
+            LOG("[perf] GPU time per pass for this frame:\n");
+            g_gpuprof_frame = true;
+        }
         const char *e = getenv("NXRT_GPUPROF_AT");
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
