@@ -4982,6 +4982,8 @@ static void draw_(CmdRec *r, bool indexed) {
         texture_info(1, pr->fi, i, &fii[i], sc, wh, fr);
         tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
         tex_fr[1][i][0] = fr[0]; tex_fr[1][i][1] = fr[1];
+        NvnTexture *t = FTEX(i);
+        const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
         if (b && b->tp > 0 && NX_HOOK(tex_replace)) {
             NvnTexture *rep = NX_HOOK(tex_replace)(b->tp - 1);
             if (rep) {
