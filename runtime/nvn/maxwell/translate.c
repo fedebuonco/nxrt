@@ -1742,7 +1742,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         // shared memory (compute): a threadgroup word array, as LDL / STL's local one. Fields per Ryujinx's InstLds /
         // InstSts: value 0-7, address A 8-15 + Imm24 20-43, size 48-50 (B32 4, B64 5, B128 6). FE3H's ef5c000000070304:
         // STS [R3], R4.
-        if (c->stage != STAGE_COMPUTE || c->glsl) { fail(c, "shared memory outside a compute shader"); return; }
+        if (c->stage != STAGE_COMPUTE) { fail(c, "shared memory outside a compute shader"); return; }
         bool store = OPM(0xef58000000000000ull, 0xfff8000000000000ull);  // (0xef48: the load)
         int size = (int)bits(w, 48, 3);
         int32_t off = (int32_t)sbits(w, 20, 24);
@@ -1776,7 +1776,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0xec00000000000000ull, 0xff00000000000000ull)) {  // ATOMS: atomic on shared memory
         // Fields per Ryujinx's InstAtoms: Rd 0-7 (the old value), A 8-15, B 20-27, size 28-29 (0 U32, 1 S32), offset
         // Imm22 30-51 (words), op 52-55. FE3H's ec0000000020ff02: ATOMS.ADD R2, [RZ], R2.
-        if (c->stage != STAGE_COMPUTE || c->glsl) { fail(c, "shared memory outside a compute shader"); return; }
+        if (c->stage != STAGE_COMPUTE) { fail(c, "shared memory outside a compute shader"); return; }
         int sz = (int)bits(w, 28, 2), op = (int)bits(w, 52, 4), b = (int)bits(w, 20, 8);
         uint32_t off = (uint32_t)bits(w, 30, 22) * 4;
         static const char *const fn[] = {"atomic_fetch_add_explicit", "atomic_fetch_min_explicit", "atomic_fetch_max_explicit",
@@ -1787,10 +1787,18 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         char addr[128];
         if (a == RZ) sprintf(addr, "%uu", off);
         else sprintf(addr, "(%s + %uu)", R(a), off);
-        const char *ty = sz == 1 && (op == 1 || op == 2) ? "atomic_int" : "atomic_uint";
         const char *cast = sz == 1 && (op == 1 || op == 2) ? "int" : "uint";
-        sp(&c->body, "    { uint sa = %s; uint old_ = uint(%s((threadgroup %s *)&smem[(sa >> 2) & %uu], %s(%s), memory_order_relaxed));\n",
-           addr, fn[op], ty, (uint32_t)c->smem_words - 1, cast, R(b));
+        if (c->glsl) {  // GLSL: shared atomics take the shared variable's address (unsigned; S32 min/max as unsigned)
+            static const char *const gfn[] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd",
+                                              "atomicOr", "atomicXor", "atomicExchange"};
+            if (!gfn[op]) { fail(c, "atoms glsl op %d", op); return; }
+            sp(&c->body, "    { uint sa = %s; uint old_ = %s(&smem[(sa >> 2) & %uu], %s(%s));\n",
+               addr, gfn[op], (uint32_t)c->smem_words - 1, cast, R(b));
+        } else {
+            const char *ty = sz == 1 && (op == 1 || op == 2) ? "atomic_int" : "atomic_uint";
+            sp(&c->body, "    { uint sa = %s; uint old_ = uint(%s((threadgroup %s *)&smem[(sa >> 2) & %uu], %s(%s), memory_order_relaxed));\n",
+               addr, fn[op], ty, (uint32_t)c->smem_words - 1, cast, R(b));
+        }
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = old_;\n", d); }
         sp(&c->body, "    }\n");
     } else if (OPM(0xef40000000000000ull, 0xfff8000000000000ull) ||
@@ -2202,6 +2210,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (info->uses_gmem)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
+    if (c->uses_shared) sp(&s, "shared uint smem[%d];  // threadgroup memory (LDS / STS, BAR)\n", c->smem_words);
     if (info->uses_gmem_map) {  // (compute) the dispatch's storage buffers, device-local: gmap[i] = heap offset, size, word
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GMap { uvec4 gmap[%d]; };\n", set, GMAP_BUFFER_INDEX, GMAP_MAX + 1);
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GFast { uint w[]; } gfast_;\n", set, GFAST_BUFFER_INDEX,
@@ -2647,7 +2656,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", c->lmem_words);
-    if (c->uses_shared) sp(&s, "  threadgroup uint smem[%d];\n", c->smem_words);
+    if (c->uses_shared && !c->glsl) sp(&s, "  threadgroup uint smem[%d];\n", c->smem_words);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");
