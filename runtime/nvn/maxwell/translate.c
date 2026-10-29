@@ -2567,8 +2567,11 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (said++ < 40)
         {
             static const char *const kn[] = {"BRA", "SSY", "PBK", "PCNT"};
-            LOG("[shader] %s interpreted (%s) at %llx: %zu words, %d loops; flow:", stage == STAGE_FRAGMENT ? "fs" : "cs",
-                fwd_why ? fwd_why : "?", (unsigned long long)(uintptr_t)blob, end, nloops);
+            uint64_t hh = 1469598103934665603ull;  // (the hash [gpuprof] prints: links a slow pass to its shader)
+            for (size_t i = 0; i < 0x200; i++) { hh ^= blob[0x30 + i]; hh *= 0x100000001B3ull; }
+            LOG("[shader] %s interpreted (%s) at %llx (%016llx): %zu words, %d loops; flow:",
+                stage == STAGE_FRAGMENT ? "fs" : "cs", fwd_why ? fwd_why : "?", (unsigned long long)(uintptr_t)blob,
+                (unsigned long long)hh, end, nloops);
             for (int i = 0; i < nflow_log; i++)
                 LOG(" %s %x->%x%s", kn[flow_log[i].kind], flow_log[i].pc, flow_log[i].t,
                     flow_log[i].t <= flow_log[i].pc ? "b" : "");
