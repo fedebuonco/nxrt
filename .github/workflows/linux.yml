@@ -13,8 +13,6 @@ jobs:
     container: ubuntu:25.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Install build dependencies
         run: |
           apt-get update -qq
