@@ -472,7 +472,21 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     if (signal) gc_frame();  // (a present: once a frame)
 }
 
-void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
+// End of one of the game's command lists (a frame is often several). Submitting each one cost ~6 submissions a frame at
+// ~0.8 ms of vkQueueSubmit2 each (measured: 'submit 567 ms' in a 2 s interval on the title, 28% of a core). The
+// present (vk_frame_end) and every wait (a fence, nvnQueueFinish) still submit, so the GPU stays fed; this only batches
+// the in-between ones. Batching 16 lists (measured on the title): recorder 32% -> 16% of a core, submissions 714 -> 252
+// an interval, 'submit' time 567 -> 269 ms. NXRT_SUBMIT_PER_ITEM=1: the old behaviour, a submission per list.
+void renderer_submit(void) {
+    static int per_item = -1, every = 16, n;
+    if (per_item < 0) {
+        const char *e = getenv("NXRT_SUBMIT_PER_ITEM");
+        per_item = e && atoi(e) != 0;
+        const char *nth = getenv("NXRT_SUBMIT_EVERY");
+        if (nth && atoi(nth) > 0) every = atoi(nth);
+    }
+    if (per_item || ++n >= every) { n = 0; vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
+}
 
 void renderer_flush(void) {
     renderer_submit();
