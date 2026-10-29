@@ -587,6 +587,13 @@ static int new_chunk(uint64_t size) {
         return -1;
     }
     c->ptr = info.pMappedData;
+    if (!c->ptr) {  // (a driver that took the allocation but left it unmapped: a chunk nothing can be written to)
+        LOG("[vk] transient ring: chunk %d (%llu MB) not host-mapped (memory type %u), discarded\n", nchunks,
+            (unsigned long long)(size >> 20), info.memoryType);
+        vmaDestroyBuffer(g_vk.vma, c->buf, c->mem);
+        memset(c, 0, sizeof *c);
+        return -1;
+    }
     c->size = size;
     static bool spilled;  // (the first chunk in system memory: logged too)
     if (!nchunks || moved || (spill && !spilled)) {  // where the ring lives: device-local (resizable BAR) or system memory read across PCIe
@@ -660,7 +667,10 @@ VkSpan vk_readback(uint64_t size) {
 
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
     VkSpan s = vk_transient(size ? size : 16, align);
-    if (size) memcpy(s.ptr, data, size);
+    // (vk_transient never hands out an unmapped chunk, but a copy into NULL is a crash with no clue in the log)
+    if (size && s.ptr) memcpy(s.ptr, data, size);
+    else if (size) LOG("[vk] transient copy of %llu bytes with no buffer (align %llu)\n", (unsigned long long)size,
+                       (unsigned long long)align);
     return s;
 }
 
@@ -876,7 +886,7 @@ static int skip_ntop;
 static void skip_note(int why, bool compute) {
     if (log_skips < 0) log_skips = getenv("NXRT_LOG_SKIPS") && atoi(getenv("NXRT_LOG_SKIPS")) != 0;
     skip_n[why]++;  // (always: build/skips asks for a table of a session that is already running)
-    const NvnProgram *p = st.program;
+    const NvnProgram *p = compute ? st.prog_cs : st.program;
     uint64_t a = p ? p->stages[compute ? 5 : 0].code_addr : 0, b = p && !compute ? p->stages[1].code_addr : 0;
     int j = 0;
     while (j < skip_ntop && !(skip_top[j].why == why && skip_top[j].a == a && skip_top[j].b == b)) j++;
@@ -2780,7 +2790,11 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         return ubo_span(copy_dedupe(stage == 5 ? DEDUPE_DRV_C : stage == 1 ? DEDUPE_DRV_F : DEDUPE_DRV_V, drv, size, 256), size);
     }
     if (k == 1) {  // compiler constants stored after the shader code
-        NvnShaderStage *ss = &st.program->stages[stage];
+        // (the compute stage has its own program: st.program is the vertex+fragment one, or none at all)
+        const NvnProgram *pg = stage == 5 ? st.prog_cs : st.program;
+        if (!pg) return ubo_span(vk_transient_copy(zeros, si->cbuf_size[k] ? si->cbuf_size[k] : 256, 256),
+                                si->cbuf_size[k] ? si->cbuf_size[k] : 256);
+        NvnShaderStage *ss = &pg->stages[stage];
         uint64_t size = ss->const_size ? ss->const_size : 16;
         if (size < si->cbuf_size[1]) size = si->cbuf_size[1];
         return ubo_span(guest_copy(ss->code_addr + ss->const_offset, size), size);  // (constant: shared per submission)

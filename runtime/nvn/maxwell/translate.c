@@ -2404,6 +2404,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     c->glsl = key && key->glsl;
     const uint8_t *sph = blob + 0x30;
     const uint8_t *code = blob + 0x80;
+    c->code = code;  // (build/glsl names its file by blob + 0x30, the hash [gpuprof] prints)
     // compute programs have no SPH. Older NVN (Link's Awakening): no header either, code starts at the blob. Newer NVN
     // (Echoes of Wisdom, SDK 16.2): a 0x100-byte header starting with the magic 0x12345679 (graphics: 0x12345678).
     if (stage == STAGE_COMPUTE) code = *(const uint32_t *)blob == 0x12345679u ? blob + 0x100 : blob;
