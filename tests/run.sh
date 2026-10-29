@@ -202,6 +202,7 @@ run_py test_bench tests/test_bench.py
 run_py test_loops tests/test_loops.py
 run_py test_mac_profile tests/test_mac_profile.py
 run_py test_shader_libs tests/test_shader_libs.py
+run_py test_analyze tests/test_analyze.py
 run_py test_survey tests/test_survey.py
 run_py test_fnmap tests/test_fnmap.py
 run_py test_docs tests/test_docs.py
