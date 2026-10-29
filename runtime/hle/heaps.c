@@ -66,7 +66,12 @@ HLE_FUNC("_ZN2nn4lmem14CreateUnitHeapEPvmmiiPNS0_6detail8HeapHeadE", heap_create
     void *mem = NULL;
     if (k > 1 && unit) {
         uint64_t big = size * (uint64_t)k;
-        if (posix_memalign(&mem, 0x1000, big) == 0) {
+        // 64 KB alignment for a large heap (the reference's alloc_big_align): Vanillaware's engine (Unicorn Overlord,
+        // 13 Sentinels) cuts ring heaps out of a memory pool at 64 KB boundaries and derives the base of each from the
+        // pool's address; a 4 KB-aligned pool makes its first ring heap land at base 0, which it then writes through
+        // (Unicorn Overlord: 'signal 11 accessing 0' in the pool's chunk registry, main+0x5877f0).
+        uint64_t al = big >= (64u << 10) ? (64u << 10) : 0x1000;
+        if (posix_memalign(&mem, (size_t)al, big) == 0) {
             memset(mem, 0, big);
             c->x[0] = (uint64_t)(uintptr_t)mem;
             c->x[1] = big;
