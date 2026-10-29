@@ -874,8 +874,7 @@ static struct { int why; uint64_t a, b, ha, hb, n, first_ns; } skip_top[SKIP_TOP
 static int skip_ntop;
 static void skip_note(int why, bool compute) {
     if (log_skips < 0) log_skips = getenv("NXRT_LOG_SKIPS") && atoi(getenv("NXRT_LOG_SKIPS")) != 0;
-    if (!log_skips) return;
-    skip_n[why]++;
+    skip_n[why]++;  // (always: build/skips asks for a table of a session that is already running)
     const NvnProgram *p = st.program;
     uint64_t a = p ? p->stages[compute ? 5 : 0].code_addr : 0, b = p && !compute ? p->stages[1].code_addr : 0;
     int j = 0;
@@ -2369,6 +2368,18 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
 // The shader cannot tell a buffer texture from a 1D texture; the bound object can. Bit i is set when slot i of the
 // stage's texture list resolves to an NVN buffer texture (builder target 10): the translator then declares it a
 // samplerBuffer and reads it by index (ShaderKey buffer_tex), and the backend binds a uniform texel buffer.
+// The last program binds, for the "no program" skip below: which bind left the draw with none (a NULL unbind of a
+// stage mask, a compute program still bound, a program whose stages could not build).
+#define BIND_HIST 12
+static struct { uint64_t np; uint32_t mask; uint8_t stages; } g_bind_hist[BIND_HIST];
+static int g_bind_n;
+static void bind_note(const NvnProgram *np, uint32_t mask) {
+    g_bind_hist[g_bind_n % BIND_HIST].np = (uint64_t)(uintptr_t)np;
+    g_bind_hist[g_bind_n % BIND_HIST].mask = mask;
+    g_bind_hist[g_bind_n % BIND_HIST].stages = np ? np->stage_mask : 0;
+    g_bind_n++;
+}
+
 static uint32_t buffer_tex_slots(int stage, ShaderInfo *si) {
     uint32_t m = 0;
     for (int i = 0; i < si->ntex && i < 32; i++) {
@@ -4769,7 +4780,21 @@ static void draw(CmdRec *r, bool indexed) {
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
-    if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
+    if (!st.program) {
+        // Why the draw has no program: the last binds (mask, whether the program has stages), once per few draws.
+        static int said;
+        if (log_skips && said++ < 6) {
+            LOG("[draw] no program: %llu vertices, rt %dx%d, last binds (mask/stages/np):", (unsigned long long)r->x[2],
+                st.rt.color[0] ? (int)st.rt.color[0]->width : 0, st.rt.color[0] ? (int)st.rt.color[0]->height : 0);
+            for (int i = 1; i <= BIND_HIST && i <= g_bind_n; i++) {
+                int k = (g_bind_n - i) % BIND_HIST;
+                LOG(" [%u/%u/%llx]", g_bind_hist[k].mask, g_bind_hist[k].stages, (unsigned long long)g_bind_hist[k].np);
+            }
+            LOG("\n");
+        }
+        SKIP(SK_NO_PROGRAM);
+        return;
+    }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
@@ -6140,6 +6165,7 @@ static void exec_list(uint64_t handle, int depth) {
             // below (uniforms, constants, the pipeline key) sees one program with both stages.
             NvnProgram *np = (NvnProgram *)(uintptr_t)r->x[0];
             uint32_t mask = (uint32_t)r->x[1];
+            bind_note(np, mask);
             // A bind only touches the stages in its mask. KTGL (as Unity does) unbinds the geometry/tessellation/
             // stages it has no shaders for with a NULL program; that must not clear the vertex+fragment program, or
             // every following draw is issued with no program and skipped (Fire Emblem: Three Houses: unshaded black
