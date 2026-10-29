@@ -83,6 +83,7 @@ void crash_handler_install(void);  // per thread (alternate signal stack)
 // ---- kernel.c
 typedef struct KThread KThread;
 void kernel_init(void);
+void kernel_set_system_resource(uint64_t v);  // the NPDM's declared system resource (svcGetInfo 16)
 void kernel_stop_threads(void (*idle)(void));  // reboot: unwind every guest thread and join it (idle: called while waiting)
 void kernel_reset(void);                       // reboot: empty handle table, memory map, thread list
 KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio);
@@ -108,6 +109,7 @@ int ui_run(void);  // window loop; returns the reboot kind requested (the window
 
 // ---- helpers
 void guest_call(Cpu *c, uint64_t addr);   // call guest function at addr (saves/restores x30)
+const char *hle_name_at(uint64_t pc);  // the HLE function behind a stub address (diagnostics)
 uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if missing
 void *hle_alloc(uint64_t size);           // zeroed guest-visible memory (never freed)
 extern const char *g_romfs_dir;

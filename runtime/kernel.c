@@ -15,6 +15,12 @@
 #define R_TIMEOUT 0xEA01
 #define R_CANCELLED 0xEC01
 #define R_INVALID_HANDLE 0xE401
+
+// The game's declared system resource (NPDM META + 0x14): what nn::os asks svcGetInfo(16) to decide whether virtual
+// address memory (VAMM) is enabled. Set by boot() before nn::init::Start runs.
+static uint64_t g_system_resource;
+void kernel_set_system_resource(uint64_t v) { g_system_resource = v; }
+
 #define R_INVALID_STATE 0xFA01
 #define R_INVALID_ADDRESS 0xCC01
 #define R_NOT_FOUND 0xF201
@@ -107,8 +113,28 @@ static void wake(KThread *t) {
     pthread_cond_signal(&t->cond);
 }
 
+// NXRT_TRACE_EVENTS=1: events created, waited on and signalled, with the guest lr - a boot that waits forever on an
+// event nobody signals shows exactly which object and which side is missing.
+static int trace_events(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("NXRT_TRACE_EVENTS") != NULL;
+    return v;
+}
+
+// Guest frame chain (frame pointers are kept by the SDK) with the game's symbols: the call site of a traced event.
+static void trace_frames(Cpu *c, int n) {
+    uint64_t fp = c->x[29];
+    for (int i = 0; i < n && fp >= STACK_BASE && fp + 16 <= STACK_BASE + STACK_SIZE; i++) {
+        uint64_t prev = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8), off = 0;
+        const char *sym = loader_symbol_at(lr, &off);
+        LOG("    frame %d lr=%#llx (%s+%#llx)\n", i, (unsigned long long)lr, sym ? sym : "?", (unsigned long long)off);
+        if (prev <= fp) break;
+        fp = prev;
+    }
+}
 void kernel_signal(KObject *o) {
     // caller holds g_klock
+    if (trace_events()) LOG("[ev] signal %p (type %d) lr=%llx\n", (void *)o, o->type, (unsigned long long)(t_cur ? t_cur->cpu.x[30] : 0));
     o->signaled = true;
     for (KThread *t = g_syncwaiters; t; t = t->snext) wake(t);
 }
@@ -149,8 +175,11 @@ static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
 
 // ------------------------------------------------------------------ memory map
 typedef struct { uint64_t addr, size; uint32_t type, perm; } Region;
-static Region regions[1024];
-static int nregions;
+// Guest memory regions (heap, mapped/physical memory, module data), sorted by address. A game with virtual address
+// memory allocates many small regions (Wonder makes hundreds while its allocator warms up), so the table grows on
+// demand instead of capping at a fixed size.
+static Region *regions;
+static int nregions, cap_regions;
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
 uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
@@ -167,7 +196,13 @@ int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
 }
 
 static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
-    if (nregions == 1024) FATAL("too many regions\n");
+    if (nregions == cap_regions) {
+        int n = cap_regions ? cap_regions * 2 : 256;
+        Region *r = realloc(regions, (size_t)n * sizeof *r);
+        if (!r) FATAL("out of memory for the region table (%d regions)\n", nregions);
+        regions = r;
+        cap_regions = n;
+    }
     // The heap is backed on access; Windows file I/O commits its destination before entering the OS.
     if (type != 5) plat_commit(addr, size);
     int i = nregions++;
@@ -380,11 +415,11 @@ static void mutex_release(uint64_t addr) {
 }
 
 KThread *g_waitlist;
-// (diagnostics) the last NXRT_KTRACE_N kernel condition-variable / mutex calls, lock-free, for the "[hang]" dump: what
+// (diagnostics) the last KTRACE_N kernel condition-variable / mutex calls, lock-free, for the "[hang]" dump: what
 // each thread did with which key / mutex word, and the words before and after. Off unless NXRT_KTRACE=1: the extra
 // reads and timing change how tight the game's threading races run, and games have hung with it on (EoW, Sky, 2026-10-23).
 enum { KT_WAIT, KT_WAIT_END, KT_SIGNAL, KT_LOCK, KT_LOCK_END, KT_UNLOCK };
-#define KTRACE_N 256
+#define KTRACE_N 8192  // (a boot that hangs: 256 is a few ms of a busy pool - NXRT_KTRACE=1 only)
 typedef struct { uint64_t ns, tid, addr, addr2; uint32_t w0, w1, w2, arg, kind; } KTrace;
 static KTrace ktrace[KTRACE_N];
 static uint64_t ktrace_n;  // (__atomic builtins)
@@ -543,10 +578,10 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
 }
 
 // ------------------------------------------------------------------ address arbiter
-enum { ARB_WAIT_LESS = 0, ARB_DEC_WAIT_LESS = 1, ARB_WAIT_EQ = 2 };
+enum { ARB_WAIT_LESS = 0, ARB_DEC_WAIT_LESS = 1, ARB_WAIT_EQ = 2, ARB_WAIT_EQ64 = 3 };
 enum { ARB_SIGNAL = 0, ARB_SIGNAL_INC_EQ = 1, ARB_SIGNAL_MOD_EQ = 2 };
 
-static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value, int64_t timeout) {
+static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int64_t value, int64_t timeout) {
     pthread_mutex_lock(&g_klock);
     int32_t cur = (int32_t)__atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
     bool wait;
@@ -555,9 +590,17 @@ static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value
         wait = cur < value;
         if (wait) __atomic_store_n(u32p(addr), (uint32_t)(cur - 1), __ATOMIC_SEQ_CST);
     } else if (type == ARB_WAIT_EQ) wait = cur == value;
+    else if (type == ARB_WAIT_EQ64)  // (Horizon 18+ / SDK 19: nn::os::WaitForAddress(const long*, long))
+        wait = __atomic_load_n((uint64_t *)(uintptr_t)addr, __ATOMIC_SEQ_CST) == (uint64_t)value;
     else { pthread_mutex_unlock(&g_klock); return R_INVALID_ENUM; }
     if (!wait) { pthread_mutex_unlock(&g_klock); return R_INVALID_STATE; }
     if (timeout == 0) { pthread_mutex_unlock(&g_klock); return R_TIMEOUT; }
+    if (trace_events())
+    {
+        LOG("[arb] t%llu wait addr=%#llx type=%u value=%lld timeout=%lld lr=%#llx\n", (unsigned long long)t_cur->id,
+            (unsigned long long)addr, type, (long long)value, (long long)timeout, (unsigned long long)t_cur->cpu.x[30]);
+        trace_frames(&t_cur->cpu, 3);
+    }
     t_cur->wait_kind = WAIT_ARBITER;
     t_cur->wait_addr = addr;
     uint32_t r = block_current(timeout);
@@ -633,6 +676,10 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
         if (t->cancel) { t->cancel = false; r = R_CANCELLED; goto out; }
         if (g_rt_unwind) { r = R_CANCELLED; goto out; }
         if (timeout == 0) { r = R_TIMEOUT; goto out; }
+        if (trace_events() && !t->in_sync_wait)
+            for (int i = 0; i < count && i < 8; i++)
+                LOG("[ev] wait %p handle=%#x timeout=%lld lr=%llx\n", (void *)handle_get(hs[i]), hs[i], (long long)timeout,
+                    (unsigned long long)(t->cpu.x[30]));
         t->in_sync_wait = true;
         t->wait_addr = handles_ptr;
         t->wait_tag = (uint32_t)count;
@@ -776,6 +823,11 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x0A: longjmp(t_cur->unwind, 1);  // ExitThread: back to thread_main, which signals the thread object
     case 0x0B: {  // SleepThread (in slices of at most 50 ms: a reboot doesn't wait out a long sleep)
         int64_t ns = (int64_t)x[0];
+        if (ns >= 1000000 && trace_events()) {  // (diagnostics) who waits on the clock, and for how long
+            static int n;
+            if (n < 400) { n++; LOG("[sleep] t%llu ns=%lld lr=%#llx\n", (unsigned long long)(t_cur ? t_cur->id : 0),
+                                    (long long)ns, (unsigned long long)x[30]); }
+        }
         if (ns <= 0) {  // a yield: the SDK's YieldThread and a zero SleepThread land here
             if (yb_on < 0) yb_config();
             KThread *self = t_cur;
@@ -921,6 +973,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         if (x[1] && x[2] == 4)  // (nn::Abort: the info is the failing Result - module + description)
             LOG("[kernel] svcBreak result %#x (module %u, description %u)\n", *(uint32_t *)(uintptr_t)x[1],
                 *(uint32_t *)(uintptr_t)x[1] & 0x1FF, (*(uint32_t *)(uintptr_t)x[1] >> 9) & 0x1FFF);
+        { extern void rt_break_report(Cpu * c, uint64_t pc); rt_break_report(c, pc); }
         FATAL("svcBreak(reason=%llx, info=%llx, size=%llx) at %llx\n", x[0], x[1], x[2], pc);
     case 0x27: debug_string(x[0], x[1]); x[0] = R_OK; break;
     case 0x29: {  // GetInfo(_, id0, handle, id1)
@@ -953,13 +1006,15 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 13: v = GUEST_HI - GUEST_LO; break;
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
-        case 16: {  // SystemResourceSize: nonzero is what enables nn::os's VAMM (virtual address memory)
+        case 16: {  // SystemResourceSize: nonzero is what enables nn::os's VAMM (virtual address memory); the game
+                    // declares it in its NPDM (META + 0x14, main.c), and the SDK's IsVirtualAddressMemoryEnabled is
+                    // exactly "this != 0". Reporting 0 to a game that declares one leaves VAMM half-built.
             static uint64_t srs;
             static int srs_init;
             if (!srs_init) {
                 srs_init = 1;
                 const char *e = getenv("NXRT_SYSTEM_RESOURCE");
-                srs = e ? strtoull(e, NULL, 0) : 0;
+                srs = e ? strtoull(e, NULL, 0) : g_system_resource;
             }
             v = srs;
             break;
@@ -1028,8 +1083,17 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[0] = R_OK;
         break;
     }
-    case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;
-    case 0x35: x[0] = svc_signal_to_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int32_t)x[3]); break;
+    case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int64_t)x[2], (int64_t)x[3]); break;
+    case 0x35:
+        if (trace_events())
+        {
+            LOG("[arb] t%llu signal addr=%#llx type=%u value=%d count=%d lr=%#llx\n",
+                (unsigned long long)(t_cur ? t_cur->id : 0), (unsigned long long)x[0], (unsigned)x[1], (int)x[2], (int)x[3],
+                (unsigned long long)x[30]);
+            trace_frames(c, 3);
+        }
+        x[0] = svc_signal_to_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int32_t)x[3]);
+        break;
     case 0x45: {  // CreateEvent -> w1 writable, w2 readable
         KObject *ev = calloc(1, sizeof *ev);
         ev->type = KOBJ_EVENT;
@@ -1038,10 +1102,27 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[2] = kernel_new_handle(ev);
         if (ENV("NXRT_PROF_SVC") || ENV("NXRT_DUMP_THREADS"))
             LOG("[evt] guest w=%llx r=%llx lr=%llx\n", (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[30]);
+        if (trace_events())
+            LOG("[ev] create %p w=%llx r=%llx lr=%llx\n", (void *)ev, (unsigned long long)x[1], (unsigned long long)x[2],
+                (unsigned long long)x[30]);
         break;
     }
     default:
         FATAL("unimplemented svc 0x%x at %llx (x0=%llx x1=%llx x2=%llx)\n", imm, pc, x[0], x[1], x[2]);
+    }
+    // (diagnostics) a syscall the guest was refused, first occurrences only: the result a game turns into an assert
+    // or an abort is usually one of these (the guest's own message strings are stripped in a release build)
+    if (x[0] && x[0] != R_OK) {
+        static uint64_t seen[128];
+        static int nseen;
+        uint64_t key = ((uint64_t)imm << 32) | (uint32_t)x[0];
+        int known = 0;
+        for (int i = 0; i < nseen; i++) known |= seen[i] == key;
+        if (!known && nseen < 128) {
+            seen[nseen++] = key;
+            LOG("[svc] %#x -> result %#x (x1=%llx x2=%llx) at %llx\n", imm, (unsigned)(uint32_t)x[0],
+                (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)pc);
+        }
     }
 }
 
@@ -1135,9 +1216,14 @@ static void dump_threads_locked(void) {
     for (KThread *t = g_threads; t; t = t->anext) {
         if (!t->started || t->finished) continue;
         uint64_t off = 0;
-        const char *sym_pc = loader_symbol_at(t->cpu.pc, &off);
+        // (an HLE stub as pc: the thread is inside an HLE function - name it, the module tables can't)
+        const char *sym_pc = hle_name_at(t->cpu.pc);
+        if (sym_pc) off = t->cpu.pc - HLE_BASE - 16ull * ((t->cpu.pc - HLE_BASE) / 16);
+        else sym_pc = loader_symbol_at(t->cpu.pc, &off);
         uint64_t off_lr = 0;
-        const char *sym_lr = loader_symbol_at(t->cpu.x[30], &off_lr);
+        const char *sym_lr = hle_name_at(t->cpu.x[30]);
+        if (!sym_lr) sym_lr = loader_symbol_at(t->cpu.x[30], &off_lr);
+        else off_lr = 0;
         LOG("  thr handle=%x id=%llu prio=%d pc=%llx (%s+%llx) lr=%llx (%s+%llx) wait=%d sync=%d addr=%llx\n",
             t->handle, (unsigned long long)t->id, t->prio,
             (unsigned long long)t->cpu.pc, sym_pc ? sym_pc : "?", (unsigned long long)off,

@@ -46,7 +46,20 @@ static uint32_t new_signaled_event(void) {
     return r;
 }
 
-#define UNHANDLED(iface) LOG("[am] %s cmd %u (unhandled, ok)\n", iface, req->cmd)
+// An unknown command: reply 16 zeroed bytes rather than nothing. A caller that asked for an output structure
+// checks the reply's size (nn::sf returns an error on a short one) and many games turn that into an assert; the
+// same 16 bytes is what generic_ok gives the sub-interfaces this table doesn't name.
+#define UNHANDLED(iface)                                                                        \
+    do {                                                                                        \
+        LOG("[am] %s cmd %u (unhandled, ok) in=%u bytes raw=%08x %08x %08x %08x %08x\n", iface,  \
+            req->cmd, req->data_size,                                                           \
+            req->data_size >= 4 ? *(const uint32_t *)req->data : 0,                             \
+            req->data_size >= 8 ? *(const uint32_t *)(req->data + 4) : 0,                       \
+            req->data_size >= 12 ? *(const uint32_t *)(req->data + 8) : 0,                      \
+            req->data_size >= 16 ? *(const uint32_t *)(req->data + 12) : 0,                     \
+            req->data_size >= 20 ? *(const uint32_t *)(req->data + 16) : 0);                    \
+        resp_size(resp, 0x10);                                                                  \
+    } while (0)
 
 static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;

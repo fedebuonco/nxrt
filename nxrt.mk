@@ -73,8 +73,10 @@ GAMELIB_SHARED := -shared
 # GAMELIB_ID: what the game code library is built from (the generator, the game's patches, the headers it is compiled
 # against, the flags). A library with another id is rebuilt by the start screen, never loaded.
 GAMELIB_SRCS := $(NXRT)/tools/gen.py $(sort $(wildcard $(NXRT)/tools/recomp/*.py)) $(NXRT)/tools/lifter.py \
-                $(NXRT)/tools/analyze.py $(NXRT)/tools/nso.py $(NXRT)/tools/gamelib_entry.c $(RT)/hle/hle_symbols.txt \
-                $(RT)/cpu.h $(RT)/gamelib.h $(wildcard $(GAME_TOOLS)/patches.py) $(GAMELIB_EXTRA)
+                $(NXRT)/tools/analyze.py $(NXRT)/tools/nso.py $(NXRT)/tools/simd_c.py $(NXRT)/tools/gamelib_entry.c \
+                $(RT)/hle/hle_symbols.txt \
+                $(RT)/cpu.h $(RT)/simd.h $(RT)/simd_fp.h $(RT)/gamelib.h \
+                $(wildcard $(GAME_TOOLS)/patches.py) $(GAMELIB_EXTRA)
 # (-I paths are where nxrt happens to live in this checkout, not what is built: the headers themselves are hashed above.
 # Without this, the same content gives another id when nxrt moves, and every player rebuilds for nothing.)
 GAMELIB_FLAGS := $(filter-out -I%,$(GENFLAGS))

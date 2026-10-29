@@ -1,15 +1,17 @@
 """Generate C for a whole NSO module.
 
-Usage: gen.py <name> <nso> <base> <outdir> [--game DIR] [--hle hle_symbols.txt] [--span BYTES]
+Usage: gen.py <name> <nso> <base> <outdir> [--game DIR] [--hle hle_symbols.txt] [--span BYTES] [--simd asm|c]
 
 --game: the game's tools folder (games/<id>/tools): its patches.py has the game's own code changes (see load_game).
 NXRT_GEN_JOBS: worker processes for the scans and the chunk files (default: every core; 1: none, see recomp/workers.py).
 
-FP/SIMD/CRC32 instructions are emitted as AArch64 inline asm: the generated code is for Apple Silicon.
+--simd: FP/SIMD/CRC32 as AArch64 inline asm (default on aarch64 hosts: Apple Silicon, an ARM Linux box) or as
+portable C (default elsewhere, e.g. x86-64: the Steam Deck; runtime/simd.h, tools/simd_c.py).
 The stages (load, discover, cfg, lift, emit, plan, report) are in tools/recomp/ (its __init__.py lists them).
 """
 import argparse
 import os
+import platform
 import sys
 import time
 
@@ -54,12 +56,14 @@ def main():
     ap.add_argument('--game')
     ap.add_argument('--span', type=lambda s: int(s, 0), default=plan.SPAN)  # bytes of guest text per chunk file
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--simd', choices=('asm', 'c'),
+                    default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
     args = ap.parse_args()
     game = load_game(args.game)
     nxlog.log.info("generating %s (%s, base %#x)", args.name, args.nso, args.base)
 
     t0 = time.time()
-    m = Module(args.name, args.nso, args.base)                      # load
+    m = Module(args.name, args.nso, args.base, args.simd)           # load
     if getattr(m.nso, 'arch', 'aarch64') != 'aarch64':
         raise SystemExit(
             f"{args.name}: this is a 32-bit ARM module; nxrt recompiles AArch64 Switch modules only"

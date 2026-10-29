@@ -77,14 +77,20 @@ static void module_init(Cpu *c, Module *m) {
 // Early (x2): the SDK's own constructors. Late (x3, once its heap is up): the other modules'. By default every module
 // but main runs early; games whose other modules need the SDK's heap (nx_game hooks late_module_init) run them late,
 // main last (it uses the others).
-static void vamm_init(Cpu *c) {  // rtld's job: create the virtual-address memory manager before the game allocates from it
-    if (!getenv("NXRT_VAMM_INIT")) return;
+// rtld's job: create the virtual-address memory manager before any module's constructors or the game allocates from
+// it. nxrt does not run rtld, so do it here, by default: without it the SDK's VammManager global stays zero and the
+// first nn::os::AllocateAddressRegion (every modern SDK game does one at startup) dereferences null (Wonder: signal 11
+// at 0xc0 inside ReaderWriterLockImpl::AcquireWriteLock). NXRT_NO_VAMM_INIT=1 leaves it to the game (a test).
+static void vamm_init(Cpu *c) {
+    if (getenv("NXRT_NO_VAMM_INIT")) return;
     uint64_t f = loader_find_symbol("_ZN2nn2os30InitializeVirtualAddressMemoryEv");
     if (f) { LOG("vamm: InitializeVirtualAddressMemory %llx\n", (unsigned long long)f); guest_call(c, f); }
     else LOG("vamm: InitializeVirtualAddressMemory not found\n");
 }
 static void rtld_init_sdk(Cpu *c) {
-    vamm_init(c);
+    // NXRT_VAMM_EARLY=0: only the late call (after the SDK's constructors), for an SDK whose constructor zeroes the
+    // manager object the early call made (the "initialized" flag survives in a global, so the late call then no-ops).
+    if (!getenv("NXRT_VAMM_EARLY") || atoi(getenv("NXRT_VAMM_EARLY"))) vamm_init(c);
     if (getenv("NXRT_SDK_INIT_LATE")) return;  // test: the sdk's constructors run in x3, after _init_libc1
     if (NX_HOOK(late_module_init)) {
         Module *sdk = loader_module("sdk");
@@ -92,6 +98,9 @@ static void rtld_init_sdk(Cpu *c) {
         return;
     }
     for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
+    // The SDK's constructors may zero the manager object the early call set up (C++ static construction): initialize
+    // it again once they have run, before nninitStartup/allocation. NXRT_VAMM_LATE=0 turns this off (A/B test).
+    if (!getenv("NXRT_VAMM_LATE") || atoi(getenv("NXRT_VAMM_LATE"))) vamm_init(c);
 }
 static void rtld_init_main(Cpu *c) {
     if (!NX_HOOK(late_module_init)) { module_init(c, &g_modules[0]); return; }
@@ -248,7 +257,7 @@ static void boot(const char *root) {
     kernel_init();
     dispatch_init();
 
-    uint32_t stack_size = 0x100000;
+    uint32_t stack_size = 0x100000, sysres = 0;
     int prio = 44;
     FILE *f = fopen(npdm_path, "rb");
     if (f) {
@@ -256,9 +265,13 @@ static void boot(const char *root) {
         if (fread(meta, 1, sizeof meta, f) == sizeof meta && !memcmp(meta, "META", 4)) {
             prio = meta[0xE];
             stack_size = *(uint32_t *)(meta + 0x1C);
+            // the system resource the title declares: nonzero is what makes nn::os enable virtual address memory
+            sysres = *(uint32_t *)(meta + 0x14);
+            kernel_set_system_resource(sysres);
         }
         fclose(f);
     }
+    LOG("system resource: %#x (virtual address memory %s)\n", sysres, sysres ? "on" : "off");
     LOG("main thread: prio %d, stack 0x%x\n", prio, stack_size);
 
     // (newer SDKs take a third callback: nn::init::Start(..., void (*)(), void (*)(), void (*)()))
@@ -268,6 +281,23 @@ static void boot(const char *root) {
     uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
     uint64_t main_fn = hle_register("<rtld_init_main>", rtld_init_main);
     uint64_t fini_fn = hle_register("<rtld_fini>", rtld_fini);
+    // NXRT_WATCH=<lo>[,<hi>]: arm the data watchpoint (dispatch.c) on a guest address range - which recompiled
+    // function writes a flag, a light event's word, a counter. Each distinct (function, offset) is logged once.
+    {
+        const char *w = getenv("NXRT_WATCH");
+        if (w) {
+            unsigned long long lo = 0, hi = 0;
+            extern uint64_t g_watch_lo, g_watch_hi;
+            extern void watch_arm(void);
+            if (sscanf(w, "%lli,%lli", (long long *)&lo, (long long *)&hi) >= 1) {
+                if (!hi) hi = lo + 8;
+                g_watch_lo = lo;
+                g_watch_hi = hi;
+                watch_arm();
+                LOG("watch: %#llx-%#llx\n", lo, hi);
+            }
+        }
+    }
     diagnostics_start();
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
     if (getenv("NXRT_RO_STUB")) {
@@ -336,6 +366,7 @@ static void layers_init(void) {
 
 int main(int argc, char **argv) {
     nx_log_init();  // NXRT_LOG / NXRT_LOG_FILE / NXRT_RUN_ID (docs/LOGGING.md)
+    { extern void rt_protocol_init(void); rt_protocol_init(); }  // the manager's stdout, before the log takes fd 1
     // --describe: the game, as JSON, and exit (a manager reads it: nxrt-frontend); --status: the game files and code too
     extern void rt_print_describe(void), rt_print_status(void);
     extern int rt_run_setup(const char *src, const char *mode);

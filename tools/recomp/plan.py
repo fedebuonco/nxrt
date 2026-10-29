@@ -42,7 +42,7 @@ def chunk_text(m, game, entries, hle, fns):
         lines, r = emit.emit_function(m, game, a, end, labels, tables, hle)
         body += lines
         refs |= r
-    text = ['#include "cpu.h"\n']
+    text = ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
     text += [f'void {emit.fname(r)}(Cpu *c);\n' for r in sorted(refs)]
     text += [f'void {emit.sanitize(hle[a])}(Cpu *c);\n' for a in sorted(set(hle) & set(fns))]
     text += ['\n'.join(body), '\n']

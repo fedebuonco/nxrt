@@ -300,7 +300,10 @@ void rt_fatal_trace(void) {
         uint64_t fp = c->x[29];  // guest frame chain (the SDK and the recompiled code keep frame pointers)
         for (int i = 0; i < 16 && fp >= STACK_BASE && fp + 16 <= STACK_BASE + STACK_SIZE; i++) {
             uint64_t prev = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8);
-            fprintf(stderr, "  guest frame %d: lr=%016llx\n", i, (unsigned long long)lr);
+            uint64_t off = 0;
+            const char *sym = loader_symbol_at(lr, &off);
+            fprintf(stderr, "  guest frame %d: lr=%016llx (%s+%#llx)\n", i, (unsigned long long)lr,
+                    sym ? sym : "?", (unsigned long long)off);
             if (prev <= fp) break;
             fp = prev;
         }
@@ -309,6 +312,36 @@ void rt_fatal_trace(void) {
     // our crash handler also catches SIGABRT: without this abort() re-entered it forever (a 5 GB log)
     signal(SIGABRT, SIG_DFL);
     abort();
+}
+
+// svcBreak (kernel.c): the guest stopped on purpose - an assert, an abort, a debugger request. A release build strips
+// the message, so print what the state still names: the site, the guest call chain with the game's own symbols, and
+// (NXRT_BREAK_DUMP=1) any printable string a register points at - nn::diag's file/expression when it has them.
+void rt_break_report(Cpu *c, uint64_t pc) {
+    uint64_t off = 0;
+    const char *sym = loader_symbol_at(pc, &off);
+    fprintf(stderr, "[break] at %016llx (%s+%#llx)\n", (unsigned long long)pc, sym ? sym : "?",
+            (unsigned long long)off);
+    uint64_t fp = c->x[29];
+    for (int i = 0; i < 16 && fp >= STACK_BASE && fp + 16 <= STACK_BASE + STACK_SIZE; i++) {
+        uint64_t prev = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8);
+        off = 0;
+        sym = loader_symbol_at(lr, &off);
+        fprintf(stderr, "[break]   #%d %016llx (%s+%#llx)\n", i, (unsigned long long)lr, sym ? sym : "?",
+                (unsigned long long)off);
+        if (prev <= fp) break;
+        fp = prev;
+    }
+    if (getenv("NXRT_BREAK_DUMP")) {  // (probing memory: opt-in, it can fault on an unmapped guest address)
+        for (int i = 0; i < 8; i++) {
+            uint64_t a = c->x[i];
+            if (a < GUEST_LO || a > 0x7800000000ull) continue;
+            const char *p = (const char *)(uintptr_t)a;
+            size_t n = 0;
+            while (n < 120 && p[n] >= 0x20 && p[n] < 0x7f) n++;
+            if (n >= 4 && p[n] == 0) fprintf(stderr, "[break]   x%d -> \"%.*s\"\n", i, (int)n, p);
+        }
+    }
 }
 
 void rt_udf(Cpu *c, uint64_t pc) {
@@ -347,6 +380,9 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
         static char seen[64][48];
         static int nseen;
         const char *nm = host_sym(pc, NULL);
+        Cpu *wc = kernel_current_cpu();
+        uint64_t gpc = wc ? wc->pc : 0, goff = 0;
+        const char *gn = loader_symbol_at(gpc, &goff);
         if (!nm) nm = "?";
         char key[48];  // (each function + offset once)
         snprintf(key, sizeof key, "%.36s+%llx", nm, (unsigned long long)(fa - g_watch_lo));
@@ -354,7 +390,8 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
         for (int i = 0; i < nseen; i++) found |= !strcmp(seen[i], key);
         if (!found && nseen < 64) {
             snprintf(seen[nseen++], 48, "%s", key);
-            fprintf(stderr, "[watch] +%#llx by %s\n", fa - g_watch_lo, nm);
+            fprintf(stderr, "[watch] +%#llx by %s (host %#llx, guest %#llx %s+%#llx)\n", fa - g_watch_lo, nm,
+                    (unsigned long long)pc, (unsigned long long)gpc, gn ? gn : "?", (unsigned long long)goff);
         }
     }
     plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);

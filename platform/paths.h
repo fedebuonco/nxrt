@@ -22,6 +22,7 @@ extern "C" {
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
 const char *rt_data_root(void);   // absolute
+void rt_mkdirs(const char *path);  // make every component of a folder path (mkdir -p): a screenshot's build/, the cache
 bool rt_dev_mode(void);           // dev / portable mode (rule 2 above): e.g. a source checkout
 // Before rt_paths_init (the session log): the data root by the rules above; false in dev mode
 bool rt_data_root_early(char *out, size_t n);

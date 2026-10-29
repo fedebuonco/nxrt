@@ -980,8 +980,15 @@ NVN(nvnWindowSetPresentInterval) {  // (the game's 60 / 30 fps mode: 1 / 2; NXRT
 }
 NVN(nvnWindowSetCrop) { int *cr = WIN->crop; cr[0] = (int)A(1); cr[1] = (int)A(2); cr[2] = (int)A(3); cr[3] = (int)A(4); }
 NVN(nvnWindowGetCrop) { memcpy(AP(1), WIN->crop, 16); }
+// NXRT_LOG_NVN=1: the frame's acquire/present calls, to see whether a game that never presents reaches them at all
+static int log_nvn(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("NXRT_LOG_NVN") != NULL;
+    return v;
+}
 NVN(nvnWindowAcquireTexture) {
     NvnWindow *w = WIN;
+    if (log_nvn()) LOG("[nvn] window acquire (fence %#llx) -> image %d\n", (unsigned long long)A(1), w->next);
     if (A(1)) sync_of(A(1))->signaled = 1;
     *(int32_t *)AP(2) = w->next;
     w->next = (w->next + 1) % (w->active ? w->active : 1);
@@ -996,6 +1003,15 @@ NVN(nvnQueueAcquireTexture) {
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+    if (log_nvn()) LOG("[nvn] present image %d\n", i);
+    if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
+}
+// The pre-53 window form of the same call (a title resolves NVN entry points by name at run time, so a missing one
+// is silently skipped by its loader: the frame is drawn and never presented).
+NVN(nvnWindowPresentTexture) {
+    NvnWindow *w = WIN;
+    int i = (int)A(1);
+    if (log_nvn()) LOG("[nvn] window present image %d\n", i);
     if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
 }
 

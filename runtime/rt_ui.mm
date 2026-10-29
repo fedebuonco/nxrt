@@ -1084,6 +1084,18 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
 RT_ON_RESET(rt_menu_reset) { menu_reset(); }
 
 // ------------------------------------------------------------------ registration (runtime/main.c, once)
+
+// The manager's channel (nxrt-frontend, docs/LOGGING.md): the JSON protocol must stay on the real stdout, but the
+// session log redirects fd 1 into its file as soon as the platform starts (platform/posix_log.h: dup2 of stderr over
+// stdout, so that a stray printf lands in the log). Keep a copy of stdout before that, and write the protocol there.
+static FILE *g_proto;
+extern "C" void rt_protocol_init(void) {
+    int fd = dup(STDOUT_FILENO);
+    if (fd >= 0 && (g_proto = fdopen(fd, "w"))) setvbuf(g_proto, NULL, _IOLBF, 0);
+    else g_proto = stdout;
+}
+static FILE *proto(void) { return g_proto ? g_proto : stdout; }
+
 // ------------------------------------------------------------------ for a manager (nxrt-frontend): who this is, how it stands
 // --describe / --status print one JSON object on stdout and exit (main.c): a manager learns the game from the app itself,
 // and whether its game code is current from the one thing that knows the id it wants - this build.
@@ -1111,7 +1123,7 @@ extern "C" void rt_print_describe(void) {
     for (int i = 0; i < 8; i++) snprintf(bid + 2 * i, 3, "%02x", g->build_id[i]);
     char tid[17];
     snprintf(tid, sizeof tid, "%016llx", (unsigned long long)g->title_id);
-    FILE *f = stdout;
+    FILE *f = proto();
     fputs("{\"nxrt_describe\":1,", f);
     json_kv(f, "id", g->id), json_kv(f, "exe", g->exe), json_kv(f, "title", g->title), json_kv(f, "game_name", g->game_name);
     json_kv(f, "game_version", g->game_version), json_kv(f, "title_id", tid), json_kv(f, "build_id", bid);
@@ -1127,7 +1139,7 @@ extern "C" void rt_print_status(void) {
     bool have_id = gamelib_wanted_id(g_root.c_str(), want, sizeof want);
     bool code = files.empty() && gamelib_present(g_root.c_str());
     std::string status = check_game_files(g_root);
-    FILE *f = stdout;
+    FILE *f = proto();
     fputs("{\"nxrt_status\":1,", f);
     json_kv(f, "data_root", rt_data_root()), json_kv(f, "game_dir", g_root.c_str()), json_kv(f, "files", files.c_str());
     json_kv(f, "status", status.c_str()), json_kv(f, "code_id", have_id ? want : "");
@@ -1157,10 +1169,10 @@ extern "C" int rt_run_setup(const char *src, const char *mode) {
         pthread_mutex_unlock(&g_lock);
         float f = extract_progress();
         if (job != last || f - last_f >= 0.005f || !busy) {
-            fprintf(stdout, "{\"nxrt_progress\":1,\"fraction\":%.4f,", f);
-            json_kv(stdout, "step", job.c_str(), true);
-            fputs("}\n", stdout);
-            fflush(stdout);
+            fprintf(proto(), "{\"nxrt_progress\":1,\"fraction\":%.4f,", f);
+            json_kv(proto(), "step", job.c_str(), true);
+            fputs("}\n", proto());
+            fflush(proto());
             last = job, last_f = f;
         }
         if (!busy) break;
@@ -1173,13 +1185,13 @@ extern "C" int rt_run_setup(const char *src, const char *mode) {
     pthread_mutex_unlock(&g_lock);
     std::string status = check_game_files(g_root);
     bool ok = (g_build_mode == BUILD_ALL ? status.empty() : check_copied_files(g_root).empty()) && !failed;
-    fputs("{\"nxrt_setup\":1,", stdout);
-    json_kv(stdout, "mode", mode);
-    fprintf(stdout, "\"ok\":%s,\"builder\":%s,", ok ? "true" : "false", gamebuild_available() ? "true" : "false");
-    json_kv(stdout, "step", job.c_str()), json_kv(stdout, "hint", hint.c_str()), json_kv(stdout, "status", status.c_str());
-    json_kv(stdout, "game_dir", g_root.c_str(), true);
-    fputs("}\n", stdout);
-    fflush(stdout);
+    fputs("{\"nxrt_setup\":1,", proto());
+    json_kv(proto(), "mode", mode);
+    fprintf(proto(), "\"ok\":%s,\"builder\":%s,", ok ? "true" : "false", gamebuild_available() ? "true" : "false");
+    json_kv(proto(), "step", job.c_str()), json_kv(proto(), "hint", hint.c_str()), json_kv(proto(), "status", status.c_str());
+    json_kv(proto(), "game_dir", g_root.c_str(), true);
+    fputs("}\n", proto());
+    fflush(proto());
     return ok ? 0 : 1;
 }
 

@@ -50,6 +50,8 @@ static void mkdirs(const char *path) {
     mkdir(p, 0755);
 }
 
+void rt_mkdirs(const char *path) { mkdirs(path); }
+
 static bool writable(const char *dir) {
     char t[1100];
     snprintf(t, sizeof t, "%s" SEP ".write_test", dir);

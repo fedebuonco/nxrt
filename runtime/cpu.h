@@ -54,7 +54,19 @@ RT_API uint64_t rt_ticks(void);
 typedef struct __attribute__((aligned(16))) { uint64_t key; GuestFn fn; } NxIC;
 RT_API extern uint64_t g_ic_epoch;
 RT_API void rt_dispatch_ic(Cpu *c);  // call the function at c->pc, filling the site's cache c->ic when it can
+#if defined(__x86_64__)
+// One aligned 16-byte load (movdqa): aligned 16-byte loads and stores are single-copy atomic on x86-64, the pair the
+// ldp/stp is on an LSE2 AArch64 host. The store side is rt_dispatch_ic's __atomic_store of the same pair.
+#define NX_IC_GET(ic, k, f)                     \
+    do {                                        \
+        NxIC p_;                                \
+        __builtin_memcpy(&p_, (ic), sizeof p_);  \
+        (k) = p_.key;                           \
+        (f) = p_.fn;                            \
+    } while (0)
+#else
 #define NX_IC_GET(ic, k, f) __asm__("ldp %0, %1, %2" : "=&r"(k), "=&r"(f) : "Q"(*(ic)))
+#endif
 #define NX_IC_EPOCH __atomic_load_n(&g_ic_epoch, __ATOMIC_RELAXED)
 // c->pc set: call it (an indirect call: blr)
 #define NX_IC_CALL()                                                                         \

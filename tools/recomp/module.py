@@ -10,7 +10,7 @@ from nso import Nso
 
 
 class Module:
-    def __init__(self, name, path, base):
+    def __init__(self, name, path, base, simd='asm'):
         self.name = name
         self.nso = Nso(path)
         self.base = base
@@ -18,7 +18,7 @@ class Module:
         self.lo = base + n.text[0]
         self.hi = base + n.text[0] + n.text[1]
         self.words = struct.unpack(f'<{n.text[1] // 4}I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
-        self.lifter = Lifter(base)
+        self.lifter = Lifter(base, simd)
         self.cache = {}
         self.stats = Counter()
         self.mu = None  # (cfg.py: the unicorn instance that emulates jump tables, made on first use)
