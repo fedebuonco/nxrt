@@ -651,6 +651,7 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
     if (c->fail) { strcpy(out, "vec4(0.0f)"); return; }  // e.g. a type conflict: tex[slot] is not this lookup's type
     const ShaderTexture *t = &c->info->tex[slot];
     int type = t->type;
+    if (type == TEXTYPE_BUFFER) { fail(c, "filtered lookup on a buffer texture"); strcpy(out, "vec4(0.0f)"); return; }
     bool cube = type == TEXTYPE_CUBE || type == TEXTYPE_CUBE_ARRAY;
     int n = (type == TEXTYPE_1D || type == TEXTYPE_1D_ARRAY) ? 1 : (type == TEXTYPE_2D || type == TEXTYPE_2D_ARRAY) ? 2 : 3;
     if (c->stage != STAGE_FRAGMENT && lod_kind != 1) {
@@ -747,9 +748,12 @@ static bool glsl_texs(Ctx *c, uint64_t w, bool fetch, int *slot_out, char *call,
     } else {
         switch (info) {
         case 0: slot = tex_slot(c, index, TEXTYPE_1D, false, false);
-            sprintf(call, "texelFetch(t%d, int(%s), 0)", slot, A); break;
+            // a buffer texture (ShaderKey buffer_tex) is a texel buffer: no mip level, no coordinates
+            if (c->info->tex[slot].type == TEXTYPE_BUFFER) sprintf(call, "texelFetch(t%d, int(%s))", slot, A);
+            else sprintf(call, "texelFetch(t%d, ivec2(int(%s), 0), 0)", slot, A); break;
         case 1: slot = tex_slot(c, index, TEXTYPE_1D, false, false);
-            sprintf(call, "texelFetch(t%d, int(%s), int(%s))", slot, A, Bv); break;
+            if (c->info->tex[slot].type == TEXTYPE_BUFFER) sprintf(call, "texelFetch(t%d, int(%s))", slot, A);
+            else sprintf(call, "texelFetch(t%d, ivec2(int(%s), 0), int(%s))", slot, A, Bv); break;
         case 2: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
             sprintf(call, "texelFetch(t%d, ivec2(%s), 0)", slot, RSC2(c, slot, "uint2(%s, %s)", A, Bv)); break;
         case 4: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
@@ -1128,7 +1132,13 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int qt = (int)bits(w, 22, 6);
         uint32_t mask = (uint32_t)bits(w, 31, 4);
         int slot = tex_slot(c, index, -1, false, false);  // the type comes from a sample, if any
-        if (qt == 1 && c->glsl) {  // tsize<slot>() is emitted with the slot's final type
+        if (qt == 1 && c->glsl && c->info->tex[slot].type == TEXTYPE_BUFFER) {  // a buffer texture: its texel count
+            sp(&c->body, "    { uint4 q = uint4(uint(textureSize(t%d)), 1u, 1u, 1u);\n", slot);
+            int n = 0;
+            for (int i = 0; i < 4; i++)
+                if (mask & (1u << i)) { c->reg_used[d + n] = 1; sp(&c->body, "      r%d = q[%d];\n", d + n, i); n++; }
+            sp(&c->body, "    }\n");
+        } else if (qt == 1 && c->glsl) {  // tsize<slot>() is emitted with the slot's final type
             if (c->stage != STAGE_VERTEX) {
                 c->uses_rscale = true;
                 sp(&c->body, "    { uint lv = %s; uvec4 q = uvec4(uint(floor(float(tsize%d(int(lv)).x) / rscale[%d].x + 0.5f)), "
@@ -2180,6 +2190,10 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
         {"sampler1D", "sampler1DShadow"}, {"sampler2D", "sampler2DShadow"}, {"sampler3D", "sampler3D"},
         {"samplerCube", "samplerCubeShadow"}, {"sampler2DArray", "sampler2DArrayShadow"},
         {"samplerCubeArray", "samplerCubeArrayShadow"}, {"sampler1DArray", "sampler1DArrayShadow"}};
+    if (t->type == TEXTYPE_BUFFER) return "samplerBuffer";  // (a texel buffer: read by index, no filtering)
+    // 1D textures are stored as 2D W x 1 (Vulkan 1D images stop at 4096), so they are sampled as 2D: a sampler1D
+    // against a 2D view is a Dim mismatch (validation: VUID-vkCmdDraw-viewType-07752) and reads are undefined.
+    if (t->type == TEXTYPE_1D) return t->shadow ? "sampler2DShadow" : "sampler2D";
     int ty = t->type <= TEXTYPE_1D_ARRAY ? t->type : TEXTYPE_2D;
     return names[ty][t->shadow ? 1 : 0];
 }
@@ -2237,7 +2251,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
-        case TEXTYPE_1D: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1, 1); }\n", i, i); break;
+        case TEXTYPE_BUFFER: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d), 1, 1); }\n", i, i); break;
+        case TEXTYPE_1D: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1); }\n", i, i); break;
         case TEXTYPE_1D_ARRAY: sp(&s, "ivec3 tsize%d(int l) { ivec2 s = textureSize(t%d, l); return ivec3(s.x, 1, s.y); }\n", i, i); break;
         case TEXTYPE_3D: case TEXTYPE_2D_ARRAY: case TEXTYPE_CUBE_ARRAY:
             sp(&s, "ivec3 tsize%d(int l) { return textureSize(t%d, l); }\n", i, i); break;

@@ -275,7 +275,7 @@ void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags as
 }
 
 // Images destroyed by the guest are kept until the submissions that may use them have completed.
-typedef struct { VkImage img; VmaAllocation mem; VkImageView view; VkBuffer buf; VkDeviceMemory bmem; uint64_t seq; } Dead;
+typedef struct { VkImage img; VmaAllocation mem; VkImageView view; VkBufferView bufview; VkBuffer buf; VkDeviceMemory bmem; uint64_t seq; } Dead;
 static Dead *dead;
 static int ndead, cap_dead;
 static void views_forget(TexBackend *b);
@@ -286,6 +286,7 @@ void vk_collect_dead(void) {
     for (int i = 0; i < ndead; i++) {
         if (dead[i].seq > done) { dead[k++] = dead[i]; continue; }
         if (dead[i].view) vkDestroyImageView(g_vk.dev, dead[i].view, NULL);
+        else if (dead[i].bufview) vkDestroyBufferView(g_vk.dev, dead[i].bufview, NULL);
         else if (dead[i].buf) { vkDestroyBuffer(g_vk.dev, dead[i].buf, NULL); vkFreeMemory(g_vk.dev, dead[i].bmem, NULL); }
         else vmaDestroyImage(g_vk.vma, dead[i].img, dead[i].mem);
     }
@@ -469,6 +470,7 @@ static void defer(Dead d) {
 void vk_defer_image(VkImage img, VmaAllocation mem) { defer((Dead){.img = img, .mem = mem}); }
 void vk_defer_view(VkImageView v) { defer((Dead){.view = v}); }
 void vk_defer_buffer(VkBuffer b, VkDeviceMemory m) { defer((Dead){.buf = b, .bmem = m}); }  // (raw memory, not VMA)
+void vk_defer_bufview(VkBufferView v) { defer((Dead){.bufview = v}); }
 
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv);  // (exec.c: NXRT_VK_DEVLOST_TRACE)
 
@@ -1001,6 +1003,146 @@ VkImageView vk_dummy_view(int textype) {
     b->layers = cube ? 6 : 1;
     views[textype] = vk_image_view(b, vt, b->format, 0, 1, 0, cube ? 6 : 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
     return views[textype];
+}
+
+// ---------------------------------------------------------------- buffer textures (NVN builder target 10)
+// KTGL (Fire Emblem: Three Houses) binds its light and decal lists as buffer textures: a linear range of the guest
+// heap read by index, no filtering and no levels. On the reference host those shaders read the real lists (their
+// lighting and decal passes are the last thing between "flat tan characters" and a lit scene); here they read zeros,
+// because a buffer texture has no image. Vulkan has them as uniform texel buffers: the guest range is imported as a
+// buffer (host memory, so the game's writes are the contents - no upload) and viewed with the NVN format, and the
+// translator reads it with texelFetch (TEXTYPE_BUFFER, ShaderKey buffer_tex).
+typedef struct {
+    const void *addr;   // the guest range the view was made for (a host pointer: textures are read in place)
+    uint64_t bytes;     // its size
+    VkFormat vf;
+    VkBuffer buf;
+    VkDeviceMemory mem;
+    VkBufferView view;
+} TexelView;
+#define TEXEL_VIEWS 64
+static TexelView tviews[TEXEL_VIEWS];
+static int tv_next;
+static VkBufferView tv_dummy;
+
+static VkBufferView texel_dummy(void) {
+    if (tv_dummy) return tv_dummy;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16,
+                             .usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                  .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo info;
+    VkBuffer b;
+    VmaAllocation m;
+    VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &b, &m, &info));
+    if (info.pMappedData) memset(info.pMappedData, 0, 16);  // (zeros: an unbound list lights nothing)
+    VkBufferViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = b,
+                                 .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 0, .range = VK_WHOLE_SIZE};
+    VK_CHECK(vkCreateBufferView(g_vk.dev, &vi, NULL, &tv_dummy));
+    return tv_dummy;
+}
+
+// A uniform texel buffer read through a `samplerBuffer` must have a FLOAT numeric type (VUID-vkCmdDraw-format-07753):
+// the guest format's layout in its float (or, for 8-bit, UNORM) twin. The reference host reads these through
+// texture_buffer<float> too, so the shader's float view of the data is the established behaviour.
+static VkFormat float_twin(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: return VK_FORMAT_R8_UNORM;
+    case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT: return VK_FORMAT_R8G8_UNORM;
+    case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT: return VK_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT: return VK_FORMAT_R16_SFLOAT;
+    case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16_SINT: return VK_FORMAT_R16G16_SFLOAT;
+    case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R16G16B16A16_SINT: return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT: return VK_FORMAT_R32_SFLOAT;
+    case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT: return VK_FORMAT_R32G32_SFLOAT;
+    case VK_FORMAT_R32G32B32_UINT: case VK_FORMAT_R32G32B32_SINT: return VK_FORMAT_R32G32B32_SFLOAT;
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    default: return f;  // already a float class format (UNORM/SFLOAT/SNORM)
+    }
+}
+
+VkBufferView vk_texel_view(NvnTexture *t) {
+    if (!t || t->target != 10 || !t->addr) return texel_dummy();
+    const FormatInfo *fi = nvn_format_info(t->format);
+    uint32_t bpb = fi->bpb ? fi->bpb : 4;
+    uint64_t bytes = (uint64_t)(t->width ? t->width : 1) * bpb;
+    VkFormat vf = float_twin(fmt_of(t->format).vf);
+    {   // the format must be readable through a uniform texel buffer (no compressed, no depth forms)
+        static struct { VkFormat f; int8_t ok; } fc[32];
+        static int n;
+        int8_t ok = -1;
+        for (int i = 0; i < n; i++) if (fc[i].f == vf) ok = fc[i].ok;
+        if (ok < 0) {
+            VkFormatProperties p;
+            vkGetPhysicalDeviceFormatProperties(g_vk.phys, vf, &p);
+            ok = (p.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT) != 0;
+            if (n < 32) { fc[n].f = vf; fc[n++].ok = ok; }
+        }
+        if (!ok) {
+            static int said;
+            if (said++ < 8) LOG("[tex] buffer texture format %#x (vk %d): no uniform texel buffer support\n", t->format, vf);
+            return texel_dummy();
+        }
+    }
+    if (g_vk.props.limits.maxTexelBufferElements && bytes / bpb > g_vk.props.limits.maxTexelBufferElements) {
+        static int said;
+        if (said++ < 8) LOG("[tex] buffer texture too long for a texel buffer: %llu elements (max %llu)\n",
+                            (unsigned long long)(bytes / bpb), (unsigned long long)g_vk.props.limits.maxTexelBufferElements);
+        return texel_dummy();
+    }
+    for (int i = 0; i < TEXEL_VIEWS; i++) {
+        TexelView *e = &tviews[i];
+        if (e->view && e->addr == (const void *)t->addr && e->bytes == bytes && e->vf == vf) return e->view;
+    }
+    if (!g_vk.host_import) {  // (no VK_EXT_external_memory_host: the heap is not a buffer on this device)
+        static int said;
+        if (said++ < 4) LOG("[tex] buffer texture but the heap cannot be imported: no external memory host\n");
+        return texel_dummy();
+    }
+    // The import must start at a minImportedHostPointerAlignment boundary (VK_EXT_external_memory_host): align down
+    // and offset the view into it.
+    static uint64_t align;
+    if (!align) {
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &hp};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+        align = hp.minImportedHostPointerAlignment ? hp.minImportedHostPointerAlignment : (64u << 10);
+    }
+    uintptr_t host = (uintptr_t)t->addr, base = host & ~(uintptr_t)(align - 1);
+    uint64_t off = (uint64_t)(host - base);
+    uint64_t talign = g_vk.props.limits.minTexelBufferOffsetAlignment;
+    if (talign > 1 && off % talign) {  // (the view's offset must be aligned too: move the base down to that alignment)
+        off -= off % talign;
+        base = host - off;
+    }
+    VkBuffer buf = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (vk_host_import_ptr((void *)base, off + bytes, &buf, &mem) != VK_SUCCESS) {
+        static int said;
+        if (said++ < 4) LOG("[tex] buffer texture import failed: %llu bytes at %p\n", (unsigned long long)bytes, (void *)host);
+        return texel_dummy();
+    }
+    VkBufferViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = buf, .format = vf,
+                                 .offset = off, .range = bytes};
+    VkBufferView view = VK_NULL_HANDLE;
+    if (vkCreateBufferView(g_vk.dev, &vi, NULL, &view) != VK_SUCCESS) {
+        vkDestroyBuffer(g_vk.dev, buf, NULL);
+        vkFreeMemory(g_vk.dev, mem, NULL);
+        static int said;
+        if (said++ < 4) LOG("[tex] buffer texture view failed: %llu bytes fmt %d\n", (unsigned long long)bytes, vf);
+        return texel_dummy();
+    }
+    {   // the lists KTGL lights its scenes with: worth seeing once (their size and format are the reference's clue too)
+        static int said;
+        if (said++ < 12)
+            LOG("[tex] buffer texture %u texels fmt %#x (vk %d) from %llu bytes at %p\n", t->width, t->format, vf,
+                (unsigned long long)bytes, (void *)t->addr);
+    }
+    TexelView *e = &tviews[tv_next++ % TEXEL_VIEWS];  // ring: the game's lists and decal buffers are a bounded set
+    if (e->view) { vk_defer_bufview(e->view); vk_defer_buffer(e->buf, e->mem); }
+    *e = (TexelView){(const void *)t->addr, bytes, vf, buf, mem, view};
+    return view;
 }
 
 // Depth compare (sampler*Shadow) needs a view whose format has SAMPLED_IMAGE_DEPTH_COMPARISON: the RGBA8 dummy above

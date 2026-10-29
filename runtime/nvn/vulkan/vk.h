@@ -132,6 +132,10 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
                           uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect);
 VkImageView vk_dummy_view(int textype);
+// A buffer texture (NVN builder target 10) as a uniform texel buffer over the guest's linear texels (textures.c).
+// The slot is declared samplerBuffer and read with texelFetch, so the shader needs ShaderKey buffer_tex for it.
+VkBufferView vk_texel_view(NvnTexture *t);
+VkResult vk_host_import_ptr(void *host, uint64_t size, VkBuffer *out_buf, VkDeviceMemory *out_mem);  // exec.c
 VkImageView vk_dummy_depth_view(int textype);  // shadow (depth compare) slots: 1x1 depth, cleared to 1.0
 bool vk_format_depth_compare(VkFormat f);  // SAMPLED_IMAGE_DEPTH_COMPARISON
 bool vk_tex_depth_compare(NvnTexture *t);  // t's image can be sampled with a depth compare

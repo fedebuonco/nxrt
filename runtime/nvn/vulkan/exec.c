@@ -2354,6 +2354,20 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
     return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
 }
 
+// The shader cannot tell a buffer texture from a 1D texture; the bound object can. Bit i is set when slot i of the
+// stage's texture list resolves to an NVN buffer texture (builder target 10): the translator then declares it a
+// samplerBuffer and reads it by index (ShaderKey buffer_tex), and the backend binds a uniform texel buffer.
+static uint32_t buffer_tex_slots(int stage, ShaderInfo *si) {
+    uint32_t m = 0;
+    for (int i = 0; i < si->ntex && i < 32; i++) {
+        NvnTexture *t = shader_texture_object(stage, &si->tex[i]);
+        if (!t || t->target != 10) continue;
+        int slot = ((int)si->tex[i].handle_offset - 0x20) / 8;
+        if (slot >= 0 && slot < 32) m |= 1u << slot;
+    }
+    return m;
+}
+
 static bool is_attachment(NvnTexture *t) {
     if (!t) return false;
     if (t == st.rt.depth) return true;
@@ -2808,6 +2822,11 @@ static VkResult host_import_ptr(void *host, uint64_t size, VkBuffer *out_buf, Vk
 // Heap bytes [off, off + size) as a buffer (a page-aligned range of the mapped heap).
 static bool host_import(uint64_t off, uint64_t size, VkBuffer *out_buf, VkDeviceMemory *out_mem, bool bda) {
     return host_import_ptr((void *)(uintptr_t)(HEAP_BASE + off), size, out_buf, out_mem, bda) == VK_SUCCESS;
+}
+// The same import for a caller that has its own host pointer: buffer textures (textures.c vk_texel_view), whose data
+// the game writes in place - no copy, the view is the guest memory.
+VkResult vk_host_import_ptr(void *host, uint64_t size, VkBuffer *out_buf, VkDeviceMemory *out_mem) {
+    return host_import_ptr(host, size, out_buf, out_mem, false);
 }
 
 // One import of the whole heap, tried once at the start where it should fit but not by much (device.c
@@ -4088,6 +4107,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
+    VkBufferView bufviews[MAX_BIND];
     uint32_t dbind[MAX_BIND], doff[MAX_BIND];
     int n = 0, nd = 0;
     int sg = stage == 1 ? 1 : 0;
@@ -4123,6 +4143,12 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
             bi[n] = b->binding == GFAST_BUFFER_INDEX ? gfast_info() : gmem_info();
             w[n].pBufferInfo = &bi[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER && b->binding >= 32) {
+            // a buffer texture: the bound object is a linear guest range (textures.c vk_texel_view), not an image
+            int ti = (int)b->binding - 32;
+            NvnTexture *bt = ti < si->ntex ? shader_texture_object(stage, &si->tex[ti]) : NULL;
+            bufviews[n] = vk_texel_view(bt);
+            w[n].pTexelBufferView = &bufviews[n];
         } else {
             continue;  // rscale / tint: written below, once the textures (and their scales) are known
         }
@@ -4740,6 +4766,16 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
+    if (pr->vi && pr->fi) {  // a stage's texture slots bound to buffer textures: the program variant that reads them so
+        uint32_t vb = buffer_tex_slots(0, pr->vi), fb = buffer_tex_slots(1, pr->fi);
+        if (vb || fb) {
+            vkey.buffer_tex = vb;
+            fkey.buffer_tex = fb;
+            Prog *p2 = get_program(st.program, &vkey, &fkey);
+            if (!p2 || atomic_load(&p2->state) != 1) { SKIP(!p2 ? SK_NO_STAGES : atomic_load(&p2->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
+            pr = p2;
+        }
+    }
     g_mirror_w = 0;
     memset(&g_draw, 0, sizeof g_draw);
     for (int i = 0; i < 6; i++) {
