@@ -2506,11 +2506,28 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
                 }
             }
         }
-        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
+        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: an instruction computed at run time
             any_branch = true;
             forward = false;
             if (!fwd_why) fwd_why = "BRX jump table";
-            memset(label, 1, end);
+            // A compiled switch's jump table points at block starts. Marking *every* instruction turned a
+            // 9,000-instruction compute shader into 8,981 switch cases - 704 KB of GLSL that the driver took 12 s to
+            // compile, per pipeline (Fire Emblem: Three Houses). Small shaders keep the exact form; a big one marks
+            // the first instruction and the instructions that follow a branch, which is where a table can land.
+            if (end <= 2048) memset(label, 1, end);
+            else
+                for (size_t k = 2; k < end; k++) {
+                    if (k % 4 == 0) continue;  // (a control word, not an instruction)
+                    size_t pk = k - 1;
+                    while (pk > 0 && pk % 4 == 0) pk--;  // the previous instruction (skip the group's control word)
+                    uint64_t pw = ((const uint64_t *)code)[pk];
+                    if ((pw & 0xfff0000000000020ull) == 0xe240000000000000ull ||        // BRA
+                        (pw & 0xfff0000000000020ull) == 0xe290000000000000ull ||                    // SSY
+                        (pw & 0xfff0000000000020ull) == 0xe2a0000000000000ull ||                    // PBK
+                        (pw & 0xfff0000000000020ull) == 0xe2b0000000000000ull ||                    // PCNT
+                        (pw & 0xfff0000000000000ull) == 0xe300000000000000ull)                      // EXIT
+                        label[k] = 1;
+                }
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)
