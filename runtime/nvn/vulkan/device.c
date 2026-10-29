@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
 
 #include "../../../platform/paths.h"
@@ -833,6 +834,67 @@ uint64_t renderer_exec_frame(void) { return rq_current_item() ? rq_frame() : tot
 uint64_t vk_frame_counter(void) { return renderer_exec_frame(); }  // (the translation's: g_frame_counter == total_frames)
 static float g_shot_crop[4] = {0, 0, 1, 1};
 static double last_fps_time;
+
+// The busiest threads since the last call: /proc/self/task/<tid>/stat's utime+stime delta, named from task/<tid>/comm.
+static void cpu_top_log(double dt) {
+    static struct { int tid; unsigned long long ticks; char comm[17]; } prev[128];
+    static int nprev;
+    if (dt <= 0) return;
+    struct { int tid; unsigned long long ticks; char comm[17]; } cur[128];
+    int n = 0;
+    DIR *d = opendir("/proc/self/task");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < 128) {
+        int tid = atoi(e->d_name);
+        if (tid <= 0) continue;
+        char path[64], buf[512];
+        snprintf(path, sizeof path, "/proc/self/task/%d/stat", tid);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        size_t r = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        if (!r) continue;
+        buf[r] = 0;
+        char *p = strrchr(buf, ')');
+        if (!p) continue;
+        unsigned long long ut = 0, st = 0;
+        if (sscanf(p + 1, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) < 2) continue;
+        cur[n].tid = tid;
+        cur[n].ticks = ut + st;
+        snprintf(cur[n].comm, sizeof cur[n].comm, "?");
+        snprintf(path, sizeof path, "/proc/self/task/%d/comm", tid);
+        if ((f = fopen(path, "r"))) { if (fgets(cur[n].comm, sizeof cur[n].comm, f)) cur[n].comm[strcspn(cur[n].comm, "\n")] = 0; fclose(f); }
+        n++;
+    }
+    closedir(d);
+    long hz = 100;  // USER_HZ
+    uint64_t tot = 0;
+    for (int i = 0; i < n; i++) {
+        unsigned long long p0 = 0;
+        for (int k = 0; k < nprev; k++) if (prev[k].tid == cur[i].tid) { p0 = prev[k].ticks; break; }
+        tot += cur[i].ticks > p0 ? cur[i].ticks - p0 : 0;
+    }
+    LOG("[cpu] %.0f%% of one core in total; top:", 100.0 * (double)tot / (double)hz / dt);
+    bool used[128] = {false};
+    for (int t = 0; t < 4; t++) {
+        int best = -1;
+        double bestv = 0;
+        for (int i = 0; i < n; i++) {
+            if (used[i]) continue;
+            unsigned long long p0 = 0;
+            for (int k = 0; k < nprev; k++) if (prev[k].tid == cur[i].tid) { p0 = prev[k].ticks; break; }
+            double v = cur[i].ticks > p0 ? (double)(cur[i].ticks - p0) : 0;
+            if (v > bestv) bestv = v, best = i;
+        }
+        if (best < 0) break;
+        used[best] = true;
+        LOG(" %s(%d) %.0f%%", cur[best].comm, cur[best].tid, 100.0 * bestv / (double)hz / dt);
+    }
+    LOG("\n");
+    memcpy(prev, cur, sizeof cur);
+    nprev = n;
+}
 static NvnTexture *g_last_presented;
 
 const float *vk_shot_crop(void) { return g_shot_crop; }
@@ -1034,6 +1096,9 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     prev_present = now;
     pp_mark(PP_REST);  // (the fps line itself is not counted)
     if (now - last_fps_time >= fps_iv) {
+        // [cpu] the busiest threads of the last interval, by /proc/self/task/<tid>/stat: which side is short of time -
+        // the game's own threads (recompiled code), the translator, the recorder or the build workers.
+        cpu_top_log(last_fps_time > 0 ? now - last_fps_time : 0);
         if (last_fps_time > 0)
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s%s)\n", now, (unsigned long long)frame,
                 frames / (now - last_fps_time), max_gap * 1000.0, NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "", renderer_stats(), pp_text());

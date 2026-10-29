@@ -226,6 +226,7 @@ static uint64_t enqueue(const Item *it, const uint64_t *fences, int nfences) {
 }
 
 static void *run(void *arg) {
+    plat_thread_name("nxrt-render");
     (void)arg;
     plat_thread_guest(44);  // (the game's GPU thread's class: performance cores on a Mac)
     plat_thread_perf_core(PLAT_PERF_RENDER);
