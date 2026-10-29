@@ -1010,13 +1010,10 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         // vkBeginCommandBuffer / a render pass and dropped (validation: VUID-vkCmdDrawIndexed-commandBuffer-recording)
         // - the menu, the FPS counter and the name dialog were all invisible because of that.
         extern bool menu_wants_render(void);  // (ui/menu.h, C linkage)
-        extern bool menu_is_modal(void);
-        // Only the FPS counter is up: draw it every fourth frame (its value changes twice a second) instead of every
-        // frame. Each overlay frame costs a recorder drain and an extra pass - measured 2.7 ms a frame on the Deck,
-        // and the drain keeps the recorder from running ahead.
-        static int ov_skip;
-        bool modal = menu_is_modal();
-        bool draw_overlay = menu_wants_render() && (modal || (ov_skip++ & 3) == 0);
+        // Every frame: skipping the draw made the overlay flicker (a frame with it, three without). The drain is what
+        // an overlay frame costs, and with the command lists batched into few submissions there is little queued to
+        // drain - measured 0.1 ms a frame now (it was 2.7 ms with a submission per list).
+        bool draw_overlay = menu_wants_render();
         if (draw_overlay) rec_drain();  // (nothing to draw: no drain, the recorder keeps its pipeline)
         if (draw_overlay) menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         pp_mark(PP_OVERLAY);

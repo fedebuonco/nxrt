@@ -681,6 +681,15 @@ static uint8_t *blob_load_own(char stage, uint64_t hash, ShaderBlob *b) {
     return d;
 }
 
+// Keep at most a few builds in flight: the preparation runs while the game does, and queuing every record at once made
+// the game's own first-visit builds wait behind 200 of them (the build pool was pegged for minutes after a start).
+static void prep_throttle(const volatile int *cancel) {
+    for (int i = 0; i < 500 && !(cancel && *cancel) && renderer_prepare_pending() > 2; i++) {
+        struct timespec ts = {0, 4000000};
+        nanosleep(&ts, NULL);
+    }
+}
+
 static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel);
 bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
     static pthread_mutex_t one = PTHREAD_MUTEX_INITIALIZER;  // (one run at a time: the index, the translator)
@@ -782,7 +791,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
             uint8_t *df = ef ? blob_read(ef, &bf, files) : (r.kind == 'G' ? blob_load_own('f', r.fs, &bf) : NULL);
             if (!dv || (r.kind == 'G' && !df))
                 missing++;
-            else if (renderer_prepare(&r, &bv, &bf))
+            else if (prep_throttle(cancel), renderer_prepare(&r, &bv, &bf))
                 *(own ? &prepared_seen : &prepared) += 1;
             else
                 failed++;
