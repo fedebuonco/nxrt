@@ -977,6 +977,18 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             LOG("[perf] GPU time per pass for this frame:\n");
             g_gpuprof_frame = true;
         }
+        // A slow frame profiles itself (at most every 10 s, NXRT_PERF_AUTO_OFF=1 to stop it): the passes, their GPU
+        // time and their draw counts land in the log ("[gpuprof]"), so a scene only input can reach is measured
+        // where it happens. One profile costs a query reset/write per pass and a wait when it reports.
+        static double last_present_s, last_profile_s;
+        double now_s = SDL_GetTicks() / 1000.0;
+        double dt_s = last_present_s > 0 ? now_s - last_present_s : 0;
+        last_present_s = now_s;
+        if (dt_s > 0.040 && now_s - last_profile_s > 10.0 && !getenv("NXRT_PERF_AUTO_OFF")) {
+            last_profile_s = now_s;
+            LOG("[perf] frame %llu took %.0f ms: GPU time per pass of the next frame\n", (unsigned long long)frame, dt_s * 1000);
+            g_gpuprof_frame = true;
+        }
         const char *e = getenv("NXRT_GPUPROF_AT");
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
