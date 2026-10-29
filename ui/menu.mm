@@ -865,6 +865,15 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
     g_font = f0, g_font_big = f1;
 }
 
+// Whether the next menu_render() would draw anything: the backend drains the recorder before it hands the frame's
+// command buffer to ImGui (device.c), and that drain must not cost every frame with nothing on screen.
+bool menu_wants_render(void) {
+    if (g_open.load() || g_kbd.load() == 1 || g_ui_settings.show_fps) return true;
+    for (int i = 0; i < g_noverlays; i++)
+        if (g_overlays[i].wanted()) return true;
+    return false;
+}
+
 void menu_render(void *frame, double tw, double th) {
     bool open = g_open.load();
     bool overlay = false;  // the registered HUD overlays (nxui_add_overlay)

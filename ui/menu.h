@@ -21,6 +21,8 @@ void menu_apply_window_requests(void *sdl_window);
 // Render thread: lay out and draw the menu, the name dialog and the overlays into the host's frame (the backend's
 // new_frame / render get `frame`), after the game image. w, h: the frame's size in pixels. Nothing while all are off.
 void menu_render(void *frame, double w, double h);
+// true when menu_render would draw (the Vulkan backend drains the recorder before ImGui records)
+bool menu_wants_render(void);
 
 // The host's game is gone (an in-place reboot): menu and name dialog close.
 void menu_reset(void);

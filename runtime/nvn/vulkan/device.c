@@ -947,7 +947,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         // direct vkCmd* calls are the only ones on it. Without the drain they are recorded outside
         // vkBeginCommandBuffer / a render pass and dropped (validation: VUID-vkCmdDrawIndexed-commandBuffer-recording)
         // - the menu, the FPS counter and the name dialog were all invisible because of that.
-        rec_drain();
+        extern bool menu_wants_render(void);  // (ui/menu.h, C linkage)
+        if (menu_wants_render()) rec_drain();  // (nothing to draw: no drain, the recorder keeps its pipeline)
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         pp_mark(PP_OVERLAY);
         static long win_shot = -1;
