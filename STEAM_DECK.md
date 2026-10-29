@@ -1,7 +1,8 @@
 # Steam Deck branch
 
 **Target:** Steam Deck / SteamOS, Linux x86-64, Vulkan, Game Mode. The template runtime now builds on x86-64 Linux with
-the Vulkan backend and UI; per-game ports and Deck integration are the remaining work.
+the Vulkan backend and UI; per-game ports and Deck integration are the remaining work. Build it locally in an x86-64
+Linux container or on a Deck.
 
 ## What was removed
 
@@ -21,8 +22,6 @@ the Vulkan backend and UI; per-game ports and Deck integration are the remaining
 3. **Linux template build**: `examples/game-template` compiles and links on Ubuntu 25.04 x86-64 with SDL3, FFmpeg,
    Vulkan, shaderc and VMA. The generic hooks for LAS-specific cosmetics (`runtime/recolour.h`, `runtime/texpatch.h`,
    `runtime/nvn/game_hooks_stub.c`) are no-ops; a game overrides them.
-4. **CI**: `.github/workflows/linux.yml` builds the template and smoke-tests `--describe`.
-
 ## What is still missing
 
 1. **A real game port** built and run through the Vulkan backend on a Deck; the template only proves the build.
