@@ -690,6 +690,14 @@ static void prep_throttle(const volatile int *cancel) {
     }
 }
 
+// A wall-clock cap on one preparation run: a build that never finishes (a driver taking minutes on one shader) used to
+// keep the workers busy for as long as the game ran. NXRT_PREP_SECONDS=<n> (0: no cap).
+static bool prep_time_is_up(double t0) {
+    static double cap = -1;
+    if (cap < 0) { const char *e = getenv("NXRT_PREP_SECONDS"); cap = e ? atof(e) : 20.0; }
+    return cap > 0 && ms_now() - t0 > cap * 1000.0;
+}
+
 static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel);
 bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
     static pthread_mutex_t one = PTHREAD_MUTEX_INITIALIZER;  // (one run at a time: the index, the translator)
@@ -776,7 +784,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
     int done = 0, prepared = 0, missing = 0, failed = 0, prepared_seen = 0;
     for (int own = 0; own < 2; own++) {  // the shipped list, then the player's own
-        for (char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel); line = next) {
+        for (char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel) && !prep_time_is_up(t0); line = next) {
             next = strchr(line, '\n');
             if (next)
                 *next++ = 0;

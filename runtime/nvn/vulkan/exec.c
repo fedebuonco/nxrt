@@ -4515,6 +4515,13 @@ static void prep_pipeline(void *arg) {
 
 bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlob *fsb) {
     if (r->kind == 'C') {
+        // Not prepared: KTGL's compute shaders translate to very large GLSL (13,000 instructions, before the BRX fix
+        // 700 KB) and the driver took minutes on some of them - as background work that is a build thread pegged for
+        // minutes after a start, competing with the game (measured: four of them, the game at 8 fps). They still build
+        // at first use, asynchronously and only when the game actually needs them.
+        static int skip = -1;
+        if (skip < 0) skip = !getenv("NXRT_PREP_COMPUTE");
+        if (skip) return false;
         uint64_t ck = cs_content_key(r->vs, r->local);
         if (PREP_GET(prep_cs, ck)) return true;
         CsProg *cp = calloc(1, sizeof *cp);
