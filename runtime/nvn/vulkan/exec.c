@@ -810,6 +810,7 @@ static struct {
     bool rt_dirty;
     NvnProgram *program;
     NvnProgram *prog_vs, *prog_fs;  // stages bound separately (nvnCommandBufferBindProgram takes a stage mask)
+    NvnProgram *prog_cs;            // the compute program: its own, so unbinding it keeps the draw program
     NvnProgram merged;               // the two stages as one program (st.program points here while they differ)
     uint8_t blend[8][8];
     uint32_t channel_mask;
@@ -3703,8 +3704,8 @@ static void gfast_prepare(VkCommandBuffer cb) {
     if (!m) return;
     if (getenv("NXRT_LOG_GFAST")) {  // (debug) =<shader code address hex>: that shader's first tables
         static int nlog;
-        if (st.program->stages[5].code_addr == strtoull(getenv("NXRT_LOG_GFAST"), NULL, 16) && nlog++ < 40) {
-            LOG("[gfast] cs %llx: %d ranges, %llu KB:", (unsigned long long)st.program->stages[5].code_addr, m, (unsigned long long)(off >> 10));
+        if (st.prog_cs->stages[5].code_addr == strtoull(getenv("NXRT_LOG_GFAST"), NULL, 16) && nlog++ < 40) {
+            LOG("[gfast] cs %llx: %d ranges, %llu KB:", (unsigned long long)st.prog_cs->stages[5].code_addr, m, (unsigned long long)(off >> 10));
             for (int i = 0; i < m; i++) LOG(" %llx+%llx", (unsigned long long)(r[i].lo + HEAP_BASE), (unsigned long long)(r[i].hi - r[i].lo));
             LOG("\n");
         }
@@ -4585,22 +4586,22 @@ static void gpl_probe(void) {}
 
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
-    if (!st.program || !gx || !gy || !gz) return;
-    CsProg *cp = compute_program(st.program);
+    if (!st.prog_cs || !gx || !gy || !gz) return;
+    CsProg *cp = compute_program(st.prog_cs);
     if (!cp || atomic_load(&cp->p.state) != 1) { SKIP_CS(!cp ? SK_NO_STAGES : atomic_load(&cp->p.state) == 2 ? SK_CS_FAILED : SK_CS_BUILDING); return; }
     {   // NXRT_SKIP_CS=<code address hex> (debug): skip that compute shader's dispatches, to see what it does
         static uint64_t skip = ~0ull;
         if (skip == ~0ull) { const char *e = getenv("NXRT_SKIP_CS"); skip = e ? strtoull(e, NULL, 16) : 0; }
-        if (skip && st.program->stages[5].code_addr == skip) { SKIP_CS(SK_DEBUG_SKIP); return; }
+        if (skip && st.prog_cs->stages[5].code_addr == skip) { SKIP_CS(SK_DEBUG_SKIP); return; }
     }
     if (cp->si->uses_gmem && getenv("NXRT_LOG_CS_SBUF")) {  // (debug) the storage buffers bound to gmem dispatches
         static uint64_t seen_cs[16];
         static int seen_n[16];
         int k = 0;
-        while (k < 15 && seen_cs[k] && seen_cs[k] != st.program->stages[5].code_addr) k++;
-        seen_cs[k] = st.program->stages[5].code_addr;
+        while (k < 15 && seen_cs[k] && seen_cs[k] != st.prog_cs->stages[5].code_addr) k++;
+        seen_cs[k] = st.prog_cs->stages[5].code_addr;
         if (seen_n[k]++ < 24) {
-            LOG("[cs] %llx %ux%ux%u:", (unsigned long long)st.program->stages[5].code_addr, gx, gy, gz);
+            LOG("[cs] %llx %ux%ux%u:", (unsigned long long)st.prog_cs->stages[5].code_addr, gx, gy, gz);
             for (int i = 0; i < 16; i++)
                 if (st.sbuf[5][i].addr) LOG(" sb%d %llx+%llx", i, (unsigned long long)st.sbuf[5][i].addr, (unsigned long long)st.sbuf[5][i].size);
             LOG("\n");
@@ -4610,11 +4611,11 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx gmem %d", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
-            (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
-    dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
+            (unsigned long long)st.prog_cs->stages[5].code_addr, cp->si->uses_gmem);
+    dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.prog_cs->stages[5].code_addr, cp->si->uses_gmem);
     nfeedback = 0;
     if (ct_on()) {
-        LOG("[ct] dispatch cs %llx %ux%ux%u | tex", (unsigned long long)st.program->stages[5].code_addr, gx, gy, gz);
+        LOG("[ct] dispatch cs %llx %ux%ux%u | tex", (unsigned long long)st.prog_cs->stages[5].code_addr, gx, gy, gz);
         for (int i = 0; i < cp->si->ntex; i++) {
             NvnTexture *t = shader_texture_object(5, &cp->si->tex[i]);
             if (t) LOG(" %s%p/%#x", cp->si->tex[i].is_image ? "I:" : "", (void *)t, t->format);
@@ -6172,7 +6173,7 @@ static void exec_list(uint64_t handle, int depth) {
             // character silhouettes, 1,242 "no program" skips per interval).
             if (mask & 1u) st.prog_vs = np;
             if (mask & 2u) st.prog_fs = np;
-            if (mask & 0x20u) { st.program = np; break; }  // compute: a program of its own
+            if (mask & 0x20u) { st.prog_cs = np; break; }  // compute: a program of its own (KTGL unbinds it with NULL)
             if (!(mask & 3u)) break;                       // geometry / tessellation: nothing this backend draws with
             if (st.prog_vs && st.prog_fs && st.prog_vs != st.prog_fs) {
                 st.merged = *st.prog_vs;
