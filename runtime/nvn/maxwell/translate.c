@@ -237,7 +237,9 @@ static void icmp_expr(char *out, int op, const char *a, const char *b, bool is_s
 // vertex shader provides is declared, and the attribute picked by index (an address outside them reads 0); the
 // component and the interpolation as for a fixed address.
 static void attr_load_indexed(Ctx *c, int dst, uint32_t addr, const char *idx) {
-    if (c->stage != STAGE_FRAGMENT || c->glsl) { fail(c, "indexed attribute load outside a fragment shader"); return; }
+    // (the body below is dialect-neutral: glsl_rewrite maps float4/as_type, and `in.v%d` is the fragment input struct
+    // in both dialects - so GLSL can index the declared inputs through the same if-chain)
+    if (c->stage != STAGE_FRAGMENT) { fail(c, "indexed attribute load outside a fragment shader"); return; }
     uint32_t avail = c->key ? c->key->vs_out_mask : 0;
     if (!avail) { fail(c, "indexed attribute load without the vertex shader's outputs"); return; }
     c->in_attr_mask |= avail;
