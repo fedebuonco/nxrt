@@ -78,10 +78,20 @@ RT_API void rt_dispatch_ic(Cpu *c);  // call the function at c->pc, filling the 
         __attribute__((musttail)) return rt_dispatch_ic(c);                                  \
     } while (0)
 
+#if defined(__aarch64__)
 static inline uint64_t rt_get_fpcr(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }
 static inline uint64_t rt_get_fpsr(void) { uint64_t v; __asm__ volatile("mrs %0, fpsr" : "=r"(v)); return v; }
 static inline void rt_set_fpcr(uint64_t v) { __asm__ volatile("msr fpcr, %0" :: "r"(v)); }
 static inline void rt_set_fpsr(uint64_t v) { __asm__ volatile("msr fpsr, %0" :: "r"(v)); }
+#else
+// The guest's FPCR/FPSR have no x86 equivalent; keep their architectural values per host thread so generated code
+// that saves/restores them still round-trips (rounding-mode changes are applied by the lifter, not here).
+static _Thread_local uint64_t g_fpcr, g_fpsr;
+static inline uint64_t rt_get_fpcr(void) { return g_fpcr; }
+static inline uint64_t rt_get_fpsr(void) { return g_fpsr; }
+static inline void rt_set_fpcr(uint64_t v) { g_fpcr = v; }
+static inline void rt_set_fpsr(uint64_t v) { g_fpsr = v; }
+#endif
 
 // ---- memory: guest addresses are host addresses (the Switch layout at 0x70_0000_0000, as is)
 typedef uint16_t __attribute__((aligned(1), may_alias)) u16u;

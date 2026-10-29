@@ -19,7 +19,6 @@
 
 const char *g_romfs_dir;
 int g_start_screen;                  // (runtime/nxgame.h) the start screen is up: nothing of the game is loaded
-char g_window_shot_request[256];     // (runtime/nxgame.h) test hook: save the next presented frame here
 
 // Generated code at a variant site (gen.py --game: the game's VARIANTS): the instruction word to run, 0 = original
 uint32_t nx_code_variant(uint64_t addr) { return NX_HOOK(code_variant) ? NX_HOOK(code_variant)(addr) : 0; }
@@ -200,7 +199,7 @@ void reboot_test_frame(uint64_t frame) {
     rt_request_reboot(RT_REBOOT_GAME);
 }
 
-extern const ResetFn __start_resets[], __stop_resets[];  // (ELF: defined by the linker)
+extern const ResetFn __start_rt_reset[], __stop_rt_reset[];  // (ELF: the rt_reset section)
 
 void backend_reset(void);             // renderer: GPU idle, game textures and address-keyed caches dropped
 void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (re-wrap the heap)
@@ -218,7 +217,7 @@ static void teardown(void) {
     kernel_stop_threads(reboot_idle);
     backend_clear_window();
     backend_reset();
-    const ResetFn *start = __start_resets, *stop = __stop_resets;
+    const ResetFn *start = __start_rt_reset, *stop = __stop_rt_reset;
     __asm__("" : "+r"(start), "+r"(stop));  // separate objects: keep the compiler from reasoning about them
     int n = 0;
     for (const ResetFn *p = start; p < stop; p++)

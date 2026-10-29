@@ -1,5 +1,6 @@
 // Data root and shipped resources (runtime/paths.h).
 #include <SDL3/SDL.h>
+#include <SDL3_image/SDL_image.h>
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
@@ -699,7 +700,7 @@ void rt_paths_restart(void) {
 void rt_window_icon(SDL_Window *w) {
     char p[1100];
     if (!rt_resource("icon.png", NULL, p, sizeof p)) return;
-    SDL_Surface *s = SDL_LoadPNG(p);
+    SDL_Surface *s = IMG_Load(p);
     if (s) SDL_SetWindowIcon(w, s), SDL_DestroySurface(s);
 }
 

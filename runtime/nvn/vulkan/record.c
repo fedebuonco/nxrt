@@ -49,7 +49,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "../../platform.h"
+#include "../../../platform/platform.h"
 #include "../rqueue.h"
 
 // ================================================================== the ring

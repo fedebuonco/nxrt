@@ -28,8 +28,12 @@ static int override_count;
 
 // Host implementations registered by name (runtime/hle/*.c fill this via HLE_FUNC)
 typedef struct { const char *name; HostFn fn; } HleImpl;
+#if defined(__APPLE__)
 extern const HleImpl __start_hle_impls[] __asm__("section$start$__DATA$__hle_impls");
 extern const HleImpl __stop_hle_impls[] __asm__("section$end$__DATA$__hle_impls");
+#else
+extern const HleImpl __start_hle_impls[], __stop_hle_impls[];  // (ELF: defined by the linker)
+#endif
 
 HostFn hle_lookup_impl(const char *name) {
     const char *skip = getenv("NXRT_HLE_SKIP");  // debugging: disable HLE for names containing this
@@ -204,7 +208,12 @@ void rt_dispatch_ic(Cpu *c) {
     unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
     GuestFn f = dcache[h].addr == pc && dcache[h].fn ? dcache[h].fn : dispatch_slow(c);
     uint64_t key = pc ^ __atomic_load_n(&g_ic_epoch, __ATOMIC_RELAXED);
+#if defined(__x86_64__)
+    __int128 pair = ((__int128)(uint64_t)f << 64) | key;  // one 16-byte store (cmpxchg16b / movdqa)
+    __atomic_store((__int128 *)ic, &pair, __ATOMIC_RELEASE);
+#else
     __asm__ volatile("stp %1, %2, %0" : "=Q"(*ic) : "r"(key), "r"(f));
+#endif
     __attribute__((musttail)) return f(c);
 }
 

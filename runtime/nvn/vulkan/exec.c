@@ -22,7 +22,7 @@
 #include "record.h"
 #include "../renderer.h"
 #include "../pace.h"
-#include "../recolour.h"
+#include "../../recolour.h"
 #include "../screen_filter.h"
 #include "../shader_prep.h"
 #include "../../settings.h"

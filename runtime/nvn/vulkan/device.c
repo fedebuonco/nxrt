@@ -1,6 +1,7 @@
 // Vulkan device, window, swapchain and presentation (counterpart of the window/present half of metal.m).
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
+#include <SDL3_image/SDL_image.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -8,11 +9,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "../../paths.h"
+#include "../../../platform/paths.h"
 #include "../../rt.h"  // (HEAP_MAX: lazy_heap_predicted)
 #include "../../settings.h"
 #include "../../nxgame.h"
-#include "../../ui/menu.h"
+#include "../../../ui/menu.h"
 #include "../rqueue.h"
 #include "vk.h"
 #include "record.h"
@@ -21,10 +22,12 @@
 #include "nx_app.h"
 #include "../pace.h"
 #include "../shader_prep.h"
+#include "../../../input/input_host.h"
 #include <pthread.h>
 
 VkG g_vk;
 static SDL_Window *window;
+SDL_Window *vk_ui_window(void) { return window; }
 
 // The system memory heap a whole-heap import (exec.c host_import) lands in and what it can hold: the largest heap with
 // a host-visible memory type that isn't device-local (all of them device-local: the largest host-visible one), the
@@ -797,7 +800,7 @@ void vk_frame_end(const char *shot_path) {
 
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) {
     SDL_Surface *s = SDL_CreateSurfaceFrom((int)w, (int)h, SDL_PIXELFORMAT_ABGR8888, (void *)rgba, (int)w * 4);
-    if (!s || !SDL_SavePNG(s, path)) LOG("[vk] saving %s failed: %s\n", path, SDL_GetError());
+    if (!s || !IMG_SavePNG(s, path)) LOG("[vk] saving %s failed: %s\n", path, SDL_GetError());
     else LOG("[vk] saved %s (%ux%u)\n", path, w, h);
     SDL_DestroySurface(s);
 }

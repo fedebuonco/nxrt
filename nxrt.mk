@@ -60,8 +60,8 @@ GENFLAGS += $(GENARCH) -fPIC
 OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the same size)
 SHADERC  ?= -lshaderc  # (Debian / Ubuntu's libshaderc.so; a shaderc built from source: -lshaderc_shared)
 # -rdynamic: crash backtraces name host functions (runtime/platform/linux.c)
-LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
-            -lvulkan $(SHADERC) -lpthread -ldl -lm
+LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lSDL3_image -lavformat -lavcodec -lavutil -lswscale \
+            -lvulkan $(SHADERC) -lpthread -ldl -lm -latomic
 BACKEND_SRC := $(wildcard $(RT)/nvn/vulkan/*.c) $(wildcard $(RT)/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst $(RT)/%.cpp,$(B)/rt/%.o,$(patsubst $(RT)/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 IMGUI_OBJ = $(NX_IMGUI_OBJ) $(B)/imgui/imgui_impl_vulkan.o
@@ -171,7 +171,7 @@ $(B)/game/%.o: %.mm $(RT_HDRS) $(GAME_HDRS)
 IMGUI_OBJ ?= $(NX_IMGUI_OBJ)
 $(EXE): $(NX_OBJ) $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(GAME_OBJ) $(IMGUI_OBJ)
 	@mkdir -p $(dir $@)link
-	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
+	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS) -Wl,--error-limit=0
 	mv -f $(dir $@)link/$(notdir $@) $@
 
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)

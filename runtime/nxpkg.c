@@ -15,7 +15,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__aarch64__)
 #include <arm_neon.h>
+#endif
 
 
 #define WHY(...) (snprintf(why, why_size, __VA_ARGS__), false)
@@ -115,9 +117,14 @@ static void ctr_inc(uint8_t c[16]) {
 }
 
 static bool have_arm_aes(void) {
-    return true;  // every Apple Silicon CPU
+#if defined(__aarch64__)
+    return true;
+#else
+    return false;  // x86-64 uses the software AES below
+#endif
 }
 
+#if defined(__aarch64__)
 __attribute__((target("aes"))) static void ctr_arm(const uint8_t rk[176], uint8_t ctr[16], uint8_t *data, size_t len) {
     uint8x16_t k[11];
     for (int i = 0; i < 11; i++) k[i] = vld1q_u8(rk + 16 * i);
@@ -136,14 +143,17 @@ __attribute__((target("aes"))) static void ctr_arm(const uint8_t rk[176], uint8_
         ctr_inc(ctr);
     }
 }
+#endif
 
 void nx_aes128_ctr(const uint8_t key[16], const uint8_t iv[16], uint8_t *data, size_t len) {
     uint8_t rk[176], ctr[16];
     aes_expand(key, rk);
     memcpy(ctr, iv, 16);
+#if defined(__aarch64__)
     static int arm = -1;
     if (arm < 0) arm = have_arm_aes();
     if (arm) { ctr_arm(rk, ctr, data, len); return; }
+#endif
     while (len) {
         uint8_t ks[16];
         memcpy(ks, ctr, 16);

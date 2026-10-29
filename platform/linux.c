@@ -458,3 +458,12 @@ bool plat_onedrive_synced(const char *dir) { (void)dir; return false; }
 // End the process at once, skipping the library teardown: as on Windows, the GPU driver's threads crashed in exit()
 // while the game's threads still submitted work.
 void plat_terminate(void) { _exit(0); }
+
+// ---- thread helpers the runtime expects (macOS uses QoS classes; Linux has names and affinity only)
+#include <pthread.h>
+void plat_thread_core(int role) { (void)role; }
+void plat_thread_name(const char *name) {
+    if (name && *name) pthread_setname_np(pthread_self(), name);
+}
+void *plat_thread_qos_override_start(pthread_t t, int prio) { (void)t, (void)prio; return NULL; }
+void plat_thread_qos_override_end(void *override) { (void)override; }

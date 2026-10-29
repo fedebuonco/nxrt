@@ -12,7 +12,11 @@ typedef struct { const char *name; HostFn fn; } HleImplEntry;
 // HLE_FUNC("mangled_symbol", c_function) binds a guest import to a host function.
 #define HLE_CAT2(a, b) a##b
 #define HLE_CAT(a, b) HLE_CAT2(a, b)
+#if defined(__APPLE__)
 #define HLE_SECTION "__DATA,__hle_impls"
+#else
+#define HLE_SECTION "hle_impls"
+#endif
 #define HLE_FUNC(sym, fn)                                                                   \
     static void fn(Cpu *c);                                                                 \
     __attribute__((used, section(HLE_SECTION))) static const HleImplEntry                   \
@@ -24,7 +28,11 @@ typedef struct { const char *name; HostFn fn; } HleImplEntry;
 // guest memory is wiped: drop guest pointers, kernel handles, seed data and lazily-initialised state, so the next
 // boot starts as from a fresh process. (Settings, the window, the GPU device and ENV() lookups stay.)
 typedef void (*ResetFn)(void);
+#if defined(__APPLE__)
 #define RESET_SECTION "__DATA,__rt_reset"
+#else
+#define RESET_SECTION "rt_reset"
+#endif
 #define RT_ON_RESET(fn)                                                                     \
     static void fn(void);                                                                   \
     __attribute__((used, section(RESET_SECTION))) static const ResetFn                      \

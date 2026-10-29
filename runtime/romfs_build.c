@@ -13,7 +13,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <sys/clonefile.h>
 
 #define EMPTY 0xFFFFFFFFu
 
@@ -227,7 +226,9 @@ void romfs_layout_free(RomfsLayout *l) {
 static bool copy_file(const char *src, const char *dst, uint64_t size, uint64_t *done, uint64_t total,
                       void (*progress)(uint64_t, uint64_t)) {
     remove(dst);
+#if defined(__APPLE__)
     if (clonefile(src, dst, 0) == 0) goto linked;  // (APFS: a copy-on-write clone, instant)
+#endif
     if (link(src, dst) == 0) goto linked;  // (same volume: a hard link)
     {
         FILE *in = fopen(src, "rb"), *out = in ? fopen(dst, "wb") : NULL;

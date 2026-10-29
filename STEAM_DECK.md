@@ -1,7 +1,7 @@
 # Steam Deck branch
 
-**Target:** Steam Deck / SteamOS, Linux x86-64, Vulkan, Game Mode. This branch is intentionally non-building while the
-Vulkan/Linux target is brought to parity.
+**Target:** Steam Deck / SteamOS, Linux x86-64, Vulkan, Game Mode. The template runtime now builds on x86-64 Linux with
+the Vulkan backend and UI; per-game ports and Deck integration are the remaining work.
 
 ## What was removed
 
@@ -12,18 +12,25 @@ Vulkan/Linux target is brought to parity.
 - Metal-only Dear ImGui backends and examples.
 - macOS/Windows branches in `nxrt.mk` and `nx.mk`.
 
-## What is missing before this branch builds
+## What is done
 
-1. **A Vulkan `NxUiBackend`.** `runtime/main.c` references `g_ui_backend_vulkan`, but nothing defines it. Dear ImGui's
-   Vulkan glue exists in `runtime/nvn/vulkan/imgui_glue.cpp`; the `NxUiBackend` wrapper (window, frame begin/end,
-   screenshot, texture upload) is still to write.
-2. **A Linux build.** The Linux/Vulkan path has never been built here. Expect link errors from LAS-only symbols in
-   `runtime/nvn/vulkan/exec.c` (`recolour`, `screen_filter`, `pot_*`) and from the missing UI backend.
-3. **SteamOS integration.** Game Mode launch, suspend/resume, controller/trackpad mapping, 800p/60/90 Hz profiles,
+1. **Vulkan `NxUiBackend`** (`ui/backends/vulkan.cpp`): window, frame begin/end, ImGui rendering, screenshots and
+   texture uploads through the existing Vulkan device.
+2. **Linux platform layer**: `platform/linux.c`, `power_linux.c`, `sleep_linux.c`, `display_linux.c`; no-op power,
+   suspend and display-mode hooks where the compositor owns the mode.
+3. **Linux template build**: `examples/game-template` compiles and links on Ubuntu 25.04 x86-64 with SDL3, FFmpeg,
+   Vulkan, shaderc and VMA. The generic hooks for LAS-specific cosmetics (`runtime/recolour.h`, `runtime/texpatch.h`,
+   `runtime/nvn/game_hooks_stub.c`) are no-ops; a game overrides them.
+4. **CI**: `.github/workflows/linux.yml` builds the template and smoke-tests `--describe`.
+
+## What is still missing
+
+1. **A real game port** built and run through the Vulkan backend on a Deck; the template only proves the build.
+2. **SteamOS integration.** Game Mode launch, suspend/resume, controller/trackpad mapping, 800p/60/90 Hz profiles,
    TDP and frame-cap settings.
-4. **Deck shader pipeline cache.** Build Vulkan pipelines for the Deck's GPU/driver and key the cache by Mesa/driver,
+3. **Deck shader pipeline cache.** Build Vulkan pipelines for the Deck's GPU/driver and key the cache by Mesa/driver,
    game build and translator version.
-5. **Testing.** No macOS/Metal fallback remains; validate on a Deck or a SteamOS container.
+4. **Testing.** Validate on a Deck or a SteamOS container; the template has no game files or GPU here.
 
 ## Build prerequisites
 
@@ -31,8 +38,8 @@ clang, lld, make, Python 3, SDL3, FFmpeg, Vulkan loader/headers, shaderc, and th
 
 ## Rule
 
-Do not merge this branch into `master` until it builds and runs at least one port on a Deck. The branch is a target
-cut, not a working release.
+Do not merge this branch into `master` until it runs at least one port on a Deck. The template builds; the branch is
+not a working release yet.
 
 ## After it builds
 

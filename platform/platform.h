@@ -78,6 +78,9 @@ typedef struct {
 void plat_system_info(PlatSysInfo *si);
 bool plat_exe_path(char *buf, size_t size);
 void plat_exec(char *const argv[]);  // replace the process (NULL = same command line); returns only on failure
+void plat_terminate(void);  // exit the process now (the window/UI may still be running)
+int plat_cpu_count(void);  // CPUs available to this process (affinity mask where the OS has one)
+void plat_write_tracking_off(const char *why);  // stop page write tracking (the guest heap became host memory)
 
 // Child processes (seed generator, game-file extraction). stdout + stderr go to log_path (NULL = /dev/null).
 typedef intptr_t PlatProc;  // 0 = failed to start

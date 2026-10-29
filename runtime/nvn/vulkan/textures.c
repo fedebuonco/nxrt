@@ -13,7 +13,7 @@
 #include "../astc.h"
 #include "../tex_hash.h"
 #include "../renderer.h"
-#include "../texpatch.h"
+#include "../../texpatch.h"
 
 // ================================================================== formats
 typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;

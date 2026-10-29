@@ -1,5 +1,6 @@
 #include "custom_tex.h"
 #include "../settings.h"
+#include <SDL3_image/SDL_image.h>
 #include <dirent.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -69,7 +70,7 @@ static SDL_Surface *load(const CustomTex *e) {
     uint32_t w = (uint32_t)header[16] << 24 | header[17] << 16 | header[18] << 8 | header[19];
     uint32_t h = (uint32_t)header[20] << 24 | header[21] << 16 | header[22] << 8 | header[23];
     if (!w || !h || w > 16384 || h > 16384 || (uint64_t)w * h > (64ull << 20)) return NULL;
-    SDL_Surface *s = SDL_LoadPNG(e->path);
+    SDL_Surface *s = IMG_Load(e->path);
     if (!s) { fprintf(stderr, "[custom_tex] cannot load %s: %s\n", e->path, SDL_GetError()); return NULL; }
     SDL_Surface *rgba = SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGBA32);
     SDL_DestroySurface(s);

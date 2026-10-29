@@ -75,7 +75,11 @@ Service *service_lookup(const char *name);  // from the registry (services/*.c)
 void ipc_return_object(IpcResp *resp, Service *s);
 
 typedef struct { const char *name; ServiceHandler handler; } ServiceDef;
+#if defined(__APPLE__)
 #define SERVICE_SECTION "__DATA,__services"
+#else
+#define SERVICE_SECTION "services"
+#endif
 #define SERVICE(sname, fn)                                                                  \
     static void fn(Service *s, IpcReq *req, IpcResp *resp);                                 \
     __attribute__((used, section(SERVICE_SECTION))) static const ServiceDef                 \

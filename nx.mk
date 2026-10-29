@@ -28,25 +28,28 @@ IMGUI ?= $(NXRT)/third_party/imgui
 
 NX_DEPINC  ?= $(if $(DEPS),-I$(DEPS)/include)
 NX_UIFLAGS ?= -x c++ $(OSFLAGS)
-NX_LDFLAGS ?= $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lpthread
+NX_LDFLAGS ?= $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lSDL3_image -lpthread
 
-NX_PLATFORM_SRC := $(NXRT)/platform/app.c $(NXRT)/platform/paths.c $(NXRT)/platform/nx_log.c $(NXRT)/platform/power_$(PLATFORM).c $(NXRT)/platform/sleep_$(PLATFORM).m $(NXRT)/platform/display_match.c $(NXRT)/platform/display_$(PLATFORM).m $(NXRT)/platform/$(PLATFORM).c
+NX_PLATFORM_SRC := $(NXRT)/platform/app.c $(NXRT)/platform/paths.c $(NXRT)/platform/nx_log.c \
+                   $(NXRT)/platform/power_$(PLATFORM).c $(NXRT)/platform/sleep_$(PLATFORM).c \
+                   $(NXRT)/platform/display_match.c $(NXRT)/platform/display_$(PLATFORM).c $(NXRT)/platform/$(PLATFORM).c
 NX_PLATFORM_C   := $(filter %.c,$(NX_PLATFORM_SRC))
 NX_PLATFORM_M   := $(filter %.m,$(NX_PLATFORM_SRC))
 NX_SETTINGS_SRC := $(NXRT)/settings/settings.c
-NX_INPUT_SRC    := $(NXRT)/input/input.c $(NXRT)/input/bindings.c
+NX_INPUT_SRC    := $(NXRT)/input/input.c $(NXRT)/input/bindings.c $(NXRT)/input/input_host.c
 NX_SAVE_SRC     := $(NXRT)/save/save.c
-NX_UI_SRC       := $(wildcard $(NXRT)/ui/*.mm)
+NX_UI_SRC       := $(wildcard $(NXRT)/ui/*.mm) $(NXRT)/ui/backends/vulkan.cpp
 INC_PLATFORM := -I$(NXRT)/platform
 INC_SETTINGS := $(INC_PLATFORM) -I$(NXRT)/settings
 INC_INPUT    := $(INC_SETTINGS) -I$(NXRT)/input
 INC_SAVE     := $(INC_SETTINGS) -I$(NXRT)/save
-INC_UI       := $(INC_INPUT) -I$(NXRT)/save -I$(NXRT)/ui -I$(NXRT)/ui/backends
+INC_UI       := $(INC_INPUT) -I$(NXRT)/save -I$(NXRT)/ui -I$(NXRT)/ui/backends -I$(NXRT)/runtime/nvn/vulkan -I$(NXRT)/runtime/nvn
 NX_HDRS      := $(wildcard $(NXRT)/platform/*.h $(NXRT)/settings/*.h $(NXRT)/input/*.h $(NXRT)/save/*.h $(NXRT)/ui/*.h \
                            $(NXRT)/ui/backends/*.h)
 NX_OBJ   := $(patsubst $(NXRT)/%.c,$(B)/nx/%.o,$(NX_PLATFORM_C) $(NX_SETTINGS_SRC) $(NX_INPUT_SRC) $(NX_SAVE_SRC)) \
             $(patsubst $(NXRT)/%.m,$(B)/nx/%.o,$(NX_PLATFORM_M)) \
-            $(patsubst $(NXRT)/%.mm,$(B)/nx/%.o,$(NX_UI_SRC))
+            $(patsubst $(NXRT)/%.mm,$(B)/nx/%.o,$(filter %.mm,$(NX_UI_SRC))) \
+            $(patsubst $(NXRT)/%.cpp,$(B)/nx/%.o,$(filter %.cpp,$(NX_UI_SRC)))
 NX_IMGUI_OBJ := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.o $(B)/imgui/imgui_widgets.o \
                 $(B)/imgui/imgui_impl_sdl3.o
 
@@ -69,6 +72,12 @@ $(B)/nx/save/%.o: $(NXRT)/save/%.c $(NX_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(NXFLAGS) $(INC_SAVE) -c $< -o $@
 $(B)/nx/ui/%.o: $(NXRT)/ui/%.mm $(NX_HDRS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(NXCXXFLAGS) $(INC_UI) $(NX_UIFLAGS) -c $< -o $@
+$(B)/nx/ui/%.o: $(NXRT)/ui/%.cpp $(NX_HDRS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(NXCXXFLAGS) $(INC_UI) $(NX_UIFLAGS) -c $< -o $@
+$(B)/nx/ui/%.o: $(NXRT)/ui/%.cpp $(NX_HDRS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(NXCXXFLAGS) $(INC_UI) $(NX_UIFLAGS) -c $< -o $@
 
