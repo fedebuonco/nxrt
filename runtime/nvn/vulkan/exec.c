@@ -22,12 +22,14 @@
 #include "record.h"
 #include "../renderer.h"
 #include "../pace.h"
-#include "../../recolour.h"
 #include "../screen_filter.h"
 #include "../shader_prep.h"
 #include "../../settings.h"
+#include "../../nxgame.h"
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
+static NxDraw g_draw;  // the draw as NxGameHooks sees it (runtime/nxgame.h)
+#define RECOLOUR_TINT_FLOATS 16  // NxGameHooks draw_tint / instance_tint
 // (the guest heap for shaders in chunks: with the heap import below)
 static uint32_t gc_shift;
 static uint32_t gmem_chunk_shift(void);
@@ -4737,19 +4739,23 @@ static void draw_(CmdRec *r, bool indexed) {
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
     g_mirror_w = 0;
-    {   // mirror mode (runtime/hle/mirror.c; as renderer.m): the scene's composite into the window image is mirrored
-        extern bool mirror_draw(bool composite);
-        extern bool mirror_scene_size(uint32_t sw, uint32_t sh, uint32_t w, uint32_t h);
+    memset(&g_draw, 0, sizeof g_draw);
+    for (int i = 0; i < 6; i++) {
+        g_draw.ubo[i] = st.ubuf[0][i].addr ? (const float *)(uintptr_t)st.ubuf[0][i].addr : NULL;
+        g_draw.ubo_size[i] = (uint32_t)st.ubuf[0][i].size;
+    }
+    g_draw.mesh = st.vbuf[0].addr;
+    g_draw.instances = indexed ? (uint32_t)r->x[6] : (uint32_t)r->x[4];
+    g_draw.tintable = pr->fi->uses_tint;
+    {   // mirror mode: the scene's composite into the window image is mirrored (the game's draw_mirror hook)
         bool composite = false;
         if (st.rt.ncolor && st.rt.color[0] && renderer_texture_presented(st.rt.color[0]) && !(st.color_state[0] & 1) &&
             r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
             st.viewport[0][2] >= st.rt.color[0]->width && st.viewport[0][3] >= st.rt.color[0]->height && pr->fi->ntex) {
             NvnTexture *t0 = shader_texture_object(1, &pr->fi->tex[0]);
-            composite = t0 && mirror_scene_size(t0->width, t0->height, st.rt.color[0]->width, st.rt.color[0]->height);
-            extern void scene_size_log(bool composite, uint32_t sw, uint32_t sh, uint32_t w, uint32_t h);
-            if (t0) scene_size_log(composite, t0->width, t0->height, st.rt.color[0]->width, st.rt.color[0]->height);
+            composite = t0 && t0->width == st.rt.color[0]->width && t0->height == st.rt.color[0]->height;
         }
-        if (mirror_draw(composite)) {
+        if (NX_HOOK(draw_mirror) && NX_HOOK(draw_mirror)(composite)) {
             vkey.flip_x = fkey.flip_x = true;
             pr = get_program(st.program, &vkey, &fkey);
             if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
@@ -4773,14 +4779,10 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { SKIP(SK_DEBUG_SKIP); return; }
-        extern bool pot_level_active(void);
-        if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { SKIP(SK_HIDDEN); return; }
         if (g_debug_frame && getenv("NXRT_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
-        extern void widescreen_backdrop_seen(uint64_t hash);
-        if (last_hash) widescreen_backdrop_seen(last_hash);
-        extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
-        if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
+        g_draw.fs_hash = last_hash;
+        if (NX_HOOK(draw_shader) && !NX_HOOK(draw_shader)(&g_draw)) { SKIP(SK_HIDDEN); return; }
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
     if (ct_on()) ct_draw(pr, "draw");
@@ -4964,50 +4966,8 @@ static void draw_(CmdRec *r, bool indexed) {
         if (fknown) prof_hook_known++;
     }
 #define FTEX(i) (hook_pass ? ftex[i] : shader_texture_object(1, &pr->fi->tex[i]))
-    {   // the Items page's cursor brackets while the cursor is on the companion card (runtime/hle/pets.c)
-        extern bool pets_hide_item_cursor(void);
-        extern bool texpatch_is_item_cursor(int id);
-        if (pets_hide_item_cursor() && fknown)
-            for (int i = 0; i < pr->fi->ntex; i++) {
-                NvnTexture *t = FTEX(i);
-                const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-                if (b && b->tp > 0 && texpatch_is_item_cursor(b->tp - 1)) { SKIP(SK_HIDDEN); return; }
-            }
-    }
     float tint[RECOLOUR_TINT_FLOATS] = {0};
-    int recol[2] = {0, 0};  // Cosmetics recolour textures' classes (runtime/nvn/recolour.c)
-    if (pr->fi->uses_tint) {
-        for (int i = 0; i < pr->fi->ntex && fknown; i++) {
-            NvnTexture *t = FTEX(i);
-            const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-            if (b && b->tp > 0) recolour_add(recol, recolour_class_of(b->tp - 1));
-        }
-        recolour_tint_draw(recol, tint);  // (the highlights below win)
-        extern bool pot_tint(const float *m, float tint[8], uint64_t mesh);
-        extern bool pot_glow_active(void);
-        // (uniform buffer 2 = the model matrix, hardware cbuf 5 - only when the vertex shader reads it: a binding left
-        // from an earlier draw is another object's matrix)
-        if (((pr->vi->cbuf_mask >> 5) & 1) && st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && pot_glow_active())
-            pot_tint((const float *)(uintptr_t)st.ubuf[0][2].addr, tint, st.vbuf[0].addr);
-        // the gold Escape Bottle (runtime/hle/escape.c): draws sampling the bottle's item icon / model map
-        // and the HUD hearts (heart colour, Cosmetics tab)
-        extern int texpatch_bottle_kind(int id);
-        extern int texpatch_heart_kind(int id);
-        extern void texpatch_heart_tint(int kind, float tint[8]);
-        int bottle = 0, heart = 0;
-        for (int i = 0; i < pr->fi->ntex && fknown; i++) {
-            NvnTexture *t = FTEX(i);
-            const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-            if (b && b->tp > 0 && !bottle) bottle = texpatch_bottle_kind(b->tp - 1);
-            if (b && b->tp > 0 && !heart) heart = texpatch_heart_kind(b->tp - 1);
-        }
-        if (heart) texpatch_heart_tint(heart, tint);
-        if (bottle) {
-            extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
-            int u = bottle == 3 || bottle == 6 ? 3 : 0;  // (fairy / Piece of Power models: their bone matrices - souls.c, triforce.c)
-            escape_bottle_tint(bottle, (const float *)(uintptr_t)st.ubuf[0][u].addr, (uint32_t)st.ubuf[0][u].size, tint);
-        }
-    }
+    if (pr->fi->uses_tint && NX_HOOK(draw_tint)) NX_HOOK(draw_tint)(&g_draw, tint);
     // fragment textures are bound before deciding the viewport (tex_sc / tex_wh), rscale depends on the decision:
     // build the vertex set now and the fragment set after the decision (stage_set fills tex_sc for stage 1).
     if (prof) prof_dyn += SDL_GetTicksNS() - prof_td_;
@@ -5022,22 +4982,21 @@ static void draw_(CmdRec *r, bool indexed) {
         texture_info(1, pr->fi, i, &fii[i], sc, wh, fr);
         tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
         tex_fr[1][i][0] = fr[0]; tex_fr[1][i][1] = fr[1];
-        // the Hint Sheet (runtime/hle/hint_sheet.c): the dungeon map's icon in place of the first bottle's
-        // (tp read after texture_info: its upload check may have identified the texture just now)
-        NvnTexture *t = FTEX(i);
-        const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-        extern int texpatch_bottle_kind(int id);
-        if (b && b->tp > 0 && texpatch_bottle_kind(b->tp - 1) == 1) {
-            extern bool hint_sheet_icon_draw(const float *ui, uint32_t ui_size);
-            extern NvnTexture *texpatch_hint_icon(void);
-            NvnTexture *ht;
-            if (hint_sheet_icon_draw((const float *)(uintptr_t)st.ubuf[0][0].addr, (uint32_t)st.ubuf[0][0].size) &&
-                (ht = texpatch_hint_icon())) {
+        if (b && b->tp > 0 && NX_HOOK(tex_replace)) {
+            NvnTexture *rep = NX_HOOK(tex_replace)(b->tp - 1);
+            if (rep) {
                 static NvnTextureView none;
-                fii[i].imageView = vk_view(ht, &none, false, false, pr->fi->tex[i].type);
+                fii[i].imageView = vk_view(rep, &none, false, false, pr->fi->tex[i].type);
             }
         }
     }
+    g_draw.ntex = 0;
+    for (int i = 0; i < pr->fi->ntex && i < 64 && g_draw.ntex < NX_DRAW_MAX_TEX; i++) {
+        NvnTexture *t = FTEX(i);
+        const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+        if (b && b->tp > 0) g_draw.tex_ids[g_draw.ntex++] = b->tp - 1;
+    }
+    if (NX_HOOK(draw_textures) && !NX_HOOK(draw_textures)(&g_draw)) { SKIP(SK_HIDDEN); return; }
 #undef FTEX
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
     if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
@@ -5049,9 +5008,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 reads_scene = true;
         bool fullscreen_quad = r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
                                st.viewport[0][2] >= st.rt.color[0]->width && st.viewport[0][3] >= st.rt.color[0]->height;
-        extern bool widescreen_ui_pane_partial(const float *u, uint64_t size);  // (a smaller layout pane: boxed UI)
-        bool fullscreen_fill = pr->fi->ntex == 0 && fullscreen_quad &&
-                               !widescreen_ui_pane_partial((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size);
+        bool fullscreen_fill = pr->fi->ntex == 0 && fullscreen_quad;
         if (fullscreen_quad && !reads_scene && pr->fi->ntex == 1 && (tex_sc[1][0][0] != 1 || tex_sc[1][0][1] != 1)) reads_scene = true;
         static uint64_t wide_frame = ~0ull;
         extern uint64_t renderer_exec_frame(void);  // (the frame being translated)
@@ -5074,8 +5031,7 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     {   // camera-attached effects sized for 16:9 are widened with the view (runtime/hle/widescreen.c)
-        extern float widescreen_effect_stretch(uint64_t fs_hash);
-        float k = widescreen_effect_stretch(g_cur_fs_hash);
+        float k = NX_HOOK(draw_effect_stretch) ? NX_HOOK(draw_effect_stretch)(g_cur_fs_hash) : 1.0f;
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
         if (k > 1.0f) { vx -= vw * (k - 1) / 2; vw *= k; }
         set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
@@ -5207,18 +5163,18 @@ static void draw_(CmdRec *r, bool indexed) {
     enum { MAX_RUNS = 64 };
     uint32_t run_at[MAX_RUNS], run_n[MAX_RUNS];
     bool run_gold[MAX_RUNS];
+    float run_tint[MAX_RUNS][RECOLOUR_TINT_FLOATS];
     int nruns = 0;
-    if (pr->fi->uses_tint && (pr->vi->ssbo_read & 1) && st.sbuf[0][0].addr) {
-        extern bool pot_glow_active(void);
-        extern bool pot_instance_gold(const float *m);
+    if (pr->fi->uses_tint && inst > 1 && st.sbuf[0][0].addr && NX_HOOK(instance_tint)) {
         uint64_t recs = st.sbuf[0][0].size / 64;
-        if (pot_glow_active() && (uint64_t)base_inst + inst <= recs) {
+        if ((!NX_HOOK(instances_tinted) || NX_HOOK(instances_tinted)()) && (uint64_t)base_inst + inst <= recs) {
             const float *m = (const float *)(uintptr_t)st.sbuf[0][0].addr;
-            for (uint32_t i = 0; i < inst; i++) {
-                bool g = pot_instance_gold(m + (size_t)(base_inst + i) * 16);
+            for (uint32_t k = 0; k < inst; k++) {
+                float t[RECOLOUR_TINT_FLOATS] = {0};
+                bool g = NX_HOOK(instance_tint)(m + (size_t)(base_inst + k) * 16, t);
                 if (nruns && run_gold[nruns - 1] == g) { run_n[nruns - 1]++; continue; }
-                if (nruns == MAX_RUNS) { nruns = 0; break; }  // (too fragmented: draw as is)
-                run_at[nruns] = i; run_n[nruns] = 1; run_gold[nruns] = g; nruns++;
+                if (nruns == MAX_RUNS) { nruns = 0; break; }
+                run_at[nruns] = k; run_n[nruns] = 1; run_gold[nruns] = g; memcpy(run_tint[nruns], t, sizeof t); nruns++;
             }
             if (nruns == 1 && !run_gold[0]) nruns = 0;
         }
@@ -5227,9 +5183,7 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int ri = 0; ri < nruns; ri++) {
         if (nruns > 1 || run_gold[0]) {  // this run's tint: a fragment set of its own
             float rtint[RECOLOUR_TINT_FLOATS] = {0};
-            extern void pot_gold_tint(float tint[8]);
-            if (run_gold[ri]) pot_gold_tint(rtint);
-            else recolour_tint_draw(recol, rtint);
+            if (run_gold[ri]) memcpy(rtint, run_tint[ri], sizeof rtint);
             uint32_t rdyn[MAX_BIND], nrdyn = 0;
             VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii, rdyn, &nrdyn);
             rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, nrdyn, nrdyn ? rdyn : NULL);

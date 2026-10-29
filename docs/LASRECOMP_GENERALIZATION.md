@@ -41,10 +41,9 @@ The Vulkan renderer predates that split. It called LAS names directly:
 | `widescreen_effect_stretch` | `NX_HOOK(draw_effect_stretch)` |
 | `texpatch_is_item_cursor/bottle_kind/heart_kind` | `NX_HOOK(tex_identify)` + draw hooks |
 
-The Steam Deck branch now uses the hook interface for texture identification/apply, presentation (wide, crop, shape,
-frame end, present tick) and scene names. The draw-time cosmetic hooks still have generic no-op stubs in
-`runtime/nvn/game_hooks_stub.c` / `texpatch_stub.c`; those are the next conversion, and a real LAS port supplies its
-own implementations through `NxGameHooks` instead.
+The Steam Deck branch now uses the hook interface for texture identification/apply/replace, presentation (wide, crop,
+shape, frame end, present tick), scene names, per-draw shader/texture/tint hooks, mirror, effect stretch and instanced
+tints. There are no LAS symbols in the Vulkan runtime; a game supplies its own implementations through `NxGameHooks`.
 
 ## Rule for the Steam Deck branch
 

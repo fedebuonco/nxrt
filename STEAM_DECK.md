@@ -30,10 +30,7 @@ the Vulkan backend and UI; per-game ports and Deck integration are the remaining
    TDP and frame-cap settings.
 3. **Deck shader pipeline cache.** Build Vulkan pipelines for the Deck's GPU/driver and key the cache by Mesa/driver,
    game build and translator version.
-4. **Draw-time hooks.** The Vulkan draw path still has generic no-op stubs for LAS's cosmetic hooks
-   (`game_hooks_stub.c`, `texpatch_stub.c`); texture identification/apply and presentation already use `NxGameHooks`.
-   See [`docs/LASRECOMP_GENERALIZATION.md`](docs/LASRECOMP_GENERALIZATION.md).
-5. **Testing.** Validate on a Deck or a SteamOS container; the template has no game files or GPU here.
+4. **Testing.** Validate on a Deck or a SteamOS container; the template has no game files or GPU here.
 
 ## Build prerequisites
 

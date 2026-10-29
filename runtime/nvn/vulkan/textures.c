@@ -214,9 +214,8 @@ bool renderer_texture_first_write(NvnTexture *t) {
 
 static uint32_t g_level_gen = 1;
 void vk_level_change_check(void) {
-    extern const char *game_level_name(void);
     static char last[64];
-    const char *lv = game_level_name();
+    const char *lv = NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "";
     if (strncmp(lv, last, sizeof last - 1) != 0) {
         strlcpy(last, lv, sizeof last);
         if (!strncmp(lv, "TelephoneBox", 12) || getenv("NXRT_CLEAR_ALL_LEVELS")) g_level_gen++;
