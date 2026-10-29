@@ -943,6 +943,11 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (menu_at < 0) menu_at = getenv("NXRT_MENU_AT") ? atol(getenv("NXRT_MENU_AT")) : 0;
         if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
         // (ImGui records into cb itself: menu_render drains the recorder right before, when it draws anything)
+        // The recorder owns cb's recording (record.c): everything queued so far is recorded first, then the overlay's
+        // direct vkCmd* calls are the only ones on it. Without the drain they are recorded outside
+        // vkBeginCommandBuffer / a render pass and dropped (validation: VUID-vkCmdDrawIndexed-commandBuffer-recording)
+        // - the menu, the FPS counter and the name dialog were all invisible because of that.
+        rec_drain();
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         pp_mark(PP_OVERLAY);
         static long win_shot = -1;
