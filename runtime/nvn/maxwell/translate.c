@@ -2429,7 +2429,11 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         while (w * 4 < (int)bytes) w *= 2;
         c->smem_words = w;
     }
-    if (stage != STAGE_COMPUTE && getenv("NXRT_LMEM_SIZED") && atoi(getenv("NXRT_LMEM_SIZED"))) {
+    // Local memory as the program header declares it: the array is indexed at run time, so the GPU keeps all of it in
+    // memory per thread, and 1 KB a thread is enough scratch to cost occupancy (a deferred-lighting fragment shader in
+    // Fire Emblem: Three Houses carries lmem[256] and its pass is 13-30 ms). The declared size is what the hardware
+    // wraps at, so this is the faithful one too. NXRT_LMEM_SIZED=0: the old fixed 1 KB array.
+    if (stage != STAGE_COMPUTE && (!getenv("NXRT_LMEM_SIZED") || atoi(getenv("NXRT_LMEM_SIZED")) != 0)) {
         uint32_t bytes = (*(const uint32_t *)(sph + 4) & 0xFFFFFFu) + (*(const uint32_t *)(sph + 8) & 0xFFFFFFu);
         if (bytes && bytes <= LMEM_WORDS * 4u) {
             int w = 4;
