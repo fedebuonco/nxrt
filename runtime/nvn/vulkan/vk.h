@@ -115,7 +115,7 @@ typedef struct TexBackend {
     uint8_t astc_bw, astc_bh;  // ASTC without GPU support: decoded to RGBA8 on upload (runtime/nvn/astc.c)
     bool astc_srgb;
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
-    uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
+    uint32_t tp_gen;     // tex_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
     // (g_vk.lean_usage) the only formats views of this image may have: nview_fmt 0 = any compatible one
     VkFormat view_fmt[2];
