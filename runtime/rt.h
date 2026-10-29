@@ -109,6 +109,7 @@ int ui_run(void);  // window loop; returns the reboot kind requested (the window
 
 // ---- helpers
 void guest_call(Cpu *c, uint64_t addr);   // call guest function at addr (saves/restores x30)
+void rt_trace_frames(Cpu *c, int n);  // guest call chain with symbols (diagnostics)
 const char *hle_name_at(uint64_t pc);  // the HLE function behind a stub address (diagnostics)
 uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if missing
 void *hle_alloc(uint64_t size);           // zeroed guest-visible memory (never freed)

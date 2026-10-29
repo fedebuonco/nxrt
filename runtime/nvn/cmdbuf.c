@@ -92,7 +92,13 @@ NVN(nvnCommandBufferGetCommandMemoryFree) {
     RET(cb->hcap > cb->used + JUMP_RESERVE ? (cb->hcap - cb->used - JUMP_RESERVE) / CMD_SHADOW : 0);
 }
 NVN(nvnCommandBufferGetControlMemorySize) { RET(0x10000); }
-NVN(nvnCommandBufferGetControlMemoryUsed) { RET(0); }
+// The control data a recorded list needs: 16 bytes per command (NVN's own accounting). Reporting 0 told the game
+// that nothing had been recorded, and its scratch-buffer measurement loop (model/resource building) never ended.
+NVN(nvnCommandBufferGetControlMemoryUsed) {
+    NvnCmdBuf *cb = cb_of(A(0));
+    uint64_t bytes = (cb->used / CMD_SHADOW) * 16;
+    RET(bytes > 0x10000 ? 0x10000 : bytes);
+}
 NVN(nvnCommandBufferGetControlMemoryFree) { RET(0x10000); }
 NVN(nvnCommandBufferSetMemoryCallback) { cb_of(A(0))->callback = A(1); }
 NVN(nvnCommandBufferGetMemoryCallback) { RET(cb_of(A(0))->callback); }

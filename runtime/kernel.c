@@ -1299,6 +1299,7 @@ void kernel_dump_threads(const char *prefix) {
 }
 
 bool kernel_try_dump_threads(void) {
+    { extern void nvn_trace_dump(void); nvn_trace_dump(); }
     if (pthread_mutex_trylock(&g_klock)) return false;
     dump_threads_locked();
     pthread_mutex_unlock(&g_klock);

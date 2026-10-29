@@ -988,7 +988,10 @@ static int log_nvn(void) {
 }
 NVN(nvnWindowAcquireTexture) {
     NvnWindow *w = WIN;
-    if (log_nvn()) LOG("[nvn] window acquire (fence %#llx) -> image %d\n", (unsigned long long)A(1), w->next);
+    if (log_nvn()) {
+        LOG("[nvn] window acquire (fence %#llx) -> image %d\n", (unsigned long long)A(1), w->next);
+        rt_trace_frames(c, 4);
+    }
     if (A(1)) sync_of(A(1))->signaled = 1;
     *(int32_t *)AP(2) = w->next;
     w->next = (w->next + 1) % (w->active ? w->active : 1);

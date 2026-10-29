@@ -314,6 +314,18 @@ void rt_fatal_trace(void) {
     abort();
 }
 
+// Guest frame chain with symbols, for a traced host call (kernel.c's trace_frames uses the same walk).
+void rt_trace_frames(Cpu *c, int n) {
+    uint64_t fp = c->x[29];
+    for (int i = 0; i < n && fp >= STACK_BASE && fp + 16 <= STACK_BASE + STACK_SIZE; i++) {
+        uint64_t prev = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8), off = 0;
+        const char *sym = loader_symbol_at(lr, &off);
+        LOG("    frame %d lr=%#llx (%s+%#llx)\n", i, (unsigned long long)lr, sym ? sym : "?", (unsigned long long)off);
+        if (prev <= fp) break;
+        fp = prev;
+    }
+}
+
 // svcBreak (kernel.c): the guest stopped on purpose - an assert, an abort, a debugger request. A release build strips
 // the message, so print what the state still names: the site, the guest call chain with the game's own symbols, and
 // (NXRT_BREAK_DUMP=1) any printable string a register points at - nn::diag's file/expression when it has them.
