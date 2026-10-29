@@ -13,6 +13,8 @@ Linux container or on a Deck.
 - Metal-only Dear ImGui backends and examples.
 - macOS/Windows branches in `nxrt.mk` and `nx.mk`.
 
+A dated handoff for continuing this branch: [`docs/HANDOFF_STEAM_DECK.md`](docs/HANDOFF_STEAM_DECK.md).
+
 ## What is done
 
 1. **Vulkan `NxUiBackend`** (`ui/backends/vulkan.cpp`): window, frame begin/end, ImGui rendering, screenshots and
