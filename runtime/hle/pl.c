@@ -196,7 +196,12 @@ static void load_fonts(void) {
                                      // outlines, which the game's font engine crashes on (it wants TrueType)
                                      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                                      "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                                     "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", NULL};
+                                     "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+                                     // (SteamOS / Arch images: Adwaita and Liberation are common where DejaVu is not;
+                                     // both are TrueType and carry a space and U+25A1, so font_usable accepts them)
+                                     "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+                                     "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+                                     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", NULL};
     static const char *const zh_cn[] = {"fonts/nintendo_udsg-r_org_zh-cn_003.bfttf",
                                         "fonts/nintendo_udsg-r_org_zh-cn_003.ttf",
                                         "/System/Library/Fonts/Hiragino Sans GB.ttc",
