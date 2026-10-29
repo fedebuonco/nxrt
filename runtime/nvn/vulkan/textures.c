@@ -337,7 +337,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     VkImageType type = VK_IMAGE_TYPE_2D;
     uint32_t layers = 1, depth = 1;
     switch (t->target) {
-    case 0: type = VK_IMAGE_TYPE_1D; th = 1; break;
+    case 0: th = 1; break;  // (1D: a 2D image with height 1 - Vulkan 1D images stop at 4096)
     case 2: type = VK_IMAGE_TYPE_3D; depth = t->depth ? t->depth : 1; break;
     case 3: type = VK_IMAGE_TYPE_1D; layers = t->height ? t->height : 1; th = 1; break;
     case 4: case 6: layers = t->depth ? t->depth : 1; break;
@@ -848,7 +848,7 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
 
 static VkImageViewType view_type_for(int textype) {
     switch (textype) {
-    case TEXTYPE_1D: return VK_IMAGE_VIEW_TYPE_1D;
+    case TEXTYPE_1D: return VK_IMAGE_VIEW_TYPE_2D;  // (1D textures are stored as 2D W x 1)
     case TEXTYPE_3D: return VK_IMAGE_VIEW_TYPE_3D;
     case TEXTYPE_CUBE: return VK_IMAGE_VIEW_TYPE_CUBE;
     case TEXTYPE_2D_ARRAY: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;

@@ -573,7 +573,7 @@ static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
 static const char *tex_type_name(int t) {
     switch (t) {
     case TEXTYPE_BUFFER: return "_buffer";
-    case TEXTYPE_1D: return "1d";
+    case TEXTYPE_1D: return "2d";  // (1D textures are stored 2D W x 1: Vulkan 1D images stop at 4096)
     case TEXTYPE_3D: return "3d";
     case TEXTYPE_CUBE: return "cube";
     case TEXTYPE_2D_ARRAY: return "2d_array";
@@ -679,6 +679,7 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
     const char *extra = NULL;  // separate compare argument (cube array shadow)
     if (!t->shadow) {
         if (layer) snprintf(P, sizeof P, "vec%d(%s, float(%s))", n + 1, xs, layer);
+        else if (type == TEXTYPE_1D) snprintf(P, sizeof P, "vec2(%s, 0.0f)", xs);  // (stored 2D W x 1)
         else snprintf(P, sizeof P, "%s", xs);
     } else if (type == TEXTYPE_CUBE_ARRAY) {
         snprintf(P, sizeof P, "vec4(%s, float(%s))", xs, layer ? layer : "0u");
