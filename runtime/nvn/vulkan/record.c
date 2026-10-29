@@ -79,6 +79,11 @@ static _Atomic uint64_t r_sets_fresh, r_pool_resets, r_pool_reset_ns;  // (R, or
 static _Atomic uint64_t a_seq_waits, a_seq_wait_ns, a_present_waits, a_present_wait_ns;  // (waits from any thread)
 extern __thread uint64_t g_blocked_ns;  // (kernel.c: the presenting thread's idle time, for the frame pacer)
 static RecPipeResolve pipe_resolve;
+// Per call type, the recorder's own time (cycles): which driver call costs the per-draw budget. Reported by exec.c's
+// renderer_stats as "[rec]" in the fps line.
+uint64_t rec_t_draw, rec_t_bind, rec_t_pipe, rec_t_push, rec_t_setup;
+static inline uint64_t rd_(void) { return __builtin_ia32_rdtsc(); }
+#define REC_TIME(v, ...) do { uint64_t t0_ = rd_(); __VA_ARGS__; v += rd_() - t0_; } while (0)
 static int wait_pipes = -1;
 
 bool rec_on(void) { return on > 0; }
@@ -746,7 +751,8 @@ static bool draw_dropped(void) {
 CMD_ARGS(CmdDraw, uint32_t count, inst, first, first_inst;)
 static void CmdDraw_run(const void *p) {
     const CmdDrawArgs *a = p;
-    if (!draw_dropped()) vkCmdDraw(a->cb, a->count, a->inst, a->first, a->first_inst);
+    if (draw_dropped()) return;
+    REC_TIME(rec_t_draw, vkCmdDraw(a->cb, a->count, a->inst, a->first, a->first_inst));
 }
 void rec_CmdDraw(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, uint32_t first_inst) {
     CmdDrawArgs a = {cb, count, inst, first, first_inst};
@@ -795,8 +801,8 @@ static void CmdBindDescriptorSets_run(const void *p) {
     const CmdBindDescriptorSetsArgs *a = p;
     VkDescriptorSet *s = after(a, sizeof *a);
     const uint32_t *d = after(s, a->n * sizeof *s);
-    for (uint32_t i = 0; i < a->n; i++) s[i] = resolve_set(s[i]);
-    vkCmdBindDescriptorSets(a->cb, a->bp, a->layout, a->first, a->n, s, a->ndyn, a->ndyn ? d : NULL);
+    REC_TIME(rec_t_setup, for (uint32_t i = 0; i < a->n; i++) s[i] = resolve_set(s[i]));
+    REC_TIME(rec_t_bind, vkCmdBindDescriptorSets(a->cb, a->bp, a->layout, a->first, a->n, s, a->ndyn, a->ndyn ? d : NULL));
 }
 void rec_CmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t first, uint32_t n,
                                const VkDescriptorSet *sets, uint32_t ndyn, const uint32_t *dyn) {
@@ -813,8 +819,10 @@ void rec_CmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPip
 
 CMD_ARGS(CmdPushConstants, VkPipelineLayout layout; VkShaderStageFlags stages; uint32_t off, size;)  // then the bytes
 static void CmdPushConstants_run(const void *p) {
+    uint64_t pt0_ = rd_();
     const CmdPushConstantsArgs *a = p;
     vkCmdPushConstants(a->cb, a->layout, a->stages, a->off, a->size, after(a, sizeof *a));
+    rec_t_push += rd_() - pt0_;
 }
 void rec_CmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout, VkShaderStageFlags stages, uint32_t off, uint32_t size, const void *data) {
     if (on <= 0) { vkCmdPushConstants(cb, layout, stages, off, size, data); return; }

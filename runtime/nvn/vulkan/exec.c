@@ -41,6 +41,9 @@ static uint64_t gc_imported_bytes, stat_gc_misses;
 static uint64_t gmem_heap_size(void);
 static void gc_frame(void);
 static uint64_t stat_upload_bytes;
+// Per-draw CPU cost counters (the recorder's share of the frame: sets allocated, descriptors written, bytes copied for
+// constant buffers, and how often a kept set was bound again instead of a new one). Reported in the fps line.
+static uint64_t stat_sets, stat_desc_writes, stat_cbuf_bytes, stat_set_reuse;
 static uint64_t prof_cb_reused, prof_cb_copied;  // (VK_PROF) lean constant blocks: copies reused, made (cbuf_lean)
 static bool cbuf_lean(void);
 static uint64_t prof_prog_memo, prof_pipe_memo, prof_key_draws;  // (VK_PROF) key memo answers (get_program), draws
@@ -521,6 +524,7 @@ void renderer_wait_seq(uint64_t seq) {
 // the recorder on it is a stand-in, to be written and bound through rec_* only, and only for this submission.
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
     sub();
+    stat_sets++;
     return rec_alloc_set(cur_sub, layout);
 }
 
@@ -715,7 +719,10 @@ static VkSpan guest_copy_ex(uint64_t addr, uint64_t size, bool scan) {
     gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s; gcopy[slot].scanned = heap;
     return s;
 }
-static VkSpan guest_copy(uint64_t addr, uint64_t size) { return guest_copy_ex(addr, size, false); }
+static VkSpan guest_copy(uint64_t addr, uint64_t size) {
+    stat_cbuf_bytes += size;  // (constant-buffer snapshots: the recorder's per-draw copy, in the fps line)
+    return guest_copy_ex(addr, size, false);
+}
 
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
@@ -999,6 +1006,21 @@ const char *renderer_stats(void) {
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
+    {   // the recorder's per-draw cost, next to the rest: sets a interval, descriptors written, KB copied for cbufs
+        size_t l = strlen(stats_text);
+        snprintf(stats_text + l, sizeof stats_text - l, ", sets %llu (%llu reused), desc %llu, cbuf %.1fMB",
+                 (unsigned long long)stat_sets, (unsigned long long)stat_set_reuse, (unsigned long long)stat_desc_writes,
+                 (double)stat_cbuf_bytes / 1048576.0);
+        stat_sets = stat_desc_writes = stat_cbuf_bytes = stat_set_reuse = 0;
+    }
+    {   // the recorder's own time per call type (record.c), in ms of the interval: which driver call fills the budget
+        extern uint64_t rec_t_draw, rec_t_bind, rec_t_pipe, rec_t_push, rec_t_setup;
+        size_t l = strlen(stats_text);
+        double cyc = 1.0 / (2.4e3 * 1e3);  // (a rough core clock: what matters is the split, not the exact ms)
+        snprintf(stats_text + l, sizeof stats_text - l, "; rec ms: draw %.1f, bind %.1f, push %.1f, resolve %.1f", rec_t_draw * cyc,
+                 rec_t_bind * cyc, rec_t_push * cyc, rec_t_setup * cyc);
+        rec_t_draw = rec_t_bind = rec_t_push = rec_t_setup = rec_t_pipe = 0;
+    }
     stat_feedback_copies = stat_upload_bytes = 0;
     {
         extern void vk_alias_stats(void);
@@ -4282,12 +4304,14 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         if (c->set && c->seq == vk_pending_seq() && c->view_gen == vk_view_gen && c->ds_gen == ds_gen && c->n == n &&
             !memcmp(c->e, e, (size_t)n * sizeof e[0])) {
             prof_sets_reused++;
+            stat_set_reuse++;
             return c->set;
         }
     }
     VkDescriptorSet ds = vk_alloc_set(layout);
     for (int i = 0; i < n; i++) w[i].dstSet = ds;
     if (n) rec_UpdateDescriptorSets((uint32_t)n, w);
+    stat_desc_writes += (uint64_t)n;
     prof_sets_new++;
     if (c) {
         c->set = ds; c->seq = vk_pending_seq(); c->view_gen = vk_view_gen; c->ds_gen = ds_gen; c->n = n;

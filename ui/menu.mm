@@ -867,6 +867,16 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
 
 // Whether the next menu_render() would draw anything: the backend drains the recorder before it hands the frame's
 // command buffer to ImGui (device.c), and that drain must not cost every frame with nothing on screen.
+// Whether something the *player* interacts with is up (the menu, the name dialog, a game overlay): those need every
+// frame. The FPS counter alone does not - it shows a value that updates twice a second - and drawing it every frame
+// costs a recorder drain plus the overlay pass (~2.7 ms a frame measured on the Deck).
+bool menu_is_modal(void) {
+    if (g_open.load() || g_kbd.load() == 1) return true;
+    for (int i = 0; i < g_noverlays; i++)
+        if (g_overlays[i].wanted()) return true;
+    return false;
+}
+
 bool menu_wants_render(void) {
     if (g_open.load() || g_kbd.load() == 1 || g_ui_settings.show_fps) return true;
     for (int i = 0; i < g_noverlays; i++)

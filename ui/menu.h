@@ -23,6 +23,7 @@ void menu_apply_window_requests(void *sdl_window);
 void menu_render(void *frame, double w, double h);
 // true when menu_render would draw (the Vulkan backend drains the recorder before ImGui records)
 bool menu_wants_render(void);
+bool menu_is_modal(void);  // the menu / name dialog / a game overlay (not just the FPS counter)
 
 // The host's game is gone (an in-place reboot): menu and name dialog close.
 void menu_reset(void);
