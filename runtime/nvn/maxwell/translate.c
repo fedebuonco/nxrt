@@ -15,7 +15,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
+#include "../rt.h"  // (LOG: a shader that had to fall back to the dispatch loop, see below)
 
 #include "shader.h"
 
@@ -2363,6 +2365,27 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     sp(&s, "}\n");
     info->msl = s.buf;
+    {   // build/glsl: every generated shader on disk, named by the hash [gpuprof] prints for a pass ("first fs <hash>"),
+        // so the shader behind a slow or wrong pass can be read (NXRT_SAVE_GLSL=0: off). Only the sources this run
+        // generated: translation happens every boot (the SPIR-V cache saves the compile, not the translation).
+        static int on = -1;
+        static int n;
+        if (on < 0) {
+            const char *e = getenv("NXRT_SAVE_GLSL");
+            on = (e && atoi(e) == 0) ? 0 : 1;
+            if (on) mkdir("build", 0755), mkdir("build/glsl", 0755);
+        }
+        if (on && s.buf && n < 4000) {
+            uint64_t h = 1469598103934665603ull;  // (exec.c's hmix over code + 0x30, 0x200: the [gpuprof] fs hash)
+            const uint8_t *b = c->code ? c->code - 0x50 : NULL;
+            for (size_t i = 0; b && i < 0x200; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+            char path[160];
+            snprintf(path, sizeof path, "build/glsl/%s_%016llx.glsl",
+                     stage == STAGE_VERTEX ? "vs" : stage == STAGE_FRAGMENT ? "fs" : "cs", (unsigned long long)h);
+            FILE *f = fopen(path, "w");
+            if (f) { fputs(s.buf, f); fclose(f); n++; }
+        }
+    }
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);
@@ -2496,6 +2519,14 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         }
     c->branchy = any_branch;
     c->fwd = any_branch && forward && !getenv("NXRT_NO_FWD_SHADERS");
+    if (any_branch && !c->fwd && (stage == STAGE_FRAGMENT || stage == STAGE_COMPUTE)) {
+        // The dispatch loop ("case pc: ...") instead of structured control flow: correct, but every instruction goes
+        // through a switch with register variables in memory - a fragment shader that lands here can cost an order of
+        // magnitude more GPU time. Worth knowing which ones do (see [gpuprof]'s "first fs <hash>").
+        static int said;
+        if (said++ < 40) LOG("[shader] %s interpreted (loops conflict, no structured form) at %llx\n",
+                             stage == STAGE_FRAGMENT ? "fs" : "cs", (unsigned long long)(uintptr_t)blob);
+    }
     uint32_t *pop_to = any_branch ? static_regions((const uint64_t *)code, end) : NULL;
     c->pop_to = pop_to;
     bool fwd_first = true;

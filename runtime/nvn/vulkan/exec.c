@@ -893,8 +893,10 @@ static void skip_note(int why, bool compute) {
     }
     skip_top[j].n++;
 }
-#define SKIP(why) do { stat_skipped++; if (log_skips) skip_note(why, false); } while (0)
-#define SKIP_CS(why) do { stat_skipped++; if (log_skips) skip_note(why, true); } while (0)
+// (the counters always accumulate - a few hundred skips an interval - so that build/skips can ask for a table of what
+// is being dropped, and why, from a session that is already running)
+#define SKIP(why) do { stat_skipped++; skip_note(why, false); } while (0)
+#define SKIP_CS(why) do { stat_skipped++; skip_note(why, true); } while (0)
 static void skip_log(void) {
     if (log_skips <= 0) return;
     uint64_t total = 0;
@@ -959,6 +961,16 @@ static void builds_check(void) {
 }
 
 const char *renderer_stats(void) {
+    // build/skips: one table of what was dropped since the last one (draws with no program, failed pipelines, texture
+    // type mismatches), for a session as it is being played - the file is consumed.
+    if (access("build/skips", F_OK) == 0) {
+        unlink("build/skips");
+        int save = log_skips;
+        log_skips = 1;
+        LOG("[skips] (asked)\n");
+        skip_log();
+        log_skips = save;
+    }
     skip_log();
     builds_check();
     static int dumps;
