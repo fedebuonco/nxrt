@@ -360,6 +360,22 @@ NVN(nvnCommandBufferSetColorReductionThresholds) { (void)c; }
 NVN(nvnCommandBufferSetTiledCacheAction) { (void)c; }
 NVN(nvnCommandBufferSetTiledCacheTileSize) { (void)c; }
 NVN(nvnCommandBufferSetShaderScratchMemory) { (void)c; }
+// Bound so the game's by-name loader never gets a null stub: checkpoints, subtile views and Zcull hints have no
+// meaning for a Vulkan backend (the dumps and counters are host-side).
+NVN(nvnCommandBufferInsertCheckpointDynamic) { (void)c; }
+NVN(nvnCommandBufferInsertCheckpointStatic) { (void)c; }
+NVN(nvnCommandBufferOverrideSubtileSize) { (void)c; }
+NVN(nvnCommandBufferSetControlMemoryCallbackEnabled) { (void)c; }
+NVN(nvnCommandBufferSetProvokingVertexMode) { (void)c; }
+NVN(nvnCommandBufferSetZCullZF32CompressionEnable) { (void)c; }
+NVN(nvnDeviceSetAutomaticCheckpointsByDebugGroup) { (void)c; }
+NVN(nvnDeviceSetAutomaticCheckpointsEnable) { (void)c; }
+NVN(nvnDeviceSetAutomaticCheckpointsMask) { (void)c; }
+NVN(nvnDeviceSetAutomaticCheckpointsSamplingInterval) { (void)c; }
+NVN(nvnDeviceSetCheckpointCallStacksEnable) { (void)c; }
+NVN(nvnDeviceSetCheckpointMaxCallStacksDepth) { (void)c; }
+NVN(nvnProgramGetSubtileSize) { RET(0); }
+NVN(nvnTextureBuilderGetViewOffset) { RET(0); }
 NVN(nvnCommandBufferSetPatchSize) { (void)c; }
 NVN(nvnCommandBufferSetInnerTessellationLevels) { (void)c; }
 NVN(nvnCommandBufferSetOuterTessellationLevels) { (void)c; }
