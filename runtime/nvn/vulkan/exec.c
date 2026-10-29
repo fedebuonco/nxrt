@@ -786,11 +786,14 @@ static void run_job(void (*fn)(void *), void *arg) {
     if (!started) {
         started = true;
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
+        // A scene the game has not shown before needs dozens of pipelines at once, and each one is a GLSL compile
+        // plus a driver compile: on 8 cores four workers left a new scene black for minutes (Fire Emblem: Three
+        // Houses after a battle). Keep two cores for the render thread and the game, use the rest.
         int n = plat_cpu_count();  // (the process's affinity mask: a process held to a few cores, few workers)
         if (n <= 0) n = SDL_GetNumLogicalCPUCores();
-        n -= 4;
+        n -= 2;
         if (n < 4) n = 4;
-        if (n > 16) n = 16;
+        if (n > 12) n = 12;
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);

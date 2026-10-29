@@ -83,7 +83,14 @@ static int wait_pipes = -1;
 
 bool rec_on(void) { return on > 0; }
 bool rec_wait_pipes(void) {
-    if (wait_pipes < 0) wait_pipes = getenv("NXRT_VK_RECORDER_WAIT_PIPES") && atoi(getenv("NXRT_VK_RECORDER_WAIT_PIPES")) != 0;
+    if (wait_pipes < 0) {
+        // Default: wait for a pipeline that is still compiling instead of skipping the draw that needs it. Skipping
+        // makes a scene the game has not shown before stand still in black until every one of its pipelines is built
+        // (Fire Emblem: Three Houses after a battle: minutes of black screen, 100k+ dropped draws); waiting costs the
+        // same compile time but the scene appears as each one lands. NXRT_VK_RECORDER_WAIT_PIPES=0 skips as before.
+        const char *e = getenv("NXRT_VK_RECORDER_WAIT_PIPES");
+        wait_pipes = e ? atoi(e) != 0 : 1;
+    }
     return wait_pipes;
 }
 void rec_set_pipe_resolver(RecPipeResolve f) { pipe_resolve = f; }
