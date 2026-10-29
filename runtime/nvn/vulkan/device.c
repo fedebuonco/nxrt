@@ -884,10 +884,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     }
     if (have) {
         double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
-        extern void widescreen_frame_end(uint64_t frame);
-        widescreen_frame_end(frame);
-        extern void widescreen_set_factor(float f);
-        extern bool widescreen_allowed(void);
+        if (NX_HOOK(present_frame_end)) NX_HOOK(present_frame_end)(frame);
         // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
         // GPU time since the last frame (exec.c's GPU timer; -1 without one: dynamic resolution goes by frame times):
         // the game's submissions and the window image's (NXRT_DYNRES_COUNT_PRESENT=0: the game's only, as before)
@@ -915,14 +912,13 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             sp_have = true;
         }
         OutScale os;
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
+        output_scale(dw, dh, NX_HOOK(present_wide) && NX_HOOK(present_wide)(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         output_scale_log((unsigned long long)frame, dw, dh, &os);  // (diagnostics: [scale] on a change)
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
-        extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
-        float crop[4];  // uv origin and size
-        widescreen_present_crop(frame, shape, crop, &vx, &vy, &vw, &vh);
-        widescreen_set_factor((float)shape);
+        float crop[4] = {0, 0, 1, 1};  // uv origin and size
+        if (NX_HOOK(present_crop)) NX_HOOK(present_crop)(frame, shape, crop, &vx, &vy, &vw, &vh);
+        if (NX_HOOK(present_shape)) NX_HOOK(present_shape)((float)shape);
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
         renderer_set_scale((float)sx, (float)sy);
@@ -1002,10 +998,9 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     prev_present = now;
     pp_mark(PP_REST);  // (the fps line itself is not counted)
     if (now - last_fps_time >= fps_iv) {
-        extern const char *game_level_name(void);
         if (last_fps_time > 0)
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s%s)\n", now, (unsigned long long)frame,
-                frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats(), pp_text());
+                frames / (now - last_fps_time), max_gap * 1000.0, NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "", renderer_stats(), pp_text());
         max_gap = 0;
         frames = 0;
         last_fps_time = now;
@@ -1028,12 +1023,9 @@ static void present_hooks(void) {
     if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) SDL_Delay((Uint32)slow_ms);
     extern void fnprof_frame(uint64_t frame);
     fnprof_frame(total_frames);
-    extern void warp_frame(uint64_t frame);
-    warp_frame(total_frames);
+    if (NX_HOOK(present_tick)) NX_HOOK(present_tick)(total_frames);
     extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (NXRT_REBOOT_AT)
     reboot_test_frame(total_frames);
-    extern void save_editor_frame(uint64_t frame);
-    save_editor_frame(total_frames);
     extern void vk_level_change_check(void);
     vk_level_change_check();
     static long debug_at = -1;
