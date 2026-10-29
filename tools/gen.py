@@ -60,6 +60,10 @@ def main():
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base)                      # load
+    if getattr(m.nso, 'arch', 'aarch64') != 'aarch64':
+        raise SystemExit(
+            f"{args.name}: this is a 32-bit ARM module; nxrt recompiles AArch64 Switch modules only"
+        )
     starts = discover.boundaries(m)                                  # discover (+ cfg, lift inside)
     hle = hle_functions(m, args.hle)
     entries, rounds = discover.functions(m, discover.seed(m, starts))

@@ -5,7 +5,7 @@ import lz4.block
 
 DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
 DT_GNU_HASH = 0x6ffffef5
-DT_RELRSZ, DT_RELR = 35, 36  # packed relative relocations (newer linkers)
+DT_SYMENT, DT_RELRSZ, DT_RELR = 11, 35, 36  # packed relative relocations (newer linkers)
 DT_STRSZ, DT_JMPREL, DT_RELACOUNT = 10, 23, 0x6FFFFFF9
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 
@@ -45,18 +45,40 @@ class Nso:
         rel = lambda i: mod0 + struct.unpack_from('<i', self.image, mod0 + 4 + i * 4)[0]
         self.dynamic, self.bss_start, self.bss_end = rel(0), rel(1), rel(2)
         self.eh_start, self.eh_end, self.module_obj = rel(3), rel(4), rel(5)
+        # Some newer toolchains link the module with ELF32 dynamic/symbol metadata even though the code is AArch64.
+        # DT_SYMENT says which: 16 (Elf32_Sym) or 24 (Elf64_Sym). Entries are 8 or 16 bytes respectively.
+        def entries(width):
+            out = []
+            off = self.dynamic
+            for _ in range(512):
+                if width == 8:
+                    tag, val = struct.unpack_from('<II', self.image, off)
+                else:
+                    tag, val = self.u64(off), self.u64(off + 8)
+                off += width
+                if tag == DT_NULL:
+                    break
+                out.append((tag, val))
+            return out
+        e64, e32 = entries(16), entries(8)
+        syment64 = next((v for t, v in e64 if t == DT_SYMENT), 0)
+        syment32 = next((v for t, v in e32 if t == DT_SYMENT), 0)
+        if syment64 == 24:
+            self.elf32 = False
+        elif syment32 == 16:
+            self.elf32 = True
+        else:
+            self.elf32 = not any(t <= 0x40 or t >= 0x6FFFFEF0 for t, _ in e64) and any(
+                t <= 0x40 or t >= 0x6FFFFEF0 for t, _ in e32
+            )
         dyn = {}
         needed = []
-        off = self.dynamic
-        while True:
-            tag, val = self.u64(off), self.u64(off + 8)
-            off += 16
-            if tag == DT_NULL:
-                break
+        for tag, val in e32 if self.elf32 else e64:
             if tag == DT_NEEDED:
                 needed.append(val)
             dyn.setdefault(tag, val)
         self.dyn = dyn
+        self.syment = 16 if self.elf32 else 24
         strtab = dyn.get(DT_STRTAB, 0)
         self.strtab = strtab
         self.needed = [self.cstr(strtab + n) for n in needed]
@@ -70,17 +92,27 @@ class Nso:
         if nchain and DT_SYMTAB in dyn:
             st = dyn[DT_SYMTAB]
             for i in range(nchain):
-                o = st + i * 24
-                name, info, other, shndx = struct.unpack_from('<IBBH', self.image, o)
-                value, size = struct.unpack_from('<QQ', self.image, o + 8)
+                o = st + i * 16 if self.elf32 else st + i * 24
+                if self.elf32:
+                    name, value, size, info, other, shndx = struct.unpack_from('<IIIBBH', self.image, o)
+                else:
+                    name, info, other, shndx = struct.unpack_from('<IBBH', self.image, o)
+                    value, size = struct.unpack_from('<QQ', self.image, o + 8)
                 self.syms.append((self.cstr(strtab + name), info, shndx, value, size))
         self.relocs = []
+        rela_size = 12 if self.elf32 else 24
         for base_tag, size_tag in ((DT_RELA, DT_RELASZ), (DT_JMPREL, DT_PLTRELSZ)):
             if base_tag in dyn:
-                b, n = dyn[base_tag], dyn[size_tag] // 24
+                b, n = dyn[base_tag], dyn[size_tag] // rela_size
                 for i in range(n):
-                    r_off, r_info, r_add = struct.unpack_from('<QQq', self.image, b + i * 24)
-                    self.relocs.append((r_off, r_info & 0xFFFFFFFF, r_info >> 32, r_add))
+                    if self.elf32:
+                        r_off, r_info, r_add = struct.unpack_from('<IIi', self.image, b + i * 12)
+                        self.relocs.append((r_off, r_info & 0xFF, r_info >> 8, r_add))
+                    else:
+                        r_off, r_info, r_add = struct.unpack_from('<QQq', self.image, b + i * 24)
+                        self.relocs.append((r_off, r_info & 0xFFFFFFFF, r_info >> 32, r_add))
+        # A 32-bit dynamic/symbol table in this dump means the module's code is ARM32, which nxrt cannot lift.
+        self.arch = 'arm32' if self.elf32 else 'aarch64'
         # DT_RELR: each listed word gets the base added; its addend is the word itself (an offset in the module)
         if DT_RELR in dyn:
             for r_off in self.relr_offsets(dyn[DT_RELR], dyn.get(DT_RELRSZ, 0)):
