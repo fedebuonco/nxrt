@@ -809,6 +809,8 @@ static struct {
     RtState rt;
     bool rt_dirty;
     NvnProgram *program;
+    NvnProgram *prog_vs, *prog_fs;  // stages bound separately (nvnCommandBufferBindProgram takes a stage mask)
+    NvnProgram merged;               // the two stages as one program (st.program points here while they differ)
     uint8_t blend[8][8];
     uint32_t channel_mask;
     uint8_t color_state[4], ds[8], ms[0x18], poly[4];
@@ -6084,7 +6086,29 @@ static void exec_list(uint64_t handle, int depth) {
             for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) exec_list(h[i], depth + 1);
             break;
         }
-        case CMD_BIND_PROGRAM: st.program = (NvnProgram *)(uintptr_t)r->x[0]; break;
+        case CMD_BIND_PROGRAM: {
+            // The engine may bind one program for the vertex stage and another for the fragment stage (the call takes
+            // a stage mask). Keep both; when they differ, st.program is a merged copy (st.merged) so every consumer
+            // below (uniforms, constants, the pipeline key) sees one program with both stages.
+            NvnProgram *np = (NvnProgram *)(uintptr_t)r->x[0];
+            uint32_t mask = (uint32_t)r->x[1];
+            if (mask & 3u) {
+                if (mask & 1u) st.prog_vs = np;
+                if (mask & 2u) st.prog_fs = np;
+                if (st.prog_vs && st.prog_fs && st.prog_vs != st.prog_fs) {
+                    st.merged = *st.prog_vs;
+                    st.merged.stages[1] = st.prog_fs->stages[1];
+                    st.merged.stage_mask |= 3u;
+                    st.merged.backend = NULL;  // (a copy: never share the per-program host record)
+                    st.program = &st.merged;
+                } else {
+                    st.program = np;
+                }
+            } else {
+                st.program = np;  // compute and the stages without a vertex/fragment pair
+            }
+            break;
+        }
         case CMD_BIND_BLEND: { uint8_t *b = x; memcpy(st.blend[b[0] & 7], b, 8); break; }
         case CMD_BIND_CHANNEL_MASK: memcpy(&st.channel_mask, x, 4); break;
         case CMD_BIND_COLOR: memcpy(st.color_state, x, 4); break;
