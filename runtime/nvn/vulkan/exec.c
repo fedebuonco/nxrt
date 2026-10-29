@@ -6092,20 +6092,22 @@ static void exec_list(uint64_t handle, int depth) {
             // below (uniforms, constants, the pipeline key) sees one program with both stages.
             NvnProgram *np = (NvnProgram *)(uintptr_t)r->x[0];
             uint32_t mask = (uint32_t)r->x[1];
-            if (mask & 3u) {
-                if (mask & 1u) st.prog_vs = np;
-                if (mask & 2u) st.prog_fs = np;
-                if (st.prog_vs && st.prog_fs && st.prog_vs != st.prog_fs) {
-                    st.merged = *st.prog_vs;
-                    st.merged.stages[1] = st.prog_fs->stages[1];
-                    st.merged.stage_mask |= 3u;
-                    st.merged.backend = NULL;  // (a copy: never share the per-program host record)
-                    st.program = &st.merged;
-                } else {
-                    st.program = np;
-                }
+            // A bind only touches the stages in its mask. KTGL (as Unity does) unbinds the geometry/tessellation/
+            // stages it has no shaders for with a NULL program; that must not clear the vertex+fragment program, or
+            // every following draw is issued with no program and skipped (Fire Emblem: Three Houses: unshaded black
+            // character silhouettes, 1,242 "no program" skips per interval).
+            if (mask & 1u) st.prog_vs = np;
+            if (mask & 2u) st.prog_fs = np;
+            if (mask & 0x20u) { st.program = np; break; }  // compute: a program of its own
+            if (!(mask & 3u)) break;                       // geometry / tessellation: nothing this backend draws with
+            if (st.prog_vs && st.prog_fs && st.prog_vs != st.prog_fs) {
+                st.merged = *st.prog_vs;
+                st.merged.stages[1] = st.prog_fs->stages[1];
+                st.merged.stage_mask |= 3u;
+                st.merged.backend = NULL;  // (a copy: never share the per-program host record)
+                st.program = &st.merged;
             } else {
-                st.program = np;  // compute and the stages without a vertex/fragment pair
+                st.program = (mask & 1u) ? st.prog_vs : (mask & 2u) ? st.prog_fs : st.program;
             }
             break;
         }
