@@ -648,6 +648,32 @@ static double ms_now(void) {
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+// A blob this runtime wrote itself (cache/blobs/<v|f>_<hash>.bin, exec.c save_blob): the game's shader code kept at
+// translation time. The romfs index only reads .bfsha/.arc archives and the main module; a title that keeps its
+// shaders in its own archives (Fire Emblem: Three Houses: KTGL's LINKDATA) has nothing the index can find, and this is
+// the source that lets its own variant records be prepared.
+static uint8_t *blob_load_own(char stage, uint64_t hash, ShaderBlob *b) {
+    if (!hash) return NULL;
+    char path[80];
+    snprintf(path, sizeof path, "cache/blobs/%c_%016llx.bin", stage, (unsigned long long)hash);
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    struct { char magic[8]; uint32_t coff, csize, size; } hd;
+    uint8_t *d = NULL;
+    if (fread(&hd, sizeof hd, 1, f) == 1 && !memcmp(hd.magic, "NXSHBL1", 7) && hd.size && hd.size <= (1u << 20)) {
+        d = malloc(hd.size);
+        if (d && fread(d, 1, hd.size, f) != hd.size) { free(d); d = NULL; }
+    }
+    fclose(f);
+    if (!d) return NULL;
+    b->code = d;
+    b->size = hd.size;
+    b->const_offset = hd.coff;
+    b->const_size = hd.csize;
+    b->control = NULL;
+    return d;
+}
+
 static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel);
 bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
     static pthread_mutex_t one = PTHREAD_MUTEX_INITIALIZER;  // (one run at a time: the index, the translator)
@@ -731,7 +757,8 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
             if (own && !list_path && shader_seen_shipped(line)) continue;  // (prepared already)
             const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
             ShaderBlob bv = {0}, bf = {0};
-            uint8_t *dv = ev ? blob_read(ev, &bv, files) : NULL, *df = ef ? blob_read(ef, &bf, files) : NULL;
+            uint8_t *dv = ev ? blob_read(ev, &bv, files) : blob_load_own('v', r.vs, &bv);
+            uint8_t *df = ef ? blob_read(ef, &bf, files) : (r.kind == 'G' ? blob_load_own('f', r.fs, &bf) : NULL);
             if (!dv || (r.kind == 'G' && !df))
                 missing++;
             else if (renderer_prepare(&r, &bv, &bf))
@@ -765,8 +792,12 @@ static void *prep_thread(void *arg) {
 }
 
 void shader_prep_boot(const char *romfs) {
+    // On by default: the variants the game has met before (cache/shader_seen.txt) are rebuilt from the shader code kept
+    // in cache/blobs at startup, in the background, so a scene's first visit after an update or a translator change
+    // does not hitch. NXRT_SHADER_PREP=0: off. (A manager launch has no start screen, so its setup step never runs -
+    // this is the same preparation, from the game's side.)
     const char *e = getenv("NXRT_SHADER_PREP");
-    if (!e || !atoi(e)) return;
+    if (e && !atoi(e)) return;
     // In the background: the seen shaders take ~40 s to compile, and doing that here left the window black until they
     // were all done. The game starts at once; the preparation warms the ones it has not reached yet.
     char *dir = strdup(romfs ? romfs : "");

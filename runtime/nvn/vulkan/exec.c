@@ -1793,8 +1793,10 @@ static void save_blob(int stage, const NvnShaderStage *st, uint64_t code, uint32
     if (n > (1u << 20)) n = 1u << 20;
     FILE *f = fopen(path, "wb");
     if (!f) return;
-    if (fwrite((const void *)(uintptr_t)code, 1, n, f) != n) { fclose(f); remove(path); return; }
+    struct { char magic[8]; uint32_t coff, csize, size; } hd = {"NXSHBL1", st->const_offset, st->const_size, (uint32_t)n};
+    bool ok = fwrite(&hd, sizeof hd, 1, f) == 1 && fwrite((const void *)(uintptr_t)code, 1, n, f) == n;
     fclose(f);
+    if (!ok) remove(path);
 }
 
 // Translates both stages (false: failed, logged). Holds the translator for the whole program.
