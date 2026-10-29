@@ -1634,6 +1634,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
 typedef struct {
     ShaderInfo *vi, *fi;
     uint64_t code[2], cmax[2];  // translation inputs (copied: translated on the translator thread)
+    uint32_t coff[2], csize[2]; // the stages' compiler constants (a shader's code hash covers them: cache/blobs)
     ShaderKey vkey, fkey;
     VkShaderModule vs, fs;
     VkShaderModule fs_late;  // (lazy chunks) fs without early fragment tests, for alpha to coverage pipelines; or NULL
@@ -1775,6 +1776,27 @@ static void compile_program(void *arg) {
     slow_build(t0, "modules vs/fs", p->code[0], p->code[1]);
 }
 
+// The shader code itself, kept next to the SPIR-V cache: cache/blobs/<stage>_<hash>.bin. Fire Emblem: Three Houses keeps
+// its shaders inside KTGL's archives, which the preparation's romfs index does not read, so a variant list alone cannot
+// rebuild them on a later run; with the code kept here it can (shader_prep.c finds code by hash, this is another
+// source). Small (a few KB a shader), written once, and only when the file is not there.
+static void save_blob(int stage, const NvnShaderStage *st, uint64_t code, uint32_t max_size) {
+    if (!st || !code) return;
+    uint64_t h = shader_stage_hash(st);
+    if (!h) return;
+    char path[64];
+    snprintf(path, sizeof path, "cache/blobs/%c_%016llx.bin", stage == STAGE_VERTEX ? 'v' : 'f', (unsigned long long)h);
+    if (access(path, F_OK) == 0) return;
+    static bool made;
+    if (!made) { made = true; mkdir("cache", 0755); mkdir("cache/blobs", 0755); }
+    size_t n = max_size ? max_size : 0x10000;
+    if (n > (1u << 20)) n = 1u << 20;
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    if (fwrite((const void *)(uintptr_t)code, 1, n, f) != n) { fclose(f); remove(path); return; }
+    fclose(f);
+}
+
 // Translates both stages (false: failed, logged). Holds the translator for the whole program.
 static bool translate_program_now(Prog *p) {
     maxwell_gmem_base = HEAP_BASE;
@@ -1787,6 +1809,12 @@ static bool translate_program_now(Prog *p) {
         p->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey);
     }
     pthread_mutex_unlock(&translate_lock);
+    {
+        NvnShaderStage sv = {.code_addr = p->code[0], .const_offset = p->coff[0], .const_size = p->csize[0]};
+        if (p->vi->msl) save_blob(STAGE_VERTEX, &sv, p->code[0], p->coff[0] ? p->coff[0] + p->csize[0] : p->cmax[0]);
+        NvnShaderStage sf = {.code_addr = p->code[1], .const_offset = p->coff[1], .const_size = p->csize[1]};
+        if (p->fi && p->fi->msl) save_blob(STAGE_FRAGMENT, &sf, p->code[1], p->coff[1] ? p->coff[1] + p->csize[1] : p->cmax[1]);
+    }
     if (!p->vi->msl) {
         LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)p->code[0]);
         atomic_store(&p->state, 2);
@@ -1929,6 +1957,8 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     for (int i = 0; i < 2; i++) {
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
+        p->coff[i] = np->stages[i].const_offset;
+        p->csize[i] = np->stages[i].const_size;
     }
     p->vkey = *vkey;
     p->fkey = *fkey;

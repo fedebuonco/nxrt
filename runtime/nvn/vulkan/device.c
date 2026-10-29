@@ -1099,6 +1099,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         // [cpu] the busiest threads of the last interval, by /proc/self/task/<tid>/stat: which side is short of time -
         // the game's own threads (recompiled code), the translator, the recorder or the build workers.
         cpu_top_log(last_fps_time > 0 ? now - last_fps_time : 0);
+        {   // The pipeline cache survives a kill or a crash: save it while the game runs (a session that has built a
+            // scene's pipelines keeps them even if it never exits cleanly - the cache was only written at exit).
+            static double last_pcache_save;
+            if (last_pcache_save > 0 && now - last_pcache_save >= 120.0) { last_pcache_save = now; vk_pipeline_cache_save(); }
+            else if (last_pcache_save <= 0) last_pcache_save = now;
+        }
         if (last_fps_time > 0)
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s%s)\n", now, (unsigned long long)frame,
                 frames / (now - last_fps_time), max_gap * 1000.0, NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "", renderer_stats(), pp_text());
