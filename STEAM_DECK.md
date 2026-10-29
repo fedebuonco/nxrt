@@ -33,3 +33,9 @@ clang, lld, make, Python 3, SDL3, FFmpeg, Vulkan loader/headers, shaderc, and th
 
 Do not merge this branch into `master` until it builds and runs at least one port on a Deck. The branch is a target
 cut, not a working release.
+
+## After it builds
+
+[`docs/DECK_SPECIALIZATION.md`](docs/DECK_SPECIALIZATION.md) lays out the Deck specialization axes (codegen, threads,
+UMA, RADV/pipelines, pacing, power, storage, suspend, input), what to borrow from nxnative's product model, and the
+phased roadmap with gates.
