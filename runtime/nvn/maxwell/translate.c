@@ -2464,6 +2464,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     // GPU compilers turn into spills: Echoes of Wisdom's main ground material (a loop, 32 textures) took ~4.5 ms per
     // draw on an Iris Xe.
     bool forward = true;
+    const char *fwd_why = NULL;  // (the first condition that forced the dispatch loop: logged with it)
+    struct { uint32_t pc, t; int kind; } flow_log[16];
+    int nflow_log = 0;
     enum { MAX_LOOPS = 64 };
     uint32_t loop_h[MAX_LOOPS], loop_b[MAX_LOOPS];  // head pc, pc of the backward branch
     int nloops = 0;
@@ -2477,16 +2480,26 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
                        (w & 0xfff0000000000020ull) == 0xe2b0000000000000ull;
         if (is_flow) {
             int64_t t = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+            if (nflow_log < 16) {  // (the first flow instructions: what the structuring saw, for the log below)
+                flow_log[nflow_log].pc = pc; flow_log[nflow_log].t = (uint32_t)t;
+                flow_log[nflow_log].kind = (w & 0xfff0000000000020ull) == 0xe240000000000000ull ? 0
+                                         : (w & 0xfff0000000000020ull) == 0xe290000000000000ull ? 1
+                                         : (w & 0xfff0000000000020ull) == 0xe2a0000000000000ull ? 2 : 3;
+                nflow_log++;
+            }
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
             any_branch = true;
             bool bra = (w & 0xfff0000000000020ull) == 0xe240000000000000ull;
-            if ((w & 0xfff0000000000020ull) == 0xe2b0000000000000ull)
+            if ((w & 0xfff0000000000020ull) == 0xe2b0000000000000ull) {
                 forward = false;  // PCNT  NOLINT(bugprone-branch-clone)
-            else if (t <= (int64_t)pc && !bra) forward = false;                         // backward SSY / PBK
-            else if (t <= (int64_t)pc) {                                                // a loop
+                if (!fwd_why) fwd_why = "PCNT";
+            } else if (t <= (int64_t)pc && !bra) {
+                forward = false;                         // backward SSY / PBK
+                if (!fwd_why) fwd_why = "backward SSY/PBK";
+            } else if (t <= (int64_t)pc) {                                                // a loop
                 int k = 0;
                 while (k < nloops && loop_h[k] != (uint32_t)t) k++;
-                if (k == MAX_LOOPS) forward = false;
+                if (k == MAX_LOOPS) { forward = false; if (!fwd_why) fwd_why = "too many loops"; }
                 else {
                     if (k == nloops) { loop_h[k] = (uint32_t)t; loop_b[k] = pc; nloops++; }
                     if (pc > loop_b[k]) loop_b[k] = pc;
@@ -2496,6 +2509,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
             any_branch = true;
             forward = false;
+            if (!fwd_why) fwd_why = "BRX jump table";
             memset(label, 1, end);
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
@@ -2523,8 +2537,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             bool disjoint = loop_e[k] <= loop_h[m] || loop_e[m] <= loop_h[k];
             bool k_in_m = loop_h[m] <= loop_h[k] && loop_e[k] <= loop_e[m];
             bool m_in_k = loop_h[k] <= loop_h[m] && loop_e[m] <= loop_e[k];
-            if (!disjoint && !k_in_m && !m_in_k) forward = false;
-            if (loop_h[k] == loop_h[m] && k != m) forward = false;
+            if (!disjoint && !k_in_m && !m_in_k) { forward = false; if (!fwd_why) fwd_why = "overlapping loops"; }
+            if (loop_h[k] == loop_h[m] && k != m) { forward = false; if (!fwd_why) fwd_why = "two loops, same head"; }
         }
     c->branchy = any_branch;
     c->fwd = any_branch && forward && !getenv("NXRT_NO_FWD_SHADERS");
@@ -2533,8 +2547,16 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         // through a switch with register variables in memory - a fragment shader that lands here can cost an order of
         // magnitude more GPU time. Worth knowing which ones do (see [gpuprof]'s "first fs <hash>").
         static int said;
-        if (said++ < 40) LOG("[shader] %s interpreted (loops conflict, no structured form) at %llx\n",
-                             stage == STAGE_FRAGMENT ? "fs" : "cs", (unsigned long long)(uintptr_t)blob);
+        if (said++ < 40)
+        {
+            static const char *const kn[] = {"BRA", "SSY", "PBK", "PCNT"};
+            LOG("[shader] %s interpreted (%s) at %llx: %zu words, %d loops; flow:", stage == STAGE_FRAGMENT ? "fs" : "cs",
+                fwd_why ? fwd_why : "?", (unsigned long long)(uintptr_t)blob, end, nloops);
+            for (int i = 0; i < nflow_log; i++)
+                LOG(" %s %x->%x%s", kn[flow_log[i].kind], flow_log[i].pc, flow_log[i].t,
+                    flow_log[i].t <= flow_log[i].pc ? "b" : "");
+            LOG("\n");
+        }
     }
     uint32_t *pop_to = any_branch ? static_regions((const uint64_t *)code, end) : NULL;
     c->pop_to = pop_to;
