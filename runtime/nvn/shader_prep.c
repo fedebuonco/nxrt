@@ -6,12 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
 
 #include "../lz4_block.h"
 #include "nvn.h"
 #include "shader_prep.h"
+#include "../../platform/paths.h"
 #include "shader_strict.h"
 #include "nx_app.h"
 
@@ -652,6 +654,11 @@ static double ms_now(void) {
 // translation time. The romfs index only reads .bfsha/.arc archives and the main module; a title that keeps its
 // shaders in its own archives (Fire Emblem: Three Houses: KTGL's LINKDATA) has nothing the index can find, and this is
 // the source that lets its own variant records be prepared.
+static const char *blob_path(char stage, uint64_t hash, char *buf) {
+    snprintf(buf, 80, "cache/blobs/%c_%016llx.bin", stage, (unsigned long long)hash);
+    return buf;
+}
+
 static uint8_t *blob_load_own(char stage, uint64_t hash, ShaderBlob *b) {
     if (!hash) return NULL;
     char path[80];
@@ -715,8 +722,17 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     if (progress) progress(0, total + 1);
     if (!idx_n) {
         idx_romfs(romfs);
-        char main_nso[1100];  // (<game files>/exefs/main, next to romfs/)
+        char main_nso[1100];  // (<game files>/exefs/main)
         snprintf(main_nso, sizeof main_nso, "%s/../exefs/main", romfs);
+        FILE *mf = fopen(main_nso, "rb");
+        if (mf) fclose(mf);
+        else {
+            // (a romfs read from the player's package has no folder: the game folder the runtime booted from has the
+            // exefs. Fire Emblem: Three Houses keeps most of its shaders in main's BNSH container, so this path as a
+            // sibling of a folder that does not exist meant "no shaders indexed" for every package install.)
+            const char *gd = rt_game_dir();
+            if (gd && *gd) snprintf(main_nso, sizeof main_nso, "%s/exefs/main", gd);
+        }
         idx_nso(main_nso);
     }
     double t_idx = ms_now() - t0;
@@ -734,7 +750,12 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
                 ShaderRec r;
                 if (l >= sizeof one) continue;
                 memcpy(one, line, l), one[l] = 0;
-                if (!shader_rec_parse(one, &r) || !idx_find(r.vs) || (r.kind == 'G' && !idx_find(r.fs))) continue;
+                if (!shader_rec_parse(one, &r)) continue;
+                // (keep a record the game files do not have if its code was kept from an earlier run: a title whose
+                // shaders live in its own archives has them only as blobs, and dropping those lost the list)
+                bool have = idx_find(r.vs) != NULL || access(blob_path('v', r.vs, one), F_OK) == 0;
+                bool have_f = r.kind != 'G' || idx_find(r.fs) != NULL || access(blob_path('f', r.fs, one), F_OK) == 0;
+                if (!have || !have_f) continue;
                 memcpy(keep + n, line, l), n += l, keep[n++] = '\n';
             }
             free(seen);
