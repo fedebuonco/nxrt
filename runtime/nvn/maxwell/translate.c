@@ -2304,7 +2304,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
-    if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", c->lmem_words, c->lmem_words);
+    // Maxwell's local memory is uninitialized in hardware, and zeroing it costs a full array of stores per fragment:
+    // 256 words (1 KB) at 960x540 is ~500 MB of scratch traffic a frame - a Fire Emblem: Three Houses scene pass spent
+    // 30 of its 41 ms in it. NXRT_LMEM_ZERO=1 (or MSL's "= {}") puts the zeroing back, for a shader that reads before
+    // writing; the game's own shaders write first, as they must on the hardware.
+    if (c->uses_local) {
+        if (getenv("NXRT_LMEM_ZERO"))
+            sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", c->lmem_words, c->lmem_words);
+        else sp(&s, "  uint lmem[%d];\n", c->lmem_words);
+    }
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
