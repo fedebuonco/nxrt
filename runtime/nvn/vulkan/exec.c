@@ -753,6 +753,36 @@ static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
+// What the pool spends its time on, by job. Four workers at 85% for the whole of a battle with "compile 0" in the fps
+// line means builds that never finish in an interval, not many small ones - this says which kind, in seconds per kind,
+// so the next reading is "pipeline 21 s (9)" instead of a guess.
+static void compile_program(void *arg);
+static void build_pipeline(void *arg);
+static void build_compute(void *arg);
+static void prep_job_run(void *arg);
+static struct { void (*fn)(void *); const char *name; uint64_t ns; uint32_t n; } job_kind[8];
+static void job_kind_note(void (*fn)(void *), uint64_t ns) {
+    for (int i = 0; i < 8; i++) {
+        if (job_kind[i].fn == fn || !job_kind[i].fn) { job_kind[i].fn = fn; __atomic_fetch_add(&job_kind[i].ns, ns, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&job_kind[i].n, 1, __ATOMIC_RELAXED); return; }
+    }
+}
+void vk_jobs_text(char *buf, size_t n) {  // (the fps line: what the build pool did in the interval)
+    size_t l = 0;
+    buf[0] = 0;
+    const char *nm[8] = {"glsl", "pipeline", "compute", "prepare", "other", "other", "other", "other"};
+    for (int i = 0; i < 8; i++) {
+        if (!job_kind[i].fn) continue;
+        uint64_t ns = __atomic_exchange_n(&job_kind[i].ns, 0, __ATOMIC_RELAXED);
+        uint32_t c = __atomic_exchange_n(&job_kind[i].n, 0, __ATOMIC_RELAXED);
+        if (!c) continue;
+        const char *name = job_kind[i].fn == compile_program ? nm[0] : job_kind[i].fn == build_pipeline ? nm[1]
+                         : job_kind[i].fn == build_compute ? nm[2] : job_kind[i].fn == prep_job_run ? nm[3] : nm[4];
+        l += snprintf(buf + l, n - l, "%s%s %.1fs(%u)", l ? ", " : "", name, (double)ns / 1e9, c);
+    }
+    if (l) { snprintf(buf + l, n - l, "%s", ""); }
+}
+
 static void *worker(void *a) {
     plat_thread_name("nxrt-build");
     (void)a;
@@ -763,7 +793,9 @@ static void *worker(void *a) {
         jobs_head = j->next;
         if (!jobs_head) jobs_tail = NULL;
         pthread_mutex_unlock(&jobs_lock);
+        uint64_t t0 = SDL_GetTicksNS();
         j->fn(j->arg);
+        job_kind_note(j->fn, SDL_GetTicksNS() - t0);
         free(j);
     }
     return NULL;
@@ -1045,6 +1077,15 @@ const char *renderer_stats(void) {
         snprintf(stats_text + l, sizeof stats_text - l, "; rec ms: draw %.1f, bind %.1f, push %.1f, resolve %.1f", rec_t_draw * cyc,
                  rec_t_bind * cyc, rec_t_push * cyc, rec_t_setup * cyc);
         rec_t_draw = rec_t_bind = rec_t_push = rec_t_setup = rec_t_pipe = 0;
+    }
+    {   // the build pool's work in the interval: a battle that spends a minute in "pipeline" is compiling, not drawing
+        extern void vk_jobs_text(char *buf, size_t n);
+        char jobs[160];
+        vk_jobs_text(jobs, sizeof jobs);
+        if (jobs[0]) {
+            size_t l = strlen(stats_text);
+            snprintf(stats_text + l, sizeof stats_text - l, "; jobs: %s", jobs);
+        }
     }
     stat_feedback_copies = stat_upload_bytes = 0;
     {
@@ -2207,10 +2248,13 @@ typedef struct {
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
 // (record.c, at the bind) the pipeline of a Pipe: NULL while it builds (wait: sleeps until it is done) or failed
+// Pipe state: 0 queued, 3 being built, 1 ready, 2 failed. 3 exists so that a draw which needs the pipeline *now* can
+// build it on the spot (draw_, below) and the queued job then finds it claimed instead of building it twice.
+#define PIPE_BUILDING 3
 static VkPipeline pipe_resolve(void *obj, bool wait) {
     Pipe *pp = obj;
     int st_;
-    while ((st_ = atomic_load(&pp->state)) == 0) {
+    while ((st_ = atomic_load(&pp->state)) == 0 || st_ == PIPE_BUILDING) {
         if (!wait) return VK_NULL_HANDLE;
         struct timespec ts = {0, 200000};
         nanosleep(&ts, NULL);
@@ -2402,6 +2446,8 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
 
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
+    int expect = 0;
+    if (!atomic_compare_exchange_strong(&pp->state, &expect, PIPE_BUILDING)) return;  // (already built, or built in line)
     PipeKey *k = &pp->k;
     PipeCI c;
     pipe_ci_fill(&c, k);
@@ -5061,6 +5107,10 @@ static void draw_(CmdRec *r, bool indexed) {
         int ps = atomic_load(&pp->state);
         if (ps == 2) { SKIP(SK_PIPE_FAILED); return; }
         if (ps != 1 && !rec_wait_pipes()) { SKIP(SK_PIPE_BUILDING); return; }
+        // Only queued (no worker has taken it yet): build it here, in this draw's order. Waiting in the recorder for a
+        // queued pipeline means waiting for every build ahead of it - a scene whose pipelines are new stood in black for
+        // 147 s, with 46,892 skipped draws of the one pipeline at the front of what the frame needed.
+        if (ps == 0) build_pipeline(pp);
     }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp)) { ss.pipe = pp; rec_CmdBindPipelineObj(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp); }
