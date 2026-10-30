@@ -28,6 +28,9 @@
 #include "../../nxgame.h"
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
+// Vertices and instances actually submitted (stat_draws counts calls): a pass whose time does not follow the draw
+// count is geometry- or instance-bound, and its ~37 us a draw is a vertex buffer, not a state change, to look at.
+static uint64_t stat_verts, stat_insts;
 static NxDraw g_draw;  // the draw as NxGameHooks sees it (runtime/nxgame.h)
 #define RECOLOUR_TINT_FLOATS 16  // NxGameHooks draw_tint / instance_tint
 // (the guest heap for shaders in chunks: with the heap import below)
@@ -378,6 +381,9 @@ static VkQueryPool gp_qp;
 static int gp_n;
 static char gp_label[512][112];
 static uint32_t gp_draws[512];
+// Per row, what the draws submitted: a 19 ms pass of 285 draws is either geometry (millions of vertices), instancing
+// (one draw, thousands of instances, full-screen overdraw) or fill (few of both and a big area) - the row says which.
+static uint64_t gp_verts[512], gp_insts[512];
 // NXRT_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with NXRT_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
 static char dl_ring[64][128];
@@ -409,7 +415,7 @@ static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(gp_label[gp_n], sizeof gp_label[0], fmt, ap);
     va_end(ap);
-    gp_draws[gp_n] = 0;
+    gp_draws[gp_n] = 0, gp_verts[gp_n] = 0, gp_insts[gp_n] = 0;
     gp_n++;
 }
 void renderer_flush(void);
@@ -423,7 +429,8 @@ void vk_gpuprof_report(void) {
         for (int i = 0; i + 1 < gp_n; i++) {
             double ms = (t[i + 1] - t[i]) * per;
             LOG("[gpuprof] %6.3f ms %5.1f%%  %s%s", ms, 100 * ms / (total > 0 ? total : 1), gp_label[i], gp_draws[i] ? "" : "\n");
-            if (gp_draws[i]) LOG(", %u draws\n", gp_draws[i]);
+            if (gp_draws[i]) LOG(", %u draws, %.2fM verts, %llu inst%s\n", gp_draws[i], (double)gp_verts[i] / 1e6,
+                                 (unsigned long long)gp_insts[i], gp_insts[i] > gp_draws[i] * 4 ? " (overdraw)" : "");
         }
     }
     gp_n = 0;
@@ -1026,6 +1033,10 @@ const char *renderer_stats(void) {
                  (unsigned long long)stat_sets, (unsigned long long)stat_set_reuse, (unsigned long long)stat_desc_writes,
                  (double)stat_cbuf_bytes / 1048576.0);
         stat_sets = stat_desc_writes = stat_cbuf_bytes = stat_set_reuse = 0;
+        size_t lv = strlen(stats_text);
+        snprintf(stats_text + lv, sizeof stats_text - lv, ", verts %.1fM (%llu inst)",
+                 (double)stat_verts / 1e6, (unsigned long long)stat_insts);
+        stat_verts = stat_insts = 0;
     }
     {   // the recorder's own time per call type (record.c), in ms of the interval: which driver call fills the budget
         extern uint64_t rec_t_draw, rec_t_bind, rec_t_pipe, rec_t_push, rec_t_setup;
@@ -1150,6 +1161,7 @@ const char *renderer_stats(void) {
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
+    stat_verts = stat_insts = 0;
     return stats_text;
 }
 
@@ -1463,6 +1475,10 @@ static void begin_pass(void) {
                 has_d ? da.imageLayout : sa.imageLayout, has_d ? da.loadOp : -1, has_s ? sa.loadOp : -1);
         else LOG(", no depth / stencil");
         LOG(", samples %u\n", pass_samples);
+    }
+    if (g_gpuprof_frame && gp_n > 0 && pass_samples > 1) {  // (the row is this pass's; MSAA multiplies its fill cost)
+        size_t l = strlen(gp_label[gp_n - 1]);
+        snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", %ux", pass_samples);
     }
     rec_CmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
@@ -5361,6 +5377,12 @@ static void draw_(CmdRec *r, bool indexed) {
             uint32_t rdyn[MAX_BIND], nrdyn = 0;
             VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii, rdyn, &nrdyn);
             rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, nrdyn, nrdyn ? rdyn : NULL);
+        }
+        stat_verts += (uint64_t)(use_index ? icount : count) * run_n[ri];
+        stat_insts += run_n[ri];
+        if (g_gpuprof_frame && gp_n) {  // (the row whose pass this draw belongs to)
+            gp_verts[gp_n - 1] += (uint64_t)(use_index ? icount : count) * run_n[ri];
+            gp_insts[gp_n - 1] += run_n[ri];
         }
         if (!use_index) rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else rec_CmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);

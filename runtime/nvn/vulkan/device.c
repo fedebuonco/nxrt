@@ -835,6 +835,68 @@ uint64_t vk_frame_counter(void) { return renderer_exec_frame(); }  // (the trans
 static float g_shot_crop[4] = {0, 0, 1, 1};
 static double last_fps_time;
 
+// ---- the Deck's clock and power (why a scene can decay without its draw counts moving)
+// Van Gogh splits 15 W between 4 CPU cores and 8 GPU CUs, and its GPU has three clock steps (200 / 1100 / 1600 MHz).
+// A battle that starts at 18 fps and settles at 5 with the same ~600 draws a frame is either a heavier scene (the pass
+// times explain it) or a lower clock (they do not). Sampling sclk once every 8 presents and reporting the interval's
+// floor, with slowPPT (the SoC's supply) and the edge temperature, turns that into a reading in the fps line:
+// "sclk 200-1600MHz" next to 40 ms passes is the GPU at its lowest step. -1 where the driver exposes nothing.
+static char g_deck_dir[128];  // (/sys/class/drm/card0/device/hwmon/hwmonN; resolved on first use)
+static int g_deck_sclk_min = -1, g_deck_sclk_last = -1, g_deck_ppt_max = -1, g_deck_temp_max = -1;
+
+static int deck_read(const char *leaf) {
+    char path[192];
+    if (!g_deck_dir[0]) {
+        for (int i = 0; i < 10 && !g_deck_dir[0]; i++) {
+            snprintf(path, sizeof path, "/sys/class/drm/card0/device/hwmon/hwmon%d/freq1_input", i);
+            FILE *f = fopen(path, "r");
+            if (!f) continue;
+            fclose(f);
+            snprintf(g_deck_dir, sizeof g_deck_dir, "/sys/class/drm/card0/device/hwmon/hwmon%d", i);
+        }
+        if (!g_deck_dir[0]) snprintf(g_deck_dir, sizeof g_deck_dir, "-");  // (not an AMD GPU: sampled once)
+    }
+    if (g_deck_dir[0] == '-' && !g_deck_dir[1]) return -1;
+    snprintf(path, sizeof path, "%s/%s", g_deck_dir, leaf);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    long v = -1;
+    if (fscanf(f, "%ld", &v) != 1) v = -1;
+    fclose(f);
+    return (int)v;
+}
+
+static void deck_clock_note(void) {  // once a present
+    static int n;
+    if (n++ % 8) return;  // (three file reads a second at 60 Hz: below the noise of what it measures)
+    int mhz = deck_read("freq1_input") / 1000000;
+    if (mhz > 0) {
+        if (g_deck_sclk_min < 0 || mhz < g_deck_sclk_min) g_deck_sclk_min = mhz;
+        g_deck_sclk_last = mhz;
+    }
+    int ppt = deck_read("power1_average") / 1000;  // (µW -> mW; slowPPT, the whole SoC's supply)
+    if (ppt > g_deck_ppt_max) g_deck_ppt_max = ppt;
+    int temp = deck_read("temp1_input") / 1000;  // (edge, °C)
+    if (temp > g_deck_temp_max) g_deck_temp_max = temp;
+}
+
+// "...; sclk min-lastMHz, ppt W, edge C" for the fps line (and resets the interval). Empty when nothing is exposed.
+static void deck_clock_text(char *buf, size_t n) {
+    buf[0] = 0;
+    if (g_deck_sclk_min < 0 && g_deck_ppt_max < 0) return;
+    size_t l = 0;
+    if (g_deck_sclk_min > 0) l += snprintf(buf + l, n - l, "; sclk %d-%dMHz", g_deck_sclk_min, g_deck_sclk_last);
+    if (g_deck_ppt_max > 0) l += snprintf(buf + l, n - l, ", ppt %d.%dW", g_deck_ppt_max / 1000, (g_deck_ppt_max % 1000) / 100);
+    if (g_deck_temp_max > 0) l += snprintf(buf + l, n - l, ", edge %dC", g_deck_temp_max);
+    if ((int)l > 0 && getenv("NXRT_NO_AC") == NULL) {
+        FILE *f = fopen("/sys/class/power_supply/ACAD/online", "r");  // (on battery the SoC also answers the battery's rate)
+        int ac = -1;
+        if (f) { if (fscanf(f, "%d", &ac) != 1) ac = -1; fclose(f); }
+        if (ac >= 0) snprintf(buf + l, n - l, ", %s", ac ? "ac" : "battery");
+    }
+    g_deck_sclk_min = -1, g_deck_ppt_max = -1, g_deck_temp_max = -1;
+}
+
 // The busiest threads since the last call: /proc/self/task/<tid>/stat's utime+stime delta, named from task/<tid>/comm.
 static void cpu_top_log(double dt) {
     static struct { int tid; unsigned long long ticks; char comm[17]; } prev[128];
@@ -1098,6 +1160,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     if (hitch_ms > 0 && prev_present > 0 && (now - prev_present) * 1000 > hitch_ms)
         LOG("[hitch] t=%.2f frame %llu gap %.0f ms\n", now, (unsigned long long)frame, (now - prev_present) * 1000);
     prev_present = now;
+    deck_clock_note();
     pp_mark(PP_REST);  // (the fps line itself is not counted)
     if (now - last_fps_time >= fps_iv) {
         // [cpu] the busiest threads of the last interval, by /proc/self/task/<tid>/stat: which side is short of time -
@@ -1109,9 +1172,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             if (last_pcache_save > 0 && now - last_pcache_save >= 120.0) { last_pcache_save = now; vk_pipeline_cache_save(); }
             else if (last_pcache_save <= 0) last_pcache_save = now;
         }
-        if (last_fps_time > 0)
-            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s%s)\n", now, (unsigned long long)frame,
-                frames / (now - last_fps_time), max_gap * 1000.0, NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "", renderer_stats(), pp_text());
+        if (last_fps_time > 0) {
+            char deck[96];
+            deck_clock_text(deck, sizeof deck);
+            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s%s)%s\n", now, (unsigned long long)frame,
+                frames / (now - last_fps_time), max_gap * 1000.0, NX_HOOK(scene_name) ? NX_HOOK(scene_name)() : "", renderer_stats(), pp_text(), deck);
+        }
         max_gap = 0;
         frames = 0;
         last_fps_time = now;
